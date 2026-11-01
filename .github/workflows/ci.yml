@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Rovox contributors
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheap checks first: no submodules, no Docker.
+  license:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: SPDX / copyright headers on every first-party source file
+        run: tools/check-license-headers.sh
+      - name: NOTICE.md mentions every submodule
+        run: tools/check-notice.sh
+      - name: docs/ must not be tracked (private design documents)
+        run: |
+          if git ls-files | grep -q '^docs/'; then
+            echo "::error::files under docs/ are tracked by git:"
+            git ls-files | grep '^docs/'
+            exit 1
+          fi
+
+  # Native runners for both architectures (no QEMU). The Docker `runtime` target configures, compiles and runs ctest
+  # inside the image build (see docker/Dockerfile), so a failing test fails this job.
+  build:
+    name: build-linux-${{ matrix.arch }}
+    needs: license
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4          # without submodules: the nested JUCE one needs the https rewrite
+      - name: Submodules (shallow, ssh -> https rewrite for nested JUCE)
+        run: tools/init-submodules.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      # ccache lives in a BuildKit cache mount (`RUN --mount=type=cache,target=/ccache`), which the gha layer cache
+      # does not export. Persist it through actions/cache + buildkit-cache-dance.
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache@v4
+        with:
+          path: ccache-mount
+          key: ccache-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.arch }}-
+      - name: Inject ccache into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: |
+            {"ccache-mount": {"target": "/ccache"}}
+          skip-extraction: ${{ steps.ccache.outputs.cache-hit }}
+
+      - name: Build runtime image (compile + ctest inside)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          load: true
+          tags: rovox:ci
+          build-args: ROVOX_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=build-${{ matrix.arch }}
+          cache-to: type=gha,scope=build-${{ matrix.arch }},mode=max
+
+      - name: Smoke test the runtime image
+        run: |
+          docker run --rm --network none rovox:ci --version
+          docker image inspect rovox:ci --format 'size={{.Size}}'

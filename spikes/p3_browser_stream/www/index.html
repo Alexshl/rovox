@@ -1,0 +1,112 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2026 Rovox contributors -->
+<meta charset="utf-8">
+<title>Rovox browser-stream spike</title>
+<style>
+  body { font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif; margin: 24px; background: #15171a; color: #e6e8eb; }
+  button, input { font: inherit; padding: 6px 12px; margin-right: 8px; }
+  pre { background: #0d0e10; padding: 12px; border-radius: 4px; }
+  .k { color: #7fd1e6; }
+</style>
+<h1>Rovox browser-stream spike</h1>
+<p>
+  <button id="connect">Connect + start audio</button>
+  <button id="play" disabled>Play</button>
+  <button id="stop" disabled>Stop</button>
+  <input id="seekpos" type="number" value="30" step="1" style="width:6em"> s
+  <button id="seek" disabled>Seek</button>
+  buffer target (ms): <input id="target" type="number" value="200" step="10" style="width:5em">
+</p>
+<pre id="status">not connected</pre>
+<script>
+"use strict";
+// AudioWorklet: ring buffer of decoded stereo frames, prefill to the jitter target, silence + counter on underrun.
+const workletSource = `
+class StreamPlayer extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.q = []; this.queued = 0; this.target = 0.2 * sampleRate; this.playing = false;
+    this.underruns = 0; this.played = 0; this.lastPos = 0; this.cur = null; this.curOff = 0;
+    this.port.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'pcm') { this.q.push(m); this.queued += m.l.length; }
+      else if (m.type === 'flush') { this.q = []; this.queued = 0; this.cur = null; this.playing = false; }
+      else if (m.type === 'target') { this.target = m.ms / 1000 * sampleRate; }
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0], L = out[0], R = out[1];
+    if (!this.playing && this.queued >= this.target) this.playing = true;
+    for (let i = 0; i < L.length; i++) {
+      if (this.playing) {
+        if (!this.cur || this.curOff >= this.cur.l.length) {
+          this.cur = this.q.shift(); this.curOff = 0;
+          if (!this.cur) { this.playing = false; this.underruns++; this.cur = null; }
+        }
+      }
+      if (this.playing && this.cur) {
+        L[i] = this.cur.l[this.curOff]; R[i] = this.cur.r[this.curOff];
+        this.lastPos = this.cur.pos + this.curOff; this.curOff++; this.queued--; this.played++;
+      } else { L[i] = 0; R[i] = 0; }
+    }
+    if ((currentFrame & 0x1fff) < 128) this.port.postMessage({ underruns: this.underruns, queued: this.queued, pos: this.lastPos });
+    return true;
+  }
+}
+registerProcessor('stream-player', StreamPlayer);`;
+
+const $ = (id) => document.getElementById(id);
+let ws, ctx, node, decoder, epoch = -1, stats = { packets: 0, stale: 0, decErrors: 0, underruns: 0, queuedMs: 0, posS: 0, state: 'stopped' };
+
+function show() {
+  $('status').textContent =
+    `state      ${stats.state}\nepoch      ${epoch}\npackets    ${stats.packets}  (stale dropped: ${stats.stale}, decode errors: ${stats.decErrors})\n` +
+    `buffer     ${stats.queuedMs.toFixed(0)} ms   underruns: ${stats.underruns}\nplayhead   ${stats.posS.toFixed(3)} s\n` +
+    `codec      ${('AudioDecoder' in window) ? 'WebCodecs opus' : 'WebCodecs NOT available (fallback needed: opus-decoder WASM)'}\n` +
+    `outputLatency ${ctx ? ((ctx.outputLatency || 0) * 1000).toFixed(0) : '-'} ms, baseLatency ${ctx ? (ctx.baseLatency * 1000).toFixed(0) : '-'} ms`;
+}
+
+async function connect() {
+  ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletSource], { type: 'text/javascript' })));
+  node = new AudioWorkletNode(ctx, 'stream-player', { outputChannelCount: [2] });
+  node.connect(ctx.destination);
+  node.port.onmessage = (e) => { stats.underruns = e.data.underruns; stats.queuedMs = e.data.queued / 48; stats.posS = e.data.pos / 48000; show(); };
+  decoder = new AudioDecoder({
+    output: (ad) => {
+      const l = new Float32Array(ad.numberOfFrames), r = new Float32Array(ad.numberOfFrames);
+      ad.copyTo(l, { planeIndex: 0, format: 'f32-planar' }); ad.copyTo(r, { planeIndex: 1, format: 'f32-planar' });
+      ad.close();
+      node.port.postMessage({ type: 'pcm', l, r, pos: pendingPos.shift() }, [l.buffer, r.buffer]);
+    },
+    error: () => { stats.decErrors++; },
+  });
+  decoder.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+  const pendingPos = [];
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { for (const id of ['play', 'stop', 'seek']) $(id).disabled = false; };
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const m = JSON.parse(e.data);
+      if (m.type === 'transport') { epoch = m.epoch; stats.state = m.state; node.port.postMessage({ type: 'flush' }); decoder.reset(); decoder.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 }); pendingPos.length = 0; }
+      show(); return;
+    }
+    const dv = new DataView(e.data);
+    const pktEpoch = dv.getUint16(4, true);
+    if (pktEpoch < epoch) { stats.stale++; return; }            // old epoch: drop
+    stats.packets++;
+    const pos = Number(dv.getBigUint64(12, true));
+    pendingPos.push(pos);
+    decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: pos * 1e6 / 48000, data: new Uint8Array(e.data, 28) }));
+  };
+  show();
+}
+
+$('connect').onclick = connect;
+$('play').onclick = () => { ctx.resume(); ws.send(JSON.stringify({ cmd: 'play' })); };
+$('stop').onclick = () => ws.send(JSON.stringify({ cmd: 'stop' }));
+$('seek').onclick = () => ws.send(JSON.stringify({ cmd: 'seek', position_s: Number($('seekpos').value) }));
+$('target').onchange = () => node && node.port.postMessage({ type: 'target', ms: Number($('target').value) });
+</script>

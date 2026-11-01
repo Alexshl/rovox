@@ -50,5 +50,5 @@ if(ROVOX_BUILD_TESTS)
 endif()
 
 if(ROVOX_BUILD_SPIKES)
-    add_subdirectory(spikes/p1_headless)
+    add_subdirectory(spikes)
 endif()

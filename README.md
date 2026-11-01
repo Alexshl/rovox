@@ -15,6 +15,22 @@ The name nods to Roland.
 
 Phase 0: research and design. No code yet.
 
+## Building
+
+Everything builds and tests inside Docker (Linux amd64 and arm64).
+
+```
+tools/init-submodules.sh                 # shallow submodules; see the note below
+tools/build-in-docker.sh runtime rovox   # configure, compile, ctest, minimal runtime image
+docker run --rm rovox --version
+tools/check-license-headers.sh           # SPDX headers on every first-party source file
+```
+
+Anonymous clones: Tracktion Engine declares its nested JUCE submodule with an ssh URL (`git@github.com:juce-framework/JUCE.git`).
+`tools/init-submodules.sh` rewrites it to https for that one command (`git -c url.https://github.com/.insteadOf=git@github.com:`),
+so no fork and no change to your git config is needed. The Docker toolchain image sets the same rewrite system-wide.
+CI uses the same script (`.github/workflows/ci.yml`).
+
 ## Stack
 
 C++ on [Tracktion Engine](https://github.com/Tracktion/tracktion_engine) and [JUCE](https://juce.com).
