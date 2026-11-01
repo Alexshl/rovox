@@ -3,6 +3,7 @@
 
 #include "EngineHost.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace rovox
@@ -116,17 +117,43 @@ EngineHost::EngineHost (const EngineConfig& c) : config_ (c), budget_ (rovox::cp
 
     if (config_.audio == AudioMode::Device)
         setAudioMode (AudioMode::Device);
+    else if (config_.audio == AudioMode::BrowserStream)
+        stream_ = std::make_unique<BrowserStream> (*engine_);
 }
 
 EngineHost::~EngineHost()
 {
+    if (stream_ != nullptr)
+        engine_->getDeviceManager().closeDevices();         // no more callbacks into the stream
+
+    stream_.reset();
     engine_.reset();
+}
+
+Result<fs::path> EngineHost::checkPath (const fs::path& p) const
+{
+    if (! config_.restrictPaths)
+        return p;
+
+    std::error_code ec;
+    const auto resolved = fs::weakly_canonical (fs::absolute (p), ec);
+    auto inside = [&] (const fs::path& root)
+    {
+        const auto r = fs::weakly_canonical (root, ec);
+        auto [a, b] = std::mismatch (r.begin(), r.end(), resolved.begin(), resolved.end());
+        return a == r.end();
+    };
+
+    if (! ec && (inside (config_.dataDir) || std::any_of (config_.allowedRoots.begin(), config_.allowedRoots.end(), inside)))
+        return resolved;
+
+    return makeError (errc::forbiddenPath, "path is outside the allowed directories: " + p.string(), json { { "path", p.string() } });
 }
 
 Result<void> EngineHost::setAudioMode (AudioMode mode)
 {
     if (mode == AudioMode::BrowserStream)
-        return makeError (errc::unsupported, "audio mode browser-stream is not part of milestone M1");
+        return config_.audio == AudioMode::BrowserStream ? Result<void>() : Result<void> (makeError (errc::preconditionFailed, "the engine was created without the browser-stream device"));
 
     if (mode == AudioMode::Device)
     {

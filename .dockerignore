@@ -11,3 +11,5 @@ third_party/tracktion_engine/tutorials
 third_party/tracktion_engine/tests
 third_party/tracktion_engine/modules/juce/examples
 third_party/tracktion_engine/modules/juce/docs
+web/node_modules
+web/dist

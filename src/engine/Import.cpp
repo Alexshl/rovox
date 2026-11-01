@@ -601,6 +601,14 @@ void registerImportCommands (CommandRegistry& r)
             auto o = importOptionsFrom (params);
             auto sources = importSourcesFrom (params);
 
+            for (auto& source : sources)
+            {
+                auto allowed = p.host().checkPath (source);
+
+                if (! allowed.ok())
+                    return allowed.error();
+            }
+
             auto plan = planImport (sources, p.mediaDir(), o);
 
             if (! plan.ok())

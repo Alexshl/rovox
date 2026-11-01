@@ -683,6 +683,11 @@ Result<StartedJob> JobService::startImportPlan (const JobContextInfo& who, const
 
     const auto options = importOptionsFrom (args);
     const auto sources = importSourcesFrom (args);
+
+    for (auto& source : sources)
+        if (auto allowed = projects_.host().checkPath (source); ! allowed.ok())
+            return allowed.error();
+
     const auto mediaDir = info.value().mediaDir;
     const auto tenant = who.tenant, projectId = who.projectId;
 

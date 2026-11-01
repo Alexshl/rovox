@@ -49,8 +49,15 @@ json clipJson (Project& p, te::Clip& c)
     if (auto* t = c.getClipTrack())
         j["track_id"] = Project::idOf (t->state);
 
+    j["offset_s"] = c.getPosition().getOffset().inSeconds();
+
     if (auto* a = dynamic_cast<te::AudioClipBase*> (&c))
+    {
         j["file"] = toStd (a->getOriginalFile().getFileName());
+        j["fade_in_s"] = a->getFadeIn().inSeconds();
+        j["fade_out_s"] = a->getFadeOut().inSeconds();
+        j["gain_db"] = (double) a->getGainDB();
+    }
 
     return j;
 }
@@ -249,7 +256,9 @@ void registerItemCommands (CommandRegistry& r)
 
     r.add (makeProjectCommand ("item.update",
         obj ({ { "item_id", strMin (1) }, { "name", strMin (1) }, { "start_s", numMin (0) }, { "start", timePosSchema() }, { "length_s", numMin (0.001) },
-               { "length", durationSchema() }, { "mute", boolean() } }, { "item_id" }),
+               { "length", durationSchema() }, { "mute", boolean() },
+               { "trim_start_s", numMin (0) }, { "trim_end_s", numMin (0) }, { "fade_in_s", numMin (0) }, { "fade_out_s", numMin (0) }, { "gain_db", { { "type", "number" }, { "minimum", -100 }, { "maximum", 24 } } } },
+             { "item_id" }),
         anyObject(), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
@@ -293,6 +302,46 @@ void registerItemCommands (CommandRegistry& r)
 
             if (length)
                 clip->setLength (te::TimeDuration::fromSeconds (*length), false);
+
+            // trimming keeps the audio where it is on the timeline: only the visible window changes
+            if (params.contains ("trim_start_s"))
+            {
+                const auto end = clip->getPosition().getEnd();
+                const auto s = te::TimePosition::fromSeconds (params["trim_start_s"].get<double>());
+
+                if (s >= end)
+                    return makeError (errc::invalidParams, "trim_start_s must be before the end of the item", json { { "path", "/trim_start_s" } });
+
+                clip->setStart (s, true, false);
+            }
+
+            if (params.contains ("trim_end_s"))
+            {
+                const auto e = te::TimePosition::fromSeconds (params["trim_end_s"].get<double>());
+
+                if (e <= clip->getPosition().getStart())
+                    return makeError (errc::invalidParams, "trim_end_s must be after the start of the item", json { { "path", "/trim_end_s" } });
+
+                clip->setEnd (e, true);
+            }
+
+            if (auto* audio = dynamic_cast<te::AudioClipBase*> (clip))
+            {
+                if (params.contains ("gain_db"))
+                    audio->setGainDB (params["gain_db"].get<float>());
+
+                const double lengthNow = audio->getPosition().getLength().inSeconds();
+
+                if (params.contains ("fade_in_s"))
+                    audio->setFadeIn (te::TimeDuration::fromSeconds (std::min (params["fade_in_s"].get<double>(), lengthNow)));
+
+                if (params.contains ("fade_out_s"))
+                    audio->setFadeOut (te::TimeDuration::fromSeconds (std::min (params["fade_out_s"].get<double>(), lengthNow)));
+            }
+            else if (params.contains ("gain_db") || params.contains ("fade_in_s") || params.contains ("fade_out_s"))
+            {
+                return makeError (errc::invalidParams, "gain and fades apply to audio items only");
+            }
 
             return json { { "item", clipJson (p, *clip) } };
         }));

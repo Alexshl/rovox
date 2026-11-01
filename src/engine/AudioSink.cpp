@@ -120,6 +120,7 @@ public:
 
     std::int64_t totalFrames() const override   { return reader_->lengthInSamples; }
     unsigned channels() const override          { return reader_->numChannels; }
+    double sampleRate() const override          { return reader_->sampleRate; }
 
     const float* const* read (std::int64_t start, int n) override
     {

@@ -6,7 +6,6 @@ add_subdirectory(p1_headless)
 # One multi-call binary for spikes P2..P5 (plugins, stream, mcp, bench): compiling
 # JUCE + Tracktion once instead of four times.
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 
 juce_add_console_app(rovox_spikes
     PRODUCT_NAME "rovox_spikes"

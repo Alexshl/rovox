@@ -30,6 +30,7 @@ inline constexpr const char* cancelled           = "CANCELLED";
 inline constexpr const char* notImplemented      = "NOT_IMPLEMENTED";
 inline constexpr const char* serverRestarted     = "SERVER_RESTARTED";
 inline constexpr const char* resyncRequired      = "RESYNC_REQUIRED";
+inline constexpr const char* forbiddenPath       = "FORBIDDEN_PATH";
 } // namespace errc
 
 struct Error

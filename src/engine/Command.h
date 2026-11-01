@@ -26,6 +26,7 @@ struct CommandContext
     std::optional<std::uint64_t> ifRevision;    // optimistic concurrency: REVISION_CONFLICT if the project moved on
     std::string undoLabel;                      // empty = generated from the command name
     bool dryRun = false;                        // validate only, apply nothing
+    bool coalesce = false;                      // continue the previous undo step if it is the latest of this session (gestures: dragging a fader)
 };
 
 struct CommandResult

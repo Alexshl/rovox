@@ -1,0 +1,31 @@
+{
+  "name": "rovox-web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "tokens": "node scripts/gen-tokens.mjs",
+    "dev": "vite",
+    "build": "node scripts/gen-tokens.mjs && tsc --noEmit && vite build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/barlow-condensed": "^5.2.0",
+    "@fontsource/ibm-plex-mono": "^5.2.0",
+    "@fontsource/ibm-plex-sans": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/audioworklet": "^0.0.77",
+    "@types/dom-webcodecs": "^0.1.15",
+    "@types/node": "^26.6.6",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  },
+  "optionalDependencies": {
+    "canvas": "^3.2.3"
+  }
+}

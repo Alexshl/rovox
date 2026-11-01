@@ -596,6 +596,9 @@ void registerRppCommands (CommandRegistry& r)
         { { "type", "object" } }, true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
+            if (auto allowed = p.host().checkPath (params["path"].get<std::string>()); ! allowed.ok())
+                return allowed.error();
+
             auto report = importRpp (p, params["path"].get<std::string>(), { .copyMedia = params.value ("copy_media", true) });
 
             if (! report.ok())

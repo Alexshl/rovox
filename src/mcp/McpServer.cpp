@@ -64,7 +64,14 @@ Session::Session (std::string i, std::string s, std::string t) : id (std::move (
 
 Origin Session::origin() const
 {
-    return { Origin::Kind::mcp, shortId, "mcp:" + shortId };
+    // the client's own name ("Claude Code") is what the web UI shows next to the agent's changes; clientInfo is written once, at initialize
+    std::string label = "mcp:" + shortId;
+
+    if (initialized.load() && clientInfo.is_object() && clientInfo.contains ("name") && clientInfo["name"].is_string())
+        if (auto name = clientInfo["name"].get<std::string>(); ! name.empty() && name.size() <= 64)
+            label = name;
+
+    return { Origin::Kind::mcp, shortId, label };
 }
 
 std::uint64_t Session::push (json message)
@@ -926,7 +933,17 @@ json McpServer::readResource (Session& s, const std::string& uri, std::optional<
         }
 
         if (what == "transport")
-            return text ({ { "state", "stopped" }, { "position_s", 0.0 }, { "note", "transport control arrives with browser playback (M3)" } });
+        {
+            auto r = runCommand ("transport.get", json::object(), contextFor (s, project));
+
+            if (! r.ok)
+            {
+                error = r.error;
+                return json();
+            }
+
+            return text (r.data);
+        }
 
         for (const char* dir : { "renders/", "previews/" })
         {

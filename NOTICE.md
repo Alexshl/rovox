@@ -27,3 +27,15 @@ Installed from the distribution (Debian packages), not bundled. Linked dynamical
 | cpp-httplib | HTTP server and client | MIT |
 | libebur128 | ITU-R BS.1770-4 loudness | MIT |
 | LAME (libmp3lame) | MP3 encoding, dynamic linking | LGPL-2.1-or-later |
+| libopus | Opus encoding of the browser audio stream, dynamic linking | BSD-3-Clause |
+
+## Web UI (`web/`)
+
+Built in the Docker image (Node 22) and served as static files by `rovox serve`. Runtime content of the bundle:
+
+| Component | Use | License |
+|---|---|---|
+| Barlow Condensed (`@fontsource/barlow-condensed`) | display font, self-hosted woff2 | SIL OFL 1.1 |
+| IBM Plex Sans, IBM Plex Mono (`@fontsource/ibm-plex-*`) | UI and readout fonts, self-hosted woff2 | SIL OFL 1.1 |
+
+Build and test tools only (not shipped): Vite, TypeScript, Vitest, jsdom, node-canvas (optional, canvas tests) — MIT.

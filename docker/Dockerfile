@@ -7,8 +7,16 @@ FROM debian:bookworm-slim AS base
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libasound2 libatomic1 libfreetype6 libfontconfig1 \
-      libebur128-1 libmp3lame0 libcpp-httplib0.11 \
+      libebur128-1 libmp3lame0 libcpp-httplib0.11 libopus0 \
  && rm -rf /var/lib/apt/lists/*
+
+# ---- web: the browser UI (TypeScript, Vite); unit tests run here, the bundle is copied into the runtime image -----------
+FROM node:22-bookworm-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm test && npm run build
 
 # ---- toolchain: compilers and -dev packages --------------------------------
 FROM base AS toolchain
@@ -57,8 +65,11 @@ FROM base AS runtime
 RUN useradd --uid 10001 --create-home --home-dir /home/rovox --shell /usr/sbin/nologin rovox \
  && mkdir -p /data && chown 10001:10001 /data
 COPY --from=build /out/bin/rovox /usr/local/bin/rovox
+COPY --from=web /web/dist /usr/share/rovox/web
 USER 10001
 ENV ROVOX_DATA_DIR=/data
+# `rovox serve --bind 0.0.0.0` without a token generates one and prints it (task 350); set ROVOX_TOKEN to choose your own
+ENV ROVOX_GENERATE_TOKEN=1
 VOLUME /data
 EXPOSE 4810
 ENTRYPOINT ["rovox"]

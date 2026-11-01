@@ -17,6 +17,9 @@
 namespace rovox
 {
 
+class ProjectTransport;
+class ProjectMeters;
+
 /** gain / mute / solo of a project in the shared mix (task 100). M1 has no mixed output yet; the state is kept for the
     browser-stream device and for `playing_in_background`. */
 struct ProjectMixerStrip
@@ -73,6 +76,16 @@ public:
     std::vector<HistoryStep>& redoSteps()       { return redoSteps_; }
     std::map<std::string, json>& importPlans()  { return importPlans_; }
 
+    /** Transport and meters are created on first use (message thread). */
+    ProjectTransport& transport();
+    ProjectMeters& meters();
+
+    /** Highest revision a person accepted for the agent highlight (`agent.accept`). Not part of the undo history. */
+    std::atomic<std::uint64_t>& acceptedRevision()      { return acceptedRevision_; }
+
+    /** Publishes a non-revision event of this project (transport.changed ...); set by the ProjectManager. */
+    std::function<void (const json&)> onEvent;
+
     /** Saves edit.xml + rovox.json (revision pinned). Clears dirty. */
     Result<void> save (const SaveOptions& = {});
     Result<void> autosave();
@@ -102,6 +115,9 @@ private:
     std::atomic<std::uint64_t> revision_ { 0 };
     std::atomic<bool> dirty_ { false };
     std::atomic<int> activeJobs_ { 0 };
+    std::atomic<std::uint64_t> acceptedRevision_ { 0 };
+    std::unique_ptr<ProjectTransport> transport_;
+    std::unique_ptr<ProjectMeters> meters_;
     std::vector<HistoryStep> undoSteps_, redoSteps_;
     std::map<std::string, json> importPlans_;
     int lockFd_ = -1;

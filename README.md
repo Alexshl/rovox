@@ -13,10 +13,33 @@ The name nods to Roland.
 
 ## Status
 
-Milestone M2: a headless engine with a project format (`.rvx`), a command layer (undo, revisions, events), import of
+Milestone M3: a headless engine with a project format (`.rvx`), a command layer (undo, revisions, events), import of
 Zoom R20 `.zprj` folders, WAV files and REAPER `.RPP` projects, resumable uploads (tus), offline render with preflight
-checks and loudness measurement, and an MCP server (stdio and Streamable HTTP, protocol 2025-06-18) with jobs for long work.
-The web UI and plugin management come in later milestones.
+checks and loudness measurement, an MCP server (stdio and Streamable HTTP, protocol 2025-06-18) with jobs for long work, and a
+web DAW (arrange view, mixer, transport, render dialog) that plays through the browser and shows what an MCP agent changes, live.
+Plugin management comes in a later milestone.
+
+## Web UI
+
+```
+docker run --rm -p 4810:4810 -v rovox-data:/data -v ~/songs:/in:ro rovox serve --bind 0.0.0.0 --audio browser --allow-path /in
+# prints: generated access token ... open http://<host>:4810/?token=...      (or set ROVOX_TOKEN)
+```
+
+Open the printed URL. The shell is served by `rovox serve` itself (built from `web/`, TypeScript + Vite, Canvas for the arrange view,
+no UI framework), with COOP/COEP headers. Everything the UI does is a command of the same layer MCP uses; the page has one WebSocket
+(`/ws`) for commands, events, 30 Hz meters and playhead, and the Opus audio of the browser stream (`--audio browser`: 48 kHz stereo,
+decoded with WebCodecs, 150 ms jitter buffer; click "Увімкнути звук" once, the browser wants a gesture before it plays). With
+`--audio none` Play renders a 30 s preview and plays that file.
+Anything an MCP agent changes is tinted `agent-cyan`, with the agent's name; "Undo агента" takes back its last steps, "Прийняти" clears the tint.
+`--allow-path DIR` (repeatable, or `$ROVOX_ALLOWED_PATHS`) lists the server directories the API may read besides the data dir (a mounted `/in`);
+any other path is refused with `FORBIDDEN_PATH`. `GET /source` answers where the running source code is (AGPL section 13).
+
+```
+cd web && npm ci && npm test && npm run build      # dist/ is what `rovox serve --web-dir dist` serves
+python3 tools/web_e2e.py --token T stream --project "My song" --seconds 20     # packets, gaps, jitter, 150 ms underruns, from a plain client
+python3 tools/web_e2e.py --token T agent  --project "My song"                  # change things like Claude Code would, while the UI is open
+```
 
 ## Using it
 

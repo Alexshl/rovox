@@ -86,6 +86,7 @@ Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject l
     auto project = std::make_unique<Project> (host_, dir, std::move (loaded.manifest), std::move (loaded.editState),
                                               [this] (Project& p, const Project::PublishedEvent& e) { publish (p, e); });
     project->lockFd_ = lockFd;
+    project->onEvent = [this, raw = project.get()] (const json& e) { hub_.publish (raw->tenant(), raw->id(), e); };
 
     if (created)
     {
@@ -96,6 +97,7 @@ Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject l
     auto* raw = project.get();
     projects_[id] = std::move (project);
     refreshSnapshot (*raw);
+    hub_.publish (raw->tenant(), "", { { "type", "projects.changed" }, { "project_id", id }, { "change", "opened" } });
     return id;
 }
 
@@ -142,9 +144,28 @@ Result<std::string> ProjectManager::open (const std::string& target, const OpenO
 
         dir = projectDir (opts.tenant, target);
     }
+    else if (target.find ('/') != std::string::npos || target.rfind ('.', 0) == 0)
+    {
+        // anything that looks like a path is checked against the path policy before it is even looked at (no probing outside)
+        auto allowed = host_.checkPath (target);
+
+        if (! allowed.ok())
+            return allowed.error();
+
+        if (std::error_code probe; ! fs::exists (allowed.value(), probe))
+            return makeError (errc::notFound, "no project at " + target);
+
+        dir = allowed.value();
+        explicitPath = true;
+    }
     else if (std::error_code probe; fs::exists (target, probe))
     {
-        dir = target;
+        auto allowed = host_.checkPath (target);
+
+        if (! allowed.ok())
+            return allowed.error();
+
+        dir = allowed.value();
         explicitPath = true;
     }
     else if (auto byName = findDirByName (opts.tenant, target))
@@ -226,6 +247,7 @@ Result<void> ProjectManager::close (const std::string& id, SaveMode mode)
     else if (mode == SaveMode::autosave && it->second->dirty())
         result = it->second->autosave();
 
+    const auto tenant = it->second->tenant();
     projects_.erase (it);
 
     {
@@ -233,6 +255,7 @@ Result<void> ProjectManager::close (const std::string& id, SaveMode mode)
         snapshot_.erase (id);
     }
 
+    hub_.publish (tenant, "", { { "type", "projects.changed" }, { "project_id", id }, { "change", "closed" } });
     return result;
 }
 

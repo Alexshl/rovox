@@ -39,6 +39,9 @@ int main (int argc, char** argv)
     serve->add_option ("--audio", o.audio, "Audio mode: none | browser | device")->capture_default_str();
     serve->add_option ("--token", o.token, "Require 'Authorization: Bearer <token>' (default: $ROVOX_TOKEN)");
     serve->add_option ("--plugins", o.pluginsDir, "Extra plugin directory (VST3/LV2)");
+    serve->add_option ("--web-dir", o.webDir, "Built web UI (default: $ROVOX_WEB_DIR, else /usr/share/rovox/web)");
+    serve->add_option ("--allow-path", o.allowPaths, "Directory the API and MCP may read besides the data dir, e.g. a mounted /in (repeatable; default $ROVOX_ALLOWED_PATHS, ':' separated)");
+    serve->add_flag ("--generate-token", o.generateToken, "With --bind beyond loopback and no token: generate one and print it (the container image does this by default)");
     serve->add_option ("--config", o.config, "Config file (reserved)");
     serve->add_option ("--allow-origin", o.allowOrigins, "Browser Origin accepted by /mcp besides localhost (repeatable)");
     serve->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();

@@ -111,6 +111,10 @@ void ChangeCollector::valueTreePropertyChanged (juce::ValueTree& t, const juce::
     if (p == te::IDs::lastSignificantChange || p == prop::id || p == prop::revision || p == prop::schema)
         return;
 
+    // the playhead is written into the TRANSPORT node while the Edit plays: not a project change (it would bump the revision 30 times a second)
+    if (p == te::IDs::position && t.hasType (te::IDs::TRANSPORT))
+        return;
+
     record (t, &p, "update");
 }
 

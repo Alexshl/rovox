@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "BrowserStream.h"
 #include "Cgroup.h"
 #include "Tracktion.h"
 
@@ -24,6 +25,8 @@ struct EngineConfig
     AudioMode audio = AudioMode::None;
     fs::path pluginsDir;                    // extra search path for VST3/LV2 (mounted at /plugins in the container)
     bool scanPluginsOutOfProcess = false;   // true only in a process whose main() calls PluginScanChild::run first
+    bool restrictPaths = false;             // `serve`: paths from the API / MCP must lie under the data dir or an allowed root (task 350)
+    std::vector<fs::path> allowedRoots;     // besides the data dir (e.g. the /in mount of a container)
 };
 
 /** Data directory: explicit value, else $ROVOX_DATA_DIR, else $XDG_DATA_HOME/rovox, else $HOME/.local/share/rovox.
@@ -46,8 +49,15 @@ public:
     CpuBudget cpuBudget() const             { return budget_; }
     AudioMode audioMode() const             { return config_.audio; }
 
-    /** none: no device is ever opened; device: JUCE default device; browser-stream: not part of M1 (returns an error). */
+    /** none: no device is ever opened; device: JUCE default device; browser-stream: the engine was created with the stream device. */
     Result<void> setAudioMode (AudioMode);
+
+    /** The browser-stream device (nullptr unless the engine was created with AudioMode::BrowserStream). */
+    BrowserStream* stream()                 { return stream_.get(); }
+
+    /** Path policy (task 350): with restrictPaths, `p` is resolved (symlinks, `..`) and must lie below the data dir or an allowed
+        root, else FORBIDDEN_PATH. Without it every path passes (CLI, tests). Returns the resolved path. */
+    Result<fs::path> checkPath (const fs::path& p) const;
 
 private:
     // Declared first, destroyed last: JUCE needs to outlive everything below.
@@ -55,6 +65,7 @@ private:
     EngineConfig config_;
     CpuBudget budget_;
     std::unique_ptr<te::Engine> engine_;
+    std::unique_ptr<BrowserStream> stream_;
 };
 
 } // namespace rovox

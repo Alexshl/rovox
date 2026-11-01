@@ -37,6 +37,7 @@ public:
     virtual ~FloatReader() = default;
     virtual std::int64_t totalFrames() const = 0;
     virtual unsigned channels() const = 0;
+    virtual double sampleRate() const = 0;
     virtual const float* const* read (std::int64_t start, int numFrames) = 0;
 };
 

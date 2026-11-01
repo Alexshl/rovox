@@ -230,7 +230,8 @@ ROVOX_TEST (mcp, tools_list_has_schemas_unique_names_and_pagination)
     }
 
     for (auto* must : { "project.list", "project.new", "track.update", "item.split", "marker.upsert", "tempo.set", "fx.add", "fx.update", "undo", "batch", "render.start",
-                        "render.preview", "render.preflight", "job.get", "job.cancel", "project.diff", "events.poll", "events.subscribe", "analyze.audio", "import.plan" })
+                        "render.preview", "render.preflight", "job.get", "job.cancel", "project.diff", "events.poll", "events.subscribe", "analyze.audio", "import.plan",
+                        "transport.get", "transport.set", "mixer.get_meters", "agent.accept" })
         CHECK (names.count (must) == 1);
 
     // names with underscores are accepted too, for clients that dislike dots
@@ -310,7 +311,7 @@ ROVOX_TEST (mcp, every_mutating_call_is_one_named_undo_step_with_the_session_as_
     REQUIRE (upd["ok"] == true);
     auto history = h.data ("history.list", { { "project_id", id } });
     CHECK (history["undo"].size() == stepsBefore + 1);
-    CHECK (history["undo"].back()["label"] == "mcp:s1: balance");
+    CHECK (history["undo"].back()["label"] == "test: balance");        // the label is the client's own name (clientInfo), else mcp:<session>
     CHECK (history["undo"].back()["origin"]["kind"] == "mcp");
     CHECK (history["undo"].back()["origin"]["session"] == h.session->shortId);
 
@@ -1320,4 +1321,33 @@ ROVOX_TEST (mcp, reaper_compat_names_map_onto_the_rovox_tools)
     // off by default
     Harness plain;
     CHECK (plain.rpc ("tools/call", { { "name", "list_tracks" }, { "arguments", json::object() } }).contains ("error"));
+}
+
+ROVOX_TEST (mcp, transport_and_meter_tools_are_real_commands_not_reserved_stubs)
+{
+    Harness h;
+    const auto project = h.tool ("project.new", { { "name", "t" } })["data"]["project_id"].get<std::string>();
+
+    auto state = h.tool ("transport.get", { { "project_id", project } });
+    CHECK (state["ok"] == true);
+    CHECK (state["data"]["state"] == "stopped");
+    CHECK_NEAR (state["data"]["position_s"].get<double>(), 0.0, 1e-9);
+
+    // seeking and the loop work without an audio device; playing needs one and says so (not NOT_IMPLEMENTED)
+    auto seek = h.tool ("transport.set", { { "project_id", project }, { "position_s", 2.5 }, { "loop", { { "enabled", true }, { "start_s", 1.0 }, { "end_s", 3.0 } } } });
+    CHECK (seek["ok"] == true);
+    CHECK_NEAR (seek["data"]["position_s"].get<double>(), 2.5, 1e-6);
+    CHECK (seek["data"]["loop"]["enabled"] == true);
+
+    auto play = h.tool ("transport.set", { { "project_id", project }, { "state", "playing" } });
+    CHECK (play["ok"] == false);
+    CHECK (play["error"]["code"] == "PRECONDITION_FAILED");
+    CHECK (play["error"]["message"].get<std::string>().find ("--audio browser") != std::string::npos);
+
+    auto meters = h.tool ("mixer.get_meters", { { "project_id", project } });
+    CHECK (meters["ok"] == true);
+    CHECK (meters["data"]["tracks"].is_array());
+
+    auto accepted = h.tool ("agent.accept", { { "project_id", project }, { "up_to_revision", 5 } });
+    CHECK (accepted["data"]["accepted_revision"] == 5);
 }

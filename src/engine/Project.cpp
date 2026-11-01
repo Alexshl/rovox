@@ -3,6 +3,8 @@
 
 #include "Project.h"
 
+#include "Transport.h"
+
 #include <unistd.h>
 
 namespace rovox
@@ -48,11 +50,33 @@ Project::Project (EngineHost& host, fs::path dir, Manifest manifest, juce::Value
 
 Project::~Project()
 {
+    transport_.reset();
+    meters_.reset();
+
+    if (auto* s = host_.stream())
+        s->forget (edit_.get());
+
     collector_.reset();
     edit_.reset();
 
     if (lockFd_ >= 0)
         ::close (lockFd_);
+}
+
+ProjectTransport& Project::transport()
+{
+    if (transport_ == nullptr)
+        transport_ = std::make_unique<ProjectTransport> (*this, [this] (const json& e) { if (onEvent) onEvent (e); });
+
+    return *transport_;
+}
+
+ProjectMeters& Project::meters()
+{
+    if (meters_ == nullptr)
+        meters_ = std::make_unique<ProjectMeters> (*this);
+
+    return *meters_;
 }
 
 std::string Project::name() const

@@ -258,8 +258,13 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
     auto& undo = project.edit().getUndoManager();
     const auto label = labelFor (ops, ctx);
 
+    // a gesture (fader drag) continues the previous undo step when that step is the newest one, was made by the same session
+    // and nothing else changed the project since
+    const bool coalesce = ctx.coalesce && mutating && ! manual && ! isBatch && ! project.undoSteps().empty()
+                          && project.undoSteps().back().revision == project.revision() && project.undoSteps().back().origin.session == ctx.origin.session;
+
     // 3. transaction + change scope
-    if (mutating && ! manual)
+    if (mutating && ! manual && ! coalesce)
         undo.beginNewTransaction (toJuce (label));
 
     project.collector().beginScope();
@@ -294,14 +299,14 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
         }
     }
 
-    if (failure.has_value() && mutating && ! manual)
+    if (failure.has_value() && mutating && ! manual && ! coalesce)
         undo.undoCurrentTransactionOnly();      // inside the scope: the rollback itself is not reported as a change
 
     auto changes = project.collector().endScope();
     const auto ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
 
     json logEntry { { "t", nowIso8601() }, { "origin", ctx.origin.toJson() }, { "name", isBatch ? "batch" : ops[0].name },
-                    { "params", isBatch ? json::array() : ActivityLog::redact (ops[0].params) }, { "duration_ms", ms } };
+                    { "params", isBatch ? json::array() : ActivityLog::redact (ops[0].params) }, { "duration_ms", ms }, { "mutating", mutating } };
 
     if (isBatch)
         for (auto& op : ops)
@@ -327,7 +332,11 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
         result.changes = std::move (changes);
 
         // history mirrors the UndoManager: undo/redo move steps between the stacks themselves (see commands)
-        if (! manual)
+        if (coalesce)
+        {
+            project.undoSteps().back().revision = result.revision;
+        }
+        else if (! manual)
         {
             project.undoSteps().push_back ({ result.revision, label, nowIso8601(), ctx.origin });
             project.redoSteps().clear();

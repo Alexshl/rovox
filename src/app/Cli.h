@@ -15,7 +15,9 @@ struct Options
 
     // serve
     int port = 4810;
-    std::string bind = "127.0.0.1", audio = "none", token, pluginsDir, config;
+    std::string bind = "127.0.0.1", audio = "none", token, pluginsDir, config, webDir;
+    std::vector<std::string> allowPaths;
+    bool generateToken = false;
 
     // mcp / serve
     std::string toolNames = "dots", sourceUrl;

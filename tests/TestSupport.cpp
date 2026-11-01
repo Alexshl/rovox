@@ -40,6 +40,12 @@ EngineHost& host()
     {
         EngineConfig c;
         c.dataDir = testRoot() / "data";
+
+        // the transport suite plays through the browser-stream device (a timer thread, no sound card)
+        if (const char* audio = std::getenv ("ROVOX_TEST_AUDIO"))
+            if (auto mode = parseAudioMode (audio))
+                c.audio = *mode;
+
         return c;
     }());
 

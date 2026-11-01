@@ -6,10 +6,14 @@
 #pragma once
 
 #include "CommandBus.h"
+#include "Peaks.h"
 #include "ProjectManager.h"
 #include "UploadStore.h"
 
+#include <atomic>
+#include <deque>
 #include <functional>
+#include <mutex>
 #include <memory>
 #include <thread>
 
@@ -18,12 +22,18 @@ namespace httplib { class Server; }
 namespace rovox
 {
 
+class Gateway;
+struct WsRequest;
+
 struct ServerOptions
 {
     std::string bind = "127.0.0.1";
     int port = 4810;                    // 0 = pick a free port (tests)
     std::string token;                  // empty = no authentication (loopback default); otherwise `Authorization: Bearer <token>`
     UploadLimits uploadLimits;
+    fs::path webDir;                    // the built web UI (index.html + assets); empty or missing = API only
+    std::string sourceUrl = "https://github.com/rovox/rovox";   // AGPL section 13: GET /source
+    std::vector<std::string> allowedOrigins;
 };
 
 class HttpServer
@@ -41,6 +51,9 @@ public:
     int port() const { return port_; }
     UploadStore& uploads() { return *uploads_; }
 
+    /** The WebSocket gateway answering `GET /ws` (set before start()); without one the upgrade is refused. */
+    void setGateway (Gateway* g) { gateway_ = g; }
+
 private:
     void installRoutes();
 
@@ -54,6 +67,13 @@ private:
     std::unique_ptr<httplib::Server> server_;
     std::thread thread_;
     int port_ = 0;
+    std::atomic<Gateway*> gateway_ { nullptr };
+    PeakStore peakStore_;
+    std::mutex authMutex_;
+    std::deque<std::chrono::steady_clock::time_point> authFailures_;     // rate limit on wrong tokens (task 350)
+
+    void noteAuthFailure();
+    bool tooManyAuthFailures();
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
 };
 

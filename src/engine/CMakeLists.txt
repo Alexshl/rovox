@@ -8,13 +8,17 @@ add_library(rovox_engine INTERFACE)
 
 target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/AudioSink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/BrowserStream.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ChangeCollector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandBus.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Commands.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsEdit.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CommandsTransport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/EngineHost.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Gateway.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/HttpServer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Import.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Peaks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginScan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Project.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ProjectFormat.cpp
@@ -22,7 +26,9 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/Render.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RenderJobs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RppImport.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/TimePos.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/TimePos.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/WebSocket.cpp)
 
 target_include_directories(rovox_engine INTERFACE ${CMAKE_CURRENT_SOURCE_DIR} ${ROVOX_LAME_INCLUDE})
 
@@ -48,5 +54,6 @@ target_link_libraries(rovox_engine INTERFACE
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags
     PkgConfig::HTTPLIB
+    PkgConfig::OPUS
     ${ROVOX_LAME_LIB}
     "-latomic")

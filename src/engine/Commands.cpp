@@ -589,6 +589,7 @@ void registerHistoryCommands (CommandRegistry& r)
 
 void registerImportCommands (CommandRegistry&);
 void registerEditCommands (CommandRegistry&);
+void registerTransportCommands (CommandRegistry&);
 
 void registerBuiltinCommands (CommandRegistry& r)
 {
@@ -599,6 +600,7 @@ void registerBuiltinCommands (CommandRegistry& r)
     registerHistoryCommands (r);
     registerImportCommands (r);
     registerEditCommands (r);
+    registerTransportCommands (r);
 }
 
 } // namespace rovox

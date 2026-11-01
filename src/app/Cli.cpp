@@ -5,6 +5,7 @@
 
 #include "CommandBus.h"
 #include "EngineHost.h"
+#include "Gateway.h"
 #include "HttpServer.h"
 #include "Import.h"
 #include "JobManager.h"
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <random>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -470,6 +472,39 @@ mcp::McpConfig mcpConfig (const Options& o)
     return c;
 }
 
+std::string newToken()
+{
+    static const char hex[] = "0123456789abcdef";
+    std::random_device rd;
+    std::string t;
+
+    for (int i = 0; i < 32; ++i)
+        t.push_back (hex[rd() % 16]);
+
+    return t;
+}
+
+/** --web-dir, $ROVOX_WEB_DIR, ../share/rovox/web next to the executable, /usr/share/rovox/web; the first that has an index.html. */
+fs::path resolveWebDir (const Options& o)
+{
+    std::vector<fs::path> candidates;
+
+    if (! o.webDir.empty())
+        candidates.emplace_back (o.webDir);
+
+    if (const char* env = std::getenv ("ROVOX_WEB_DIR"))
+        candidates.emplace_back (env);
+
+    candidates.push_back (toPath (juce::File::getSpecialLocation (juce::File::currentExecutableFile)).parent_path().parent_path() / "share" / "rovox" / "web");
+    candidates.emplace_back ("/usr/share/rovox/web");
+
+    for (auto& c : candidates)
+        if (fs::exists (c / "index.html"))
+            return c;
+
+    return {};
+}
+
 class ServeTimer : public juce::Timer
 {
 public:
@@ -518,8 +553,14 @@ int runServe (const Options& o)
     if (lockFd < 0)
         return fail ("cannot use data directory " + cfg.dataDir.string() + " (is it writable?)");
 
-    if (cfg.audio == AudioMode::BrowserStream)
-        return fail ("--audio browser is not part of milestone M1");
+    cfg.restrictPaths = true;
+
+    for (auto& p : o.allowPaths)
+        cfg.allowedRoots.emplace_back (p);
+
+    if (const char* env = std::getenv ("ROVOX_ALLOWED_PATHS"))
+        for (auto& p : split (env, ':'))
+            cfg.allowedRoots.emplace_back (p);
 
     std::signal (SIGTERM, onSignal);
     std::signal (SIGINT, onSignal);
@@ -538,11 +579,32 @@ int runServe (const Options& o)
     so.token = ! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : "");
 
     const bool loopback = o.bind == "127.0.0.1" || o.bind == "localhost" || o.bind == "::1";
+    bool generated = false;
+
+    if (! loopback && so.token.empty() && (o.generateToken || std::getenv ("ROVOX_GENERATE_TOKEN") != nullptr))
+    {
+        so.token = newToken();
+        generated = true;
+    }
 
     if (! loopback && so.token.empty())
         return fail ("--bind " + o.bind + " exposes the server beyond this machine: set --token (or ROVOX_TOKEN). Refusing to start without it.");
 
+    so.webDir = resolveWebDir (o);
+    so.allowedOrigins = o.allowOrigins;
+
+    if (! o.sourceUrl.empty())
+        so.sourceUrl = o.sourceUrl;
+    else if (const char* env = std::getenv ("ROVOX_SOURCE_URL"))
+        so.sourceUrl = env;
+
     HttpServer server (host, pm, bus, hub, so);
+    GatewayOptions gatewayOptions;
+    gatewayOptions.token = so.token;
+    gatewayOptions.allowedOrigins = o.allowOrigins;
+    gatewayOptions.sourceUrl = so.sourceUrl;
+    Gateway gateway (host, pm, bus, hub, executor, gatewayOptions);
+    server.setGateway (&gateway);
 
     auto mcpCfg = mcpConfig (o);
     mcpCfg.uploadBatchStatus = [&server] (const std::string& id) { return server.uploads().batchStatus (id); };
@@ -555,6 +617,13 @@ int runServe (const Options& o)
     std::cout << "rovox serving on http://" << o.bind << ":" << server.port() << "  (data " << cfg.dataDir.string() << ", audio " << toString (cfg.audio)
               << ", " << host.cpuBudget().cpus << " cpu" << (host.cpuBudget().cpus == 1 ? "" : "s") << (so.token.empty() ? "" : ", token required") << ")" << std::endl;
 
+    if (generated)
+        std::cout << "generated access token (set ROVOX_TOKEN to choose your own): " << so.token << "\n"
+                  << "open http://<host>:" << server.port() << "/?token=" << so.token << std::endl;
+
+    if (so.webDir.empty())
+        std::cout << "web UI not found (build web/ and pass --web-dir); the API, MCP and /ws are available" << std::endl;
+
     ServeTimer timer (pm, &server.uploads(), &mcpStack.server);
     timer.startTimer (200);
     juce::MessageManager::getInstance()->runDispatchLoop();
@@ -562,6 +631,7 @@ int runServe (const Options& o)
 
     std::cout << "rovox shutting down" << std::endl;
     mcpStack.server.shutdown();
+    gateway.shutdown();
     server.stop();
     pm.closeAll (SaveMode::autosave);       // dirty projects land in autosave/, ready for crash-style recovery on the next start
     ::close (lockFd);
