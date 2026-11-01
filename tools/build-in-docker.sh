@@ -15,6 +15,9 @@ shift $(( $# > 2 ? 2 : $# )) || true
 sha="$(git describe --always --dirty 2>/dev/null || echo unknown)"
 
 args=(--file docker/Dockerfile --target "$target" --tag "$tag" --build-arg "ROVOX_GIT_SHA=$sha")
+if [ -n "${ROVOX_BUILD_JOBS:-}" ]; then
+    args+=(--build-arg "ROVOX_BUILD_JOBS=$ROVOX_BUILD_JOBS")
+fi
 if [ -n "${PLATFORM:-}" ]; then
     args+=(--platform "$PLATFORM")
 fi

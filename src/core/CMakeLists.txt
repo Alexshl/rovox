@@ -1,8 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Rovox contributors
 
-add_library(rovox_core STATIC Version.cpp)
+add_library(rovox_core STATIC
+    ActivityLog.cpp
+    Cgroup.cpp
+    EventHub.cpp
+    Ids.cpp
+    Sha1.cpp
+    Sha256.cpp
+    UploadStore.cpp
+    JsonSchema.cpp
+    Loudness.cpp
+    RppParser.cpp
+    Version.cpp)
 target_include_directories(rovox_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(rovox_core PUBLIC nlohmann_json::nlohmann_json PkgConfig::EBUR128)
 target_compile_definitions(rovox_core PRIVATE
     ROVOX_VERSION="${PROJECT_VERSION}"
     ROVOX_GIT_SHA="${ROVOX_GIT_SHA}"

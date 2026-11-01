@@ -7,6 +7,7 @@ FROM debian:bookworm-slim AS base
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libasound2 libatomic1 libfreetype6 libfontconfig1 \
+      libebur128-1 libmp3lame0 libcpp-httplib0.11 \
  && rm -rf /var/lib/apt/lists/*
 
 # ---- toolchain: compilers and -dev packages --------------------------------
@@ -15,6 +16,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config git ca-certificates ccache \
       libasound2-dev libfreetype-dev libfontconfig1-dev libopus-dev \
+      nlohmann-json3-dev libcli11-dev libcpp-httplib-dev libebur128-dev libmp3lame-dev \
       libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxi-dev \
  && rm -rf /var/lib/apt/lists/*
 # Tracktion's nested JUCE submodule is declared with an ssh URL (git@github.com:...). Rewrite it to https so that
@@ -56,6 +58,7 @@ RUN useradd --uid 10001 --create-home --home-dir /home/rovox --shell /usr/sbin/n
  && mkdir -p /data && chown 10001:10001 /data
 COPY --from=build /out/bin/rovox /usr/local/bin/rovox
 USER 10001
+ENV ROVOX_DATA_DIR=/data
 VOLUME /data
 EXPOSE 4810
 ENTRYPOINT ["rovox"]

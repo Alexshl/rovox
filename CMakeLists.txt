@@ -41,7 +41,16 @@ string(STRIP "${ROVOX_TRACKTION_VERSION}" ROVOX_TRACKTION_VERSION)
 add_subdirectory("${ROVOX_TE_DIR}/modules/juce" third_party_juce)
 add_subdirectory("${ROVOX_TE_DIR}/modules" third_party_tracktion)
 
+find_package(nlohmann_json 3.9 REQUIRED)
+find_package(CLI11 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(HTTPLIB REQUIRED IMPORTED_TARGET cpp-httplib)
+pkg_check_modules(EBUR128 REQUIRED IMPORTED_TARGET libebur128)
+find_library(ROVOX_LAME_LIB NAMES mp3lame REQUIRED)
+find_path(ROVOX_LAME_INCLUDE lame/lame.h REQUIRED)
+
 add_subdirectory(src/core)
+add_subdirectory(src/engine)
 add_subdirectory(src/app)
 
 if(ROVOX_BUILD_TESTS)
