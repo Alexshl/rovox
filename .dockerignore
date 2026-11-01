@@ -1,0 +1,13 @@
+.git
+**/.git
+docs/
+build/
+.mcp.json
+.DS_Store
+third_party/tracktion_engine/docs
+third_party/tracktion_engine/doxygen
+third_party/tracktion_engine/examples
+third_party/tracktion_engine/tutorials
+third_party/tracktion_engine/tests
+third_party/tracktion_engine/modules/juce/examples
+third_party/tracktion_engine/modules/juce/docs
