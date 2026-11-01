@@ -21,11 +21,12 @@ target_sources(rovox_engine_tests PRIVATE
     render_test.cpp
     rpp_test.cpp
     upload_test.cpp
-    cli_test.cpp)
+    cli_test.cpp
+    mcp_test.cpp)
 
-target_link_libraries(rovox_engine_tests PRIVATE rovox_engine)
+target_link_libraries(rovox_engine_tests PRIVATE rovox_mcp)
 
-foreach(suite core engine project import render rpp upload cli)
+foreach(suite core engine project import render rpp upload cli mcp)
     add_test(NAME ${suite} COMMAND rovox_engine_tests ${suite})
 endforeach()
 

@@ -363,7 +363,8 @@ bool needsSixtySecondWorkaround (double lengthS)
 }
 
 Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange range, double tailS, double sampleRate,
-                           const juce::BigInteger& tracks, bool useMasterPlugins, double stallTimeoutS, bool applyWorkaround)
+                           const juce::BigInteger& tracks, bool useMasterPlugins, double stallTimeoutS, bool applyWorkaround,
+                           const RenderHooks* hooks, double progressFrom, double progressTo)
 {
     // Spike P5: a render of exactly 60.000 s never finishes (main thread parked in NodeRenderContext::renderNextBlock, 0-byte file).
     // Rendering one sample longer avoids it; the caller trims the extra sample (see renderEdit).
@@ -400,7 +401,7 @@ Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange r
     std::mutex m;
     std::condition_variable cv;
     bool finished = false;
-    std::atomic<bool> stalled { false };
+    std::atomic<bool> stalled { false }, cancelled { false };
 
     std::thread watchdog ([&]
     {
@@ -408,8 +409,18 @@ Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange r
         auto lastChange = std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> lock (m);
 
-        while (! cv.wait_for (lock, std::chrono::milliseconds (250), [&] { return finished; }))
+        while (! cv.wait_for (lock, std::chrono::milliseconds (100), [&] { return finished; }))
         {
+            if (hooks != nullptr && hooks->onProgress)
+                hooks->onProgress (progressFrom + (progressTo - progressFrom) * (double) progress.load(), "rendering");
+
+            if (hooks != nullptr && hooks->shouldCancel && hooks->shouldCancel())
+            {
+                cancelled = true;
+                task.signalJobShouldExit();
+                return;
+            }
+
             if (progress.load() != lastProgress)
             {
                 lastProgress = progress.load();
@@ -434,6 +445,12 @@ Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange r
 
     cv.notify_all();
     watchdog.join();
+
+    if (cancelled)
+    {
+        outFile.deleteFile();
+        return makeError (errc::cancelled, "the render was cancelled");
+    }
 
     if (stalled)
     {
@@ -469,6 +486,8 @@ struct OneOutput
     std::string fileName, trackName;        // e.g. "mix.wav"
     juce::BigInteger tracks;
     bool masterPlugins = true;
+    int index = 0;
+    double progressFrom = 0.0, progressTo = 1.0;
 };
 
 struct OutputResult
@@ -493,7 +512,15 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
     temps.files.push_back (rawPath);
     temps.files.push_back (partPath);
 
-    if (auto r = renderRawWav (edit, rawPath, range, req.tailS, sr, out.tracks, out.masterPlugins, req.stallTimeoutS); ! r.ok())
+    auto cancelRequested = [&] { return req.hooks.shouldCancel && req.hooks.shouldCancel(); };
+    auto progressAt = [&] (double f, const char* stage)
+    {
+        if (req.hooks.onProgress)
+            req.hooks.onProgress (out.progressFrom + (out.progressTo - out.progressFrom) * f, stage);
+    };
+
+    if (auto r = renderRawWav (edit, rawPath, range, req.tailS, sr, out.tracks, out.masterPlugins, req.stallTimeoutS, true, &req.hooks,
+                               out.progressFrom, out.progressFrom + (out.progressTo - out.progressFrom) * 0.7); ! r.ok())
         return r.error();
 
     // pass 1: measure the float render
@@ -512,6 +539,9 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
 
     for (std::int64_t pos = 0; pos < frameLimit;)
     {
+        if (cancelRequested())
+            return makeError (errc::cancelled, "the render was cancelled");
+
         const int n = (int) std::min<std::int64_t> (65536, frameLimit - pos);
         const auto* planar = reader.value()->read (pos, n);
 
@@ -520,6 +550,7 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
 
         before.add (planar, n);
         pos += n;
+        progressAt (0.7 + 0.15 * (double) pos / (double) std::max<std::int64_t> (1, frameLimit), "measuring");
     }
 
     const auto statsBefore = before.finish();
@@ -561,6 +592,9 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
 
     for (std::int64_t pos = 0; pos < frameLimit;)
     {
+        if (cancelRequested())
+            return makeError (errc::cancelled, "the render was cancelled");
+
         const int n = (int) std::min<std::int64_t> (65536, frameLimit - pos);
         const auto* planar = reader.value()->read (pos, n);
 
@@ -588,10 +622,14 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
 
         after.add (ptrs.data(), n);
 
+        if (req.hooks.audioTap)
+            req.hooks.audioTap (out.index, ptrs.data(), spec.channels, n);
+
         if (! sink.value()->write (ptrs.data(), n))
             return makeError (errc::io, "cannot write " + partPath.string());
 
         pos += n;
+        progressAt (0.85 + 0.15 * (double) pos / (double) std::max<std::int64_t> (1, frameLimit), "encoding");
     }
 
     if (! sink.value()->close())
@@ -676,6 +714,9 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
     if (res.failed)
         return res;                 // temp files are deleted: no file is published
 
+    if (cancelRequested())
+        return makeError (errc::cancelled, "the render was cancelled");
+
     const auto finalPath = ctx.rendersDir / out.fileName;
     std::error_code ec;
     fs::rename (partPath, finalPath, ec);
@@ -708,7 +749,13 @@ Result<json> renderEdit (te::Edit& edit, const RenderContext& ctx, const RenderR
     std::error_code ec;
     fs::create_directories (ctx.rendersDir, ec);
 
+    if (req.hooks.onProgress)
+        req.hooks.onProgress (0.01, "preflight");
+
     auto preflight = runPreflight (edit, req, range.value(), sr, ctx.rendersDir);
+
+    if (req.hooks.shouldCancel && req.hooks.shouldCancel())
+        return makeError (errc::cancelled, "the render was cancelled");
 
     auto failure = [&] (const PreflightReport& rep, const char* phase) -> Error
     {
@@ -805,8 +852,17 @@ Result<json> renderEdit (te::Edit& edit, const RenderContext& ctx, const RenderR
     json files = json::array(), stats = json::object(), statsBefore, loudness;
     PreflightReport all = preflight;
 
+    int outputIndex = 0;
+
     for (auto& o : outputs)
     {
+        if (req.hooks.shouldCancel && req.hooks.shouldCancel())
+            return makeError (errc::cancelled, "the render was cancelled");
+
+        o.index = outputIndex;
+        o.progressFrom = 0.05 + 0.93 * (double) outputIndex / (double) outputs.size();
+        o.progressTo = 0.05 + 0.93 * (double) (outputIndex + 1) / (double) outputs.size();
+        ++outputIndex;
         auto r = produce (edit, ctx, req, o, range.value(), sr, temps);
 
         if (! r.ok())

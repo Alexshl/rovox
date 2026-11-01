@@ -561,6 +561,30 @@ json obj (std::initializer_list<std::pair<const char*, json>> props, std::initia
 json str()      { return { { "type", "string" } }; }
 } // namespace
 
+ImportOptions importOptionsFrom (const json& params)
+{
+    ImportOptions o;
+    o.preset = params.value ("preset", "auto");
+    o.align = params.value ("align", "start");
+    o.takesMode = params.value ("takes_mode", "separate");
+
+    if (params.contains ("name_map"))
+        for (auto it = params["name_map"].begin(); it != params["name_map"].end(); ++it)
+            o.nameMap[it.key()] = it.value().get<std::string>();
+
+    return o;
+}
+
+std::vector<fs::path> importSourcesFrom (const json& params)
+{
+    std::vector<fs::path> sources;
+
+    for (auto& s : params["paths"])
+        sources.emplace_back (s.get<std::string>());
+
+    return sources;
+}
+
 void registerImportCommands (CommandRegistry& r)
 {
     registerRppCommands (r);
@@ -574,19 +598,8 @@ void registerImportCommands (CommandRegistry& r)
         obj ({ { "plan_id", str() } }), false,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
-            ImportOptions o;
-            o.preset = params.value ("preset", "auto");
-            o.align = params.value ("align", "start");
-            o.takesMode = params.value ("takes_mode", "separate");
-
-            if (params.contains ("name_map"))
-                for (auto it = params["name_map"].begin(); it != params["name_map"].end(); ++it)
-                    o.nameMap[it.key()] = it.value().get<std::string>();
-
-            std::vector<fs::path> sources;
-
-            for (auto& s : params["paths"])
-                sources.emplace_back (s.get<std::string>());
+            auto o = importOptionsFrom (params);
+            auto sources = importSourcesFrom (params);
 
             auto plan = planImport (sources, p.mediaDir(), o);
 

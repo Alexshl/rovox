@@ -114,8 +114,39 @@ void ChangeCollector::valueTreePropertyChanged (juce::ValueTree& t, const juce::
     record (t, &p, "update");
 }
 
+namespace
+{
+void collectIds (const juce::ValueTree& t, const juce::ValueTree& skip, std::set<std::string>& into)
+{
+    if (t == skip)
+        return;
+
+    if (t.hasProperty (prop::id))
+        into.insert (t[prop::id].toString().toStdString());
+
+    for (auto c : t)
+        collectIds (c, skip, into);
+}
+
+/** A node copied from another one (Tracktion's splitClip, duplicate ...) carries the id of its original: give it a fresh one. */
+void dropDuplicateIds (juce::ValueTree node, const std::set<std::string>& taken)
+{
+    if (node.hasProperty (prop::id) && taken.count (node[prop::id].toString().toStdString()) > 0)
+        node.removeProperty (prop::id, nullptr);
+
+    for (auto c : node)
+        dropDuplicateIds (c, taken);
+}
+} // namespace
+
 void ChangeCollector::valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child)
 {
+    {
+        std::set<std::string> taken;
+        collectIds (state_, child, taken);
+        dropDuplicateIds (child, taken);
+    }
+
     assignMissingIds (child);       // before recording, so that the event carries the new id
 
     if (prefixFor (child) != nullptr)

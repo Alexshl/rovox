@@ -70,6 +70,10 @@ struct ImportPlan
     static Result<ImportPlan> fromJson (const json&);
 };
 
+/** The options and source list of an `import.plan` request (used by the command and by the MCP job). `params` must have been validated. */
+ImportOptions importOptionsFrom (const json& params);
+std::vector<fs::path> importSourcesFrom (const json& params);
+
 /** Pure planning: expands folders (a `.zprj` folder or any directory) and files, probes, hashes and stages media. */
 Result<ImportPlan> planImport (const std::vector<fs::path>& sources, const fs::path& mediaDir, const ImportOptions&);
 

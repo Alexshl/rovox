@@ -8,6 +8,7 @@
 
 #include "Project.h"
 
+#include <functional>
 #include <set>
 
 namespace rovox
@@ -36,6 +37,15 @@ struct LoudnessOptions
     double truePeakCeilingDb = -1.0;    // normalize never lets the true peak pass this; the target is then reported as not reached
 };
 
+/** Optional hooks used by jobs: cancellation, progress and a tap on the final (post-gain) audio of each output, for analysis. */
+struct RenderHooks
+{
+    std::function<bool()> shouldCancel;                                         // polled about every 100 ms and between phases
+    std::function<void (double fraction, const std::string& stage)> onProgress; // fraction 0..1 of the whole render
+    /** Called block by block with the audio that is written to the file (planar float). outputIndex follows the outputs of the request (one per stem). */
+    std::function<void (int outputIndex, const float* const* planar, int channels, int frames)> audioTap;
+};
+
 struct RenderRequest
 {
     std::string name = "mix";                   // renders/<name>.<ext>, overwritten atomically
@@ -52,6 +62,7 @@ struct RenderRequest
     std::optional<std::string> seed;            // recorded in the metadata; the built-in engine is deterministic without it
     bool preflightOnly = false;
     double stallTimeoutS = 60;                  // a render that makes no progress for this long is cancelled
+    RenderHooks hooks;                          // a cancelled render returns CANCELLED and leaves no file behind
 };
 
 struct Finding
@@ -105,6 +116,7 @@ bool needsSixtySecondWorkaround (double lengthS);
 
 /** Writes a float WAV with the raw Tracktion render of a range; used by the render path and by the reproduction test. */
 Result<void> renderRawWav (te::Edit&, const fs::path& dest, te::TimeRange range, double tailS, double sampleRate,
-                           const juce::BigInteger& tracks, bool useMasterPlugins, double stallTimeoutS, bool applySixtySecondWorkaround = true);
+                           const juce::BigInteger& tracks, bool useMasterPlugins, double stallTimeoutS, bool applySixtySecondWorkaround = true,
+                           const RenderHooks* hooks = nullptr, double progressFrom = 0.0, double progressTo = 1.0);
 
 } // namespace rovox

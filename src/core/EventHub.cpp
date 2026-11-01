@@ -3,6 +3,8 @@
 
 #include "EventHub.h"
 
+#include <algorithm>
+
 namespace rovox
 {
 
@@ -67,11 +69,15 @@ std::shared_ptr<Subscription> EventHub::subscribe (SubscribeOptions o)
 std::uint64_t EventHub::publish (const std::string& tenant, const std::string& projectId, json body)
 {
     std::vector<std::shared_ptr<Subscription>> targets;
+    std::vector<Observer> observers;
     Event e;
 
     {
         std::lock_guard<std::mutex> lock (mutex_);
         e.id = nextId_++;
+
+        for (auto& o : observers_)
+            observers.push_back (o.second);
 
         for (auto it = subscribers_.begin(); it != subscribers_.end();)
         {
@@ -97,7 +103,24 @@ std::uint64_t EventHub::publish (const std::string& tenant, const std::string& p
         if (s->options().tenant == tenant && (s->options().projectId.empty() || s->options().projectId == projectId))
             s->push (e);
 
+    for (auto& o : observers)
+        o (e);
+
     return e.id;
+}
+
+int EventHub::addObserver (Observer o)
+{
+    std::lock_guard<std::mutex> lock (mutex_);
+    const int id = nextObserver_++;
+    observers_.emplace_back (id, std::move (o));
+    return id;
+}
+
+void EventHub::removeObserver (int id)
+{
+    std::lock_guard<std::mutex> lock (mutex_);
+    observers_.erase (std::remove_if (observers_.begin(), observers_.end(), [id] (auto& o) { return o.first == id; }), observers_.end());
 }
 
 } // namespace rovox

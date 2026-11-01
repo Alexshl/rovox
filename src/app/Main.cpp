@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
-// rovox: serve | render | import | upload | plugins | mcp | bench   (task 170). Every subcommand that changes a project
+// rovox: serve | render | import | upload | plugins | mcp | bench   (task 170; mcp and the MCP endpoint of serve are task 200). Every subcommand that changes a project
 // goes through the CommandBus, the same layer the server, MCP and the web UI use.
 
 #include "Cli.h"
@@ -40,6 +40,10 @@ int main (int argc, char** argv)
     serve->add_option ("--token", o.token, "Require 'Authorization: Bearer <token>' (default: $ROVOX_TOKEN)");
     serve->add_option ("--plugins", o.pluginsDir, "Extra plugin directory (VST3/LV2)");
     serve->add_option ("--config", o.config, "Config file (reserved)");
+    serve->add_option ("--allow-origin", o.allowOrigins, "Browser Origin accepted by /mcp besides localhost (repeatable)");
+    serve->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();
+    serve->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
+    serve->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (AGPL section 13; default $ROVOX_SOURCE_URL)");
     serve->callback ([&] { std::exit (rovox::cli::runServe (o)); });
 
     auto* render = app.add_subcommand ("render", "Render a project to an audio file with preflight and post-render checks");
@@ -90,8 +94,12 @@ int main (int argc, char** argv)
     plugins->add_option ("--path", o.pluginsDir, "Extra search path");
     plugins->callback ([&] { std::exit (rovox::cli::runPlugins (o)); });
 
-    auto* mcp = app.add_subcommand ("mcp", "MCP over stdio (milestone M2, not in this build)");
-    mcp->callback ([] { std::cerr << "rovox mcp is part of milestone M2 and is not available yet.\n"; std::exit (2); });
+    auto* mcp = app.add_subcommand ("mcp", "MCP over stdio: the same tools as 'serve', for Claude Code and other local clients");
+    mcp->add_option ("--plugins", o.pluginsDir, "Extra plugin directory (VST3/LV2)");
+    mcp->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();
+    mcp->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
+    mcp->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (default $ROVOX_SOURCE_URL)");
+    mcp->callback ([&] { std::exit (rovox::cli::runMcp (o)); });
 
     auto* bench = app.add_subcommand ("bench", "Resource benchmark (the spike binary rovox_spikes bench covers it for now)");
     bench->callback ([] { std::cerr << "rovox bench is not available yet; see spikes/p5_bench.\n"; std::exit (2); });

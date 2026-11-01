@@ -9,6 +9,7 @@
 #include "ProjectManager.h"
 #include "UploadStore.h"
 
+#include <functional>
 #include <memory>
 #include <thread>
 
@@ -31,6 +32,9 @@ public:
     HttpServer (EngineHost&, ProjectManager&, CommandBus&, EventHub&, ServerOptions);
     ~HttpServer();
 
+    /** Adds routes (MCP) before start(). The callback runs once, with the raw server. */
+    void mount (std::function<void (httplib::Server&)>);
+
     /** Binds and starts serving on a background thread. Fails (port in use, bad address) before returning. */
     Result<void> start();
     void stop();
@@ -45,6 +49,7 @@ private:
     CommandBus& bus_;
     EventHub& hub_;
     ServerOptions options_;
+    std::vector<std::function<void (httplib::Server&)>> mounts_;
     std::unique_ptr<UploadStore> uploads_;
     std::unique_ptr<httplib::Server> server_;
     std::thread thread_;

@@ -91,9 +91,20 @@ HttpServer::~HttpServer()
     stop();
 }
 
+void HttpServer::mount (std::function<void (httplib::Server&)> fn)
+{
+    mounts_.push_back (std::move (fn));
+}
+
 Result<void> HttpServer::start()
 {
     installRoutes();
+
+    for (auto& m : mounts_)
+        m (*server_);
+
+    // long-poll tool calls and SSE streams each hold a worker; the default pool (8) would starve ordinary requests
+    server_->new_task_queue = [] { return new httplib::ThreadPool (64); };
 
     if (options_.port == 0)
         port_ = server_->bind_to_any_port (options_.bind.c_str());
@@ -213,31 +224,41 @@ void HttpServer::installRoutes()
         runCommand (body["name"].get<std::string>(), body.value ("params", json::object()), contextFrom (body, req.matches[1]), res);
     });
 
-    svr.Get (R"(/api/projects/([^/]+)/renders/([^/]+))", [this] (const httplib::Request& req, httplib::Response& res)
+    for (const char* dirName : { "renders", "previews" })
     {
-        const auto name = safeFileName (req.matches[2]);
-        auto* project = projects_.find (req.matches[1], "local");
-
-        if (project == nullptr || name.empty() || name[0] == '.')
-            return reply (res, 404, { { "ok", false }, { "error", { { "code", errc::notFound }, { "message", "no such render" } } } });
-
-        const auto file = project->rendersDir() / name;
-        std::ifstream in (file, std::ios::binary);
-
-        if (! in)
-            return reply (res, 404, { { "ok", false }, { "error", { { "code", errc::notFound }, { "message", "no such render" } } } });
-
-        const auto size = fs::file_size (file);
-        res.set_content_provider (size, "application/octet-stream", [file] (size_t offset, size_t length, httplib::DataSink& sink)
+        const std::string dir = dirName;
+        svr.Get ("/api/projects/([^/]+)/" + dir + "/([^/]+)", [this, dir] (const httplib::Request& req, httplib::Response& res)
         {
-            std::ifstream f (file, std::ios::binary);
-            f.seekg ((std::streamoff) offset);
-            std::string buf (std::min<size_t> (length, 1 << 20), '\0');
-            f.read (buf.data(), (std::streamsize) buf.size());
-            sink.write (buf.data(), (size_t) f.gcount());
-            return true;
+            const auto name = safeFileName (req.matches[2]);
+            std::optional<fs::path> projectDir;      // the mutex-guarded snapshot: this runs on an HTTP thread, not the message thread
+
+            for (auto& summary : projects_.list ("local", true))
+                if (summary.id == req.matches[1])
+                    projectDir = summary.dir;
+
+            if (! projectDir || name.empty() || name[0] == '.')
+                return reply (res, 404, { { "ok", false }, { "error", { { "code", errc::notFound }, { "message", "no such file" } } } });
+
+            const auto file = *projectDir / dir / name;
+            std::ifstream in (file, std::ios::binary);
+
+            if (! in)
+                return reply (res, 404, { { "ok", false }, { "error", { { "code", errc::notFound }, { "message", "no such file" } } } });
+
+            const auto size = fs::file_size (file);
+            const auto ext = file.extension().string();
+            const std::string mime = ext == ".mp3" ? "audio/mpeg" : (ext == ".flac" ? "audio/flac" : (ext == ".wav" ? "audio/wav" : "application/octet-stream"));
+            res.set_content_provider (size, mime, [file] (size_t offset, size_t length, httplib::DataSink& sink)
+            {
+                std::ifstream f (file, std::ios::binary);
+                f.seekg ((std::streamoff) offset);
+                std::string buf (std::min<size_t> (length, 1 << 20), '\0');
+                f.read (buf.data(), (std::streamsize) buf.size());
+                sink.write (buf.data(), (size_t) f.gcount());
+                return true;
+            });
         });
-    });
+    }
 
     //==========================================================================
     // tus 1.0 uploads: core + creation + checksum + termination

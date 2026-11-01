@@ -17,6 +17,11 @@ struct Options
     int port = 4810;
     std::string bind = "127.0.0.1", audio = "none", token, pluginsDir, config;
 
+    // mcp / serve
+    std::string toolNames = "dots", sourceUrl;
+    bool reaperCompat = false;
+    std::vector<std::string> allowOrigins;
+
     // render
     std::string target, out, renderName, range, format, scope = "master", seed;
     double startS = -1, endS = -1, sampleRate = 0, tailS = 2.0, targetLufs = 0, toleranceLu = 1.0, truePeakCeiling = -1.0;
@@ -37,5 +42,6 @@ int runRender (const Options&);
 int runImport (const Options&);
 int runUpload (const Options&);
 int runPlugins (const Options&);
+int runMcp (const Options&);
 
 } // namespace rovox::cli

@@ -63,7 +63,7 @@ json pluginJson (te::Plugin& p)
 json trackJson (Project& project, te::Track& t)
 {
     json j { { "track_id", Project::idOf (t.state) }, { "name", toStd (t.getName()) }, { "color", colourToHex (t.getColour()) },
-             { "mute", t.isMuted (false) }, { "solo", t.isSolo (false) } };
+             { "mute", (bool) t.state.getProperty (te::IDs::mute, false) }, { "solo", (bool) t.state.getProperty (te::IDs::solo, false) } };
 
     if (auto* at = dynamic_cast<te::AudioTrack*> (&t))
     {
@@ -88,6 +88,10 @@ json trackJson (Project& project, te::Track& t)
     (void) project;
     return j;
 }
+
+/** Tracktion writes mute / solo through a CachedValue without an UndoManager, so they would not be part of the undo step. */
+void setMuteUndoable (te::Track& t, bool on)    { t.state.setProperty (te::IDs::mute, on, &t.edit.getUndoManager()); }
+void setSoloUndoable (te::Track& t, bool on)    { t.state.setProperty (te::IDs::solo, on, &t.edit.getUndoManager()); }
 
 Error trackNotFound (const std::string& id)     { return makeError (errc::notFound, "no track " + id, json { { "track_id", id } }); }
 
@@ -243,7 +247,12 @@ void registerTrackCommands (CommandRegistry& r)
                 if (dynamic_cast<te::AudioTrack*> (t) != nullptr || dynamic_cast<te::FolderTrack*> (t) != nullptr)
                     tracks.push_back (trackJson (p, *t));
 
-            return json { { "revision", p.revision() }, { "tracks", tracks } };
+            json out { { "revision", p.revision() }, { "tracks", tracks } };
+
+            if (auto vp = p.edit().getMasterVolumePlugin())
+                out["master"] = { { "track_id", "master" }, { "name", "Master" }, { "volume_db", (double) te::volumeFaderPositionToDB (vp->volume.get()) }, { "pan", (double) vp->pan.get() } };
+
+            return out;
         }));
 
     r.add (makeProjectCommand ("track.create",
@@ -265,8 +274,8 @@ void registerTrackCommands (CommandRegistry& r)
             if (params.contains ("volume_db"))  track->getVolumePlugin()->setVolumeDb (params["volume_db"].get<float>());
             if (params.contains ("pan"))        track->getVolumePlugin()->setPan (params["pan"].get<float>());
             if (params.contains ("color"))      track->setColour (*parseColour (params["color"].get<std::string>()));
-            if (params.value ("mute", false))   track->setMute (true);
-            if (params.value ("solo", false))   track->setSolo (true);
+            if (params.value ("mute", false))   setMuteUndoable (*track, true);
+            if (params.value ("solo", false))   setSoloUndoable (*track, true);
 
             return json { { "track_id", Project::idOf (track->state) } };
         }));
@@ -278,6 +287,24 @@ void registerTrackCommands (CommandRegistry& r)
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
             const auto id = params["track_id"].get<std::string>();
+
+            if (Project::isMaster (id))
+            {
+                auto vp = p.edit().getMasterVolumePlugin();
+
+                if (vp == nullptr)
+                    return makeError (errc::preconditionFailed, "the project has no master fader");
+
+                for (auto* key : { "name", "color", "mute", "solo" })
+                    if (params.contains (key))
+                        return makeError (errc::invalidParams, std::string (key) + " cannot be changed on the master track", json { { "path", std::string ("/") + key } });
+
+                if (params.contains ("volume_db"))  vp->setVolumeDb (params["volume_db"].get<float>());
+                if (params.contains ("pan"))        vp->setPan (params["pan"].get<float>());
+
+                return json { { "track_id", id } };
+            }
+
             auto* track = audioTrack (p, id);
 
             if (track == nullptr)
@@ -290,8 +317,8 @@ void registerTrackCommands (CommandRegistry& r)
             if (params.contains ("volume_db"))  track->getVolumePlugin()->setVolumeDb (params["volume_db"].get<float>());
             if (params.contains ("pan"))        track->getVolumePlugin()->setPan (params["pan"].get<float>());
             if (params.contains ("color"))      track->setColour (*parseColour (params["color"].get<std::string>()));
-            if (params.contains ("mute"))       track->setMute (params["mute"].get<bool>());
-            if (params.contains ("solo"))       track->setSolo (params["solo"].get<bool>());
+            if (params.contains ("mute"))       setMuteUndoable (*track, params["mute"].get<bool>());
+            if (params.contains ("solo"))       setSoloUndoable (*track, params["solo"].get<bool>());
 
             return json { { "track_id", id } };
         }));
@@ -561,6 +588,7 @@ void registerHistoryCommands (CommandRegistry& r)
 } // namespace
 
 void registerImportCommands (CommandRegistry&);
+void registerEditCommands (CommandRegistry&);
 
 void registerBuiltinCommands (CommandRegistry& r)
 {
@@ -570,6 +598,7 @@ void registerBuiltinCommands (CommandRegistry& r)
     registerMarkerCommands (r);
     registerHistoryCommands (r);
     registerImportCommands (r);
+    registerEditCommands (r);
 }
 
 } // namespace rovox

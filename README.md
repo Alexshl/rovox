@@ -13,9 +13,10 @@ The name nods to Roland.
 
 ## Status
 
-Milestone M1: a headless engine with a project format (`.rvx`), a command layer (undo, revisions, events), import of
-Zoom R20 `.zprj` folders, WAV files and REAPER `.RPP` projects, resumable uploads (tus), and offline render with preflight
-checks and loudness measurement. MCP, the web UI and plugin management come in later milestones.
+Milestone M2: a headless engine with a project format (`.rvx`), a command layer (undo, revisions, events), import of
+Zoom R20 `.zprj` folders, WAV files and REAPER `.RPP` projects, resumable uploads (tus), offline render with preflight
+checks and loudness measurement, and an MCP server (stdio and Streamable HTTP, protocol 2025-06-18) with jobs for long work.
+The web UI and plugin management come in later milestones.
 
 ## Using it
 
@@ -27,6 +28,21 @@ rovox import song.RPP --new "From REAPER"
 rovox serve --data-dir /data --bind 0.0.0.0                       # HTTP API, tus uploads, autosave; SIGTERM saves and exits
 rovox upload ZOOM0001.zprj --server http://host:4810 --token T    # resumable, run again after a dropped connection
 ```
+
+## MCP
+
+```
+rovox mcp --data-dir ~/rovox-data                 # stdio, for Claude Code:  claude mcp add rovox -- rovox mcp --data-dir ~/rovox-data
+rovox serve --token T                             # the same tools over Streamable HTTP at http://127.0.0.1:4810/mcp
+python3 tools/mcp_e2e.py --zprj /in/song.zprj --http http://127.0.0.1:4810/mcp --token T     # scripted end-to-end check
+```
+
+About 47 tools (`project.*`, `track.*`, `item.*`, `marker.*`, `tempo.*`, `fx.*`, `undo`/`redo`, `batch`, `render.*`, `analyze.audio`,
+`job.*`, `project.diff`, `events.*`). Every project tool takes `project_id`; ids are GUIDs, times are `{s}`, `{bar,beat,tick}` or `{qn}`,
+levels are in dB. One call is one undo step; `if_revision` guards against stale writes; responses carry `external_changes` (edits made by
+others since your last call). `render.start`, `render.preview`, `analyze.audio` and `import.plan` run as jobs: pass `wait_s` to wait,
+or poll `job.get`. `--tool-names underscore` lists `track_list` instead of `track.list`; `--reaper-compat` adds the tool names of the old
+REAPER bridge. Binding beyond loopback requires `--token`; browser `Origin` headers other than localhost are refused unless `--allow-origin` lists them.
 
 A render never silently produces a wrong file. Before rendering, `--check` verifies that every clip's media is readable, that
 every plugin loaded (a plugin that fails to load is bypassed by the engine without a word), and that MIDI tracks produce sound

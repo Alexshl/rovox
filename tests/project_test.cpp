@@ -746,6 +746,13 @@ ROVOX_TEST (project, every_mutating_command_is_exactly_one_step)
     std::ofstream (rppDir / "p.RPP") << "<REAPER_PROJECT 0.1\n  TEMPO 100 4 4 0\n  MARKER 1 1 \"m\" 0 0 1\n  <TRACK\n    NAME \"t\"\n    <ITEM\n      POSITION 0\n      LENGTH 1\n      <SOURCE WAVE\n        FILE \"a.wav\"\n      >\n    >\n  >\n>\n";
 
     auto firstTrack = [] (test::Env& e, const std::string& id) { return e.ok (id, "track.list")["tracks"][0]["track_id"]; };
+    auto anItem = [&] (test::Env& e, const std::string& id)
+    {
+        auto plan = e.ok (id, "import.plan", { { "paths", { (rppDir / "a.wav").string() } } });
+        e.ok (id, "import.apply", { { "plan_id", plan["plan_id"] } });
+        return e.ok (id, "item.list")["items"][0]["item_id"];
+    };
+    auto aPlugin = [&] (test::Env& e, const std::string& id) { return e.ok (id, "fx.add", { { "track_id", firstTrack (e, id) }, { "builtin", "compressor" } })["plugin_id"]; };
     const std::map<std::string, Params> cases = {
         { "track.create",   [] (test::Env&, const std::string&) { return json { { "name", "New" }, { "volume_db", -3 } }; } },
         { "track.update",   [&] (test::Env& e, const std::string& id) { return json { { "track_id", firstTrack (e, id) }, { "name", "Renamed" }, { "pan", 0.3 } }; } },
@@ -759,6 +766,18 @@ ROVOX_TEST (project, every_mutating_command_is_exactly_one_step)
         { "project.update", [] (test::Env&, const std::string&) { return json { { "name", "Renamed project" } }; } },
         { "import.apply",   [&] (test::Env& e, const std::string& id) { return json { { "plan_id", e.ok (id, "import.plan", { { "paths", { (rppDir / "a.wav").string() } } })["plan_id"] } }; } },
         { "import.rpp",     [&] (test::Env&, const std::string&) { return json { { "path", (rppDir / "p.RPP").string() } }; } },
+        { "item.update",    [&] (test::Env& e, const std::string& id) { return json { { "item_id", anItem (e, id) }, { "name", "Intro" }, { "start_s", 0.5 }, { "mute", true } }; } },
+        { "item.split",     [&] (test::Env& e, const std::string& id)
+          {
+              const auto item = anItem (e, id);
+              const auto info = e.ok (id, "item.list")["items"][0];
+              return json { { "item_id", item }, { "at_s", info["start_s"].get<double>() + info["length_s"].get<double>() / 2 } };
+          } },
+        { "item.delete",    [&] (test::Env& e, const std::string& id) { return json { { "item_id", anItem (e, id) } }; } },
+        { "marker.upsert",  [] (test::Env& e, const std::string& id) { return json { { "markers", json::array ({ { { "marker_id", e.ok (id, "marker.list")["markers"][0]["marker_id"] }, { "name", "Moved" }, { "time_s", 3.0 } },
+                                                                                                                     { { "name", "Fresh" }, { "time", { { "bar", 3 } } } } }) } }; } },
+        { "tempo.set",      [] (test::Env&, const std::string&) { return json { { "points", json::array ({ { { "bpm", 90.0 } }, { { "bpm", 140.0 }, { "bar", 5 } } }) } }; } },
+        { "fx.update",      [&] (test::Env& e, const std::string& id) { return json { { "plugin_id", aPlugin (e, id) }, { "enabled", false } }; } },
     };
 
     // a new mutating project command without a case here fails this test

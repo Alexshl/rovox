@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <thread>
 
 #include <fcntl.h>
@@ -36,11 +37,13 @@ fs::path cliBinary()
     return env != nullptr ? fs::path (env) : fs::path();
 }
 
-Process spawn (const std::vector<std::string>& args, const fs::path& dataDir)
+/** stdin is a pipe that carries `input` and then ends: no command can block on a terminal. */
+Process spawn (const std::vector<std::string>& args, const fs::path& dataDir, const std::string& input = {})
 {
-    int outPipe[2], errPipe[2];
+    int outPipe[2], errPipe[2], inPipe[2];
     REQUIRE (pipe (outPipe) == 0);
     REQUIRE (pipe (errPipe) == 0);
+    REQUIRE (pipe (inPipe) == 0);
     Process p;
     p.pid = fork();
 
@@ -48,6 +51,8 @@ Process spawn (const std::vector<std::string>& args, const fs::path& dataDir)
     {
         dup2 (outPipe[1], 1);
         dup2 (errPipe[1], 2);
+        dup2 (inPipe[0], 0);
+        close (inPipe[1]);
         close (outPipe[0]); close (errPipe[0]);
         setenv ("ROVOX_DATA_DIR", dataDir.c_str(), 1);
         unsetenv ("ROVOX_TOKEN");
@@ -65,6 +70,19 @@ Process spawn (const std::vector<std::string>& args, const fs::path& dataDir)
 
     close (outPipe[1]);
     close (errPipe[1]);
+    close (inPipe[0]);
+
+    for (size_t done = 0; done < input.size();)
+    {
+        const auto n = write (inPipe[1], input.data() + done, input.size() - done);
+
+        if (n <= 0)
+            break;
+
+        done += (size_t) n;
+    }
+
+    close (inPipe[1]);
     p.outFd = outPipe[0];
     p.errFd = errPipe[0];
     fcntl (p.outFd, F_SETFL, O_NONBLOCK);
@@ -124,9 +142,9 @@ int waitExit (Process& p, double timeoutS)
     return WIFEXITED (status) ? WEXITSTATUS (status) : 128 + WTERMSIG (status);
 }
 
-Process run (const std::vector<std::string>& args, const fs::path& dataDir, double timeoutS, int& exitCode)
+Process run (const std::vector<std::string>& args, const fs::path& dataDir, double timeoutS, int& exitCode, const std::string& input = {})
 {
-    auto p = spawn (args, dataDir);
+    auto p = spawn (args, dataDir, input);
     exitCode = waitExit (p, timeoutS);
     return p;
 }
@@ -317,14 +335,50 @@ ROVOX_TEST (cli, upload_to_a_running_server_and_resume)
     CHECK (waitExit (server, 10) == 0);
 }
 
-ROVOX_TEST (cli, mcp_and_bench_are_reported_as_not_available_in_m1)
+ROVOX_TEST (cli, mcp_speaks_json_rpc_on_stdout_and_exits_at_end_of_input)
 {
     if (! haveCli())
         return;
 
     int code = -1;
-    auto m = run ({ "mcp" }, test::makeTempDir ("d"), 20, code);
+    const std::string input =
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})" "\n"
+        R"({"jsonrpc":"2.0","id":1001,"method":"tools/call","params":{"name":"project.new","arguments":{"name":"from-cli"}}})" "\n"
+        R"({"jsonrpc":"2.0","id":"abc","method":"tools/list"})" "\n";
+    auto m = run ({ "mcp" }, test::makeTempDir ("d"), 60, code, input);
+    CHECK (code == 0);
+
+    std::istringstream lines (m.out);
+    std::string line;
+    int responses = 0;
+
+    while (std::getline (lines, line))
+    {
+        auto j = json::parse (line, nullptr, false);
+        REQUIRE (! j.is_discarded());          // nothing but JSON-RPC on stdout
+        ++responses;
+
+        if (j["id"] == 1001)
+            CHECK (j["result"]["structuredContent"]["data"]["project_id"].get<std::string>().rfind ("p_", 0) == 0);
+
+        if (j["id"] == "abc")
+            CHECK (j["result"]["tools"].size() >= 40);
+    }
+
+    CHECK (responses == 3);
+}
+
+ROVOX_TEST (cli, bench_is_reported_as_not_available_and_open_binds_need_a_token)
+{
+    if (! haveCli())
+        return;
+
+    int code = -1;
+    auto b = run ({ "bench" }, test::makeTempDir ("d"), 20, code);
     CHECK (code == 2);
-    CHECK (m.out.empty());          // stdout stays clean for the future JSON-RPC stream
-    CHECK (m.err.find ("M2") != std::string::npos);
+
+    auto exposed = run ({ "serve", "--bind", "0.0.0.0", "--port", "0" }, test::makeTempDir ("d"), 20, code);
+    CHECK (code == 1);
+    CHECK (exposed.err.find ("--token") != std::string::npos);
 }

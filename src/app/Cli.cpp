@@ -7,9 +7,13 @@
 #include "EngineHost.h"
 #include "HttpServer.h"
 #include "Import.h"
+#include "JobManager.h"
+#include "McpHttp.h"
+#include "McpStdio.h"
 #include "PluginScan.h"
 #include "ProjectManager.h"
 #include "Render.h"
+#include "RenderJobs.h"
 #include "Sha1.h"
 #include "Sha256.h"
 
@@ -423,10 +427,53 @@ int lockDataDir (const fs::path& dataDir, std::string& holderPid)
     return fd;
 }
 
+/** Jobs + MCP on top of the command layer; shared by `serve` and `mcp`. */
+struct McpStack
+{
+    McpStack (EngineHost& host, ProjectManager& pm, CommandBus& bus, EventHub& hub, MessageThreadExecutor& executor, mcp::McpConfig cfg)
+        : jobs (host.dataDir() / "jobs", pools (host), [&hub] (const JobInfo& i)
+          {
+              auto summary = i.toJson();
+              summary.erase ("result");
+              hub.publish (i.tenant, i.projectId, { { "type", "job.updated" }, { "job", summary } });
+          }),
+          service (pm, jobs, executor),
+          server (pm, bus, hub, jobs, service, std::move (cfg))
+    {}
+
+    ~McpStack() { jobs.shutdown(); }        // before the server goes: running jobs publish events
+
+    static JobPools pools (EngineHost& host)
+    {
+        JobPools p;
+        p.render = host.cpuBudget().cpus >= 2 ? 2 : 1;
+        return p;
+    }
+
+    JobManager jobs;
+    JobService service;
+    mcp::McpServer server;
+};
+
+mcp::McpConfig mcpConfig (const Options& o)
+{
+    mcp::McpConfig c;
+    c.underscoreNames = o.toolNames == "underscore";
+    c.reaperCompat = o.reaperCompat || std::getenv ("ROVOX_REAPER_COMPAT") != nullptr;
+    c.allowedOrigins = o.allowOrigins;
+
+    if (! o.sourceUrl.empty())
+        c.sourceUrl = o.sourceUrl;
+    else if (const char* env = std::getenv ("ROVOX_SOURCE_URL"))
+        c.sourceUrl = env;
+
+    return c;
+}
+
 class ServeTimer : public juce::Timer
 {
 public:
-    ServeTimer (ProjectManager& p, UploadStore& u) : projects (p), uploads (u) {}
+    ServeTimer (ProjectManager& p, UploadStore* u, mcp::McpServer* m = nullptr) : projects (p), uploads (u), mcpServer (m) {}
 
     void timerCallback() override
     {
@@ -441,7 +488,11 @@ public:
         if (ticks % 25 == 0)                // 5 s
         {
             projects.sweepExpired();
-            uploads.cleanup (std::time (nullptr));
+            if (uploads != nullptr)
+                uploads->cleanup (std::time (nullptr));
+
+            if (mcpServer != nullptr)
+                mcpServer->sweepSessions();
         }
 
         if (ticks % 300 == 0)               // 60 s
@@ -449,7 +500,8 @@ public:
     }
 
     ProjectManager& projects;
-    UploadStore& uploads;
+    UploadStore* uploads;
+    mcp::McpServer* mcpServer;
     int ticks = 0;
 };
 } // namespace
@@ -485,7 +537,17 @@ int runServe (const Options& o)
     so.port = o.port;
     so.token = ! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : "");
 
+    const bool loopback = o.bind == "127.0.0.1" || o.bind == "localhost" || o.bind == "::1";
+
+    if (! loopback && so.token.empty())
+        return fail ("--bind " + o.bind + " exposes the server beyond this machine: set --token (or ROVOX_TOKEN). Refusing to start without it.");
+
     HttpServer server (host, pm, bus, hub, so);
+
+    auto mcpCfg = mcpConfig (o);
+    mcpCfg.uploadBatchStatus = [&server] (const std::string& id) { return server.uploads().batchStatus (id); };
+    McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
+    server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .allowedOrigins = o.allowOrigins, .loopbackBind = loopback }); });
 
     if (auto started = server.start(); ! started.ok())
         return fail (started.error().message);
@@ -493,15 +555,57 @@ int runServe (const Options& o)
     std::cout << "rovox serving on http://" << o.bind << ":" << server.port() << "  (data " << cfg.dataDir.string() << ", audio " << toString (cfg.audio)
               << ", " << host.cpuBudget().cpus << " cpu" << (host.cpuBudget().cpus == 1 ? "" : "s") << (so.token.empty() ? "" : ", token required") << ")" << std::endl;
 
-    ServeTimer timer (pm, server.uploads());
+    ServeTimer timer (pm, &server.uploads(), &mcpStack.server);
     timer.startTimer (200);
     juce::MessageManager::getInstance()->runDispatchLoop();
     timer.stopTimer();
 
     std::cout << "rovox shutting down" << std::endl;
+    mcpStack.server.shutdown();
     server.stop();
     pm.closeAll (SaveMode::autosave);       // dirty projects land in autosave/, ready for crash-style recovery on the next start
     ::close (lockFd);
+    return 0;
+}
+
+//==============================================================================
+int runMcp (const Options& o)
+{
+    // stdout carries the protocol and nothing else; JUCE and Tracktion log to stderr
+    std::signal (SIGTERM, onSignal);
+    std::signal (SIGINT, onSignal);
+
+    EngineHost host (engineConfig (o, true));
+    EventHub hub;
+    ProjectManager pm (host, hub);
+    CommandRegistry registry;
+    registerBuiltinCommands (registry);
+    MessageThreadExecutor executor;
+    CommandBus bus (pm, registry, executor);
+    McpStack stack (host, pm, bus, hub, executor, mcpConfig (o));
+
+    std::atomic<bool> readerDone { false };
+    std::thread reader ([&]
+    {
+        mcp::StdioTransport (stack.server, std::cin, std::cout).run();
+        readerDone = true;
+        juce::MessageManager::callAsync ([] { juce::MessageManager::getInstance()->stopDispatchLoop(); });
+    });
+
+    ServeTimer timer (pm, nullptr, &stack.server);
+    timer.startTimer (200);
+    juce::MessageManager::getInstance()->runDispatchLoop();
+    timer.stopTimer();
+
+    stack.server.shutdown();
+
+    if (readerDone)
+        reader.join();
+    else
+        reader.detach();            // stopped by a signal while blocked on stdin
+
+    stack.jobs.shutdown();
+    pm.closeAll (SaveMode::autosave);       // dirty projects land in autosave/, as with `serve`
     return 0;
 }
 

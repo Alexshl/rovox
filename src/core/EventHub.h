@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -64,9 +65,17 @@ public:
     /** Never blocks on subscribers. Returns the event id. */
     std::uint64_t publish (const std::string& tenant, const std::string& projectId, json body);
 
+    /** Synchronous tap: called on the publishing thread, in publish order, before publish() returns. It must be cheap and
+        must not block (the MCP layer only appends to bounded in-memory rings). Returns an id for removeObserver(). */
+    using Observer = std::function<void (const Event&)>;
+    int addObserver (Observer);
+    void removeObserver (int id);
+
 private:
     std::mutex mutex_;
     std::vector<std::weak_ptr<Subscription>> subscribers_;
+    std::vector<std::pair<int, Observer>> observers_;
+    int nextObserver_ = 1;
     std::uint64_t nextId_ = 1;
 };
 

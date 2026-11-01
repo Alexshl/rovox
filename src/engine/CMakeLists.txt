@@ -11,6 +11,7 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/ChangeCollector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandBus.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Commands.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CommandsEdit.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/EngineHost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/HttpServer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Import.cpp
@@ -19,7 +20,9 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/ProjectFormat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ProjectManager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Render.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/RppImport.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/RenderJobs.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/RppImport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/TimePos.cpp)
 
 target_include_directories(rovox_engine INTERFACE ${CMAKE_CURRENT_SOURCE_DIR} ${ROVOX_LAME_INCLUDE})
 

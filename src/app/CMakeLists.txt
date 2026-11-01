@@ -8,4 +8,4 @@ juce_add_console_app(rovox
 
 target_sources(rovox PRIVATE Main.cpp Cli.cpp)
 
-target_link_libraries(rovox PRIVATE rovox_engine CLI11::CLI11)
+target_link_libraries(rovox PRIVATE rovox_mcp CLI11::CLI11)

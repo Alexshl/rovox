@@ -12,9 +12,11 @@ add_library(rovox_core STATIC
     JsonSchema.cpp
     Loudness.cpp
     RppParser.cpp
+    Spectrum.cpp
+    JobManager.cpp
     Version.cpp)
 target_include_directories(rovox_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(rovox_core PUBLIC nlohmann_json::nlohmann_json PkgConfig::EBUR128)
+target_link_libraries(rovox_core PUBLIC nlohmann_json::nlohmann_json PkgConfig::EBUR128 Threads::Threads)
 target_compile_definitions(rovox_core PRIVATE
     ROVOX_VERSION="${PROJECT_VERSION}"
     ROVOX_GIT_SHA="${ROVOX_GIT_SHA}"
