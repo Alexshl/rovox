@@ -48,6 +48,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(HTTPLIB REQUIRED IMPORTED_TARGET cpp-httplib)
 pkg_check_modules(EBUR128 REQUIRED IMPORTED_TARGET libebur128)
 pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
+pkg_check_modules(TOMLPP REQUIRED IMPORTED_TARGET tomlplusplus)
 find_library(ROVOX_LAME_LIB NAMES mp3lame REQUIRED)
 find_path(ROVOX_LAME_INCLUDE lame/lame.h REQUIRED)
 

@@ -13,11 +13,13 @@ The name nods to Roland.
 
 ## Status
 
-Milestone M3: a headless engine with a project format (`.rvx`), a command layer (undo, revisions, events), import of
+Milestone M5: a headless engine with a project format (`.rvx`), a command layer (undo, revisions, events), import of
 Zoom R20 `.zprj` folders, WAV files and REAPER `.RPP` projects, resumable uploads (tus), offline render with preflight
 checks and loudness measurement, an MCP server (stdio and Streamable HTTP, protocol 2025-06-18) with jobs for long work, and a
 web DAW (arrange view, mixer, transport, render dialog) that plays through the browser and shows what an MCP agent changes, live.
-Plugin management comes in a later milestone.
+Plugins (LV2, VST3) have a catalog, are tested and rendered in child processes (a crashing plugin does not take the server down), and are
+played by MIDI that an agent writes; sends/returns, project templates, recipes, and delivery of renders (file, Telegram, S3, webhook) are in.
+The `rovox-skills` sidecar (`skills/`, Python, standard library only) runs skills against the core over MCP.
 
 ## Web UI
 
@@ -76,6 +78,22 @@ Where things live: `--data-dir` (or `$ROVOX_DATA_DIR`) holds `projects/<id>/proj
 (the engine's preferences and temp files; it would otherwise write to `$HOME/.config`). A `.rvx` project is a directory with
 `edit.xml` (the Tracktion Edit), `rovox.json` (manifest) and `media/` (content-addressed audio). Set `ROVOX_CPUS` to override
 the CPU count the audio graph uses; by default it follows the container's cgroup CPU quota.
+
+## Plugins, MIDI, sends, delivery
+
+```
+plugin.catalog {kind: "instrument", query: "drum"}      # what can be loaded; fx.add {track_id, plugin: {plugin_uid}} loads it (tested in a child process first)
+item.create_midi {track_id, notes: [{pitch: "C2", start_qn: 0, length_qn: 1}]}   # the track's instrument plays the notes
+routing.send_create {track_id, to_track_id, gain_db: -12}                        # aux send to a reverb bus
+template.apply {template_id: "audio-band"}   recipe.run {recipe_id: "render_and_deliver", params: {adapter: "telegram.me"}}
+delivery.send {project_id, source: {job_id}, adapter: "telegram.me", caption: "..."}   # project.update {delivery_hold: true} queues instead
+```
+
+Delivery adapters are configured in `<data>/config/rovox.toml` (`--config`, `$ROVOX_CONFIG`) as `[delivery.telegram.me]`, `[delivery.s3.backup]`,
+`[delivery.webhook.n8n]`, `[delivery.file.share]`. Secrets are never written there: use `bot_token_env` / `bot_token_file`, `access_key_env`,
+`secret_key_env`, `hmac_secret_env` (the Telegram token defaults to `$ROVOX_TELEGRAM_TOKEN`, the chat to `$ROVOX_TELEGRAM_CHAT_ID`).
+Plugins are found in the system LV2/VST3 directories and in `--plugins` / `/plugins`. Plugins are used as licensed: nothing here bypasses
+an activation, and a plugin that cannot start is reported and blacklisted, not worked around.
 
 ## Building
 

@@ -5,3 +5,6 @@ build/
 .cache/
 compile_commands.json
 CMakeUserPresets.json
+__pycache__/
+*.pyc
+*.egg-info/

@@ -3,6 +3,7 @@
 
 // M2: MCP protocol conformance, tools as adapters over the command layer, two projects at once, one undo step per call,
 // events and external_changes, jobs (cancel, idempotency, restart), preview and analysis, HTTP transport.
+#include "Delivery.h"
 #include "HttpServer.h"
 #include "JobManager.h"
 #include "Loudness.h"
@@ -11,15 +12,18 @@
 #include "RenderJobs.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
+#include "MockServer.h"
 
 #include <httplib.h>
 
 #include <atomic>
 #include <fstream>
 #include <sstream>
+#include <set>
 #include <thread>
 
 using namespace rovox;
+using test::Mock;
 
 namespace
 {
@@ -223,7 +227,10 @@ ROVOX_TEST (mcp, tools_list_has_schemas_unique_names_and_pagination)
         CHECK (! t["description"].get<std::string>().empty());
 
         // every project tool takes project_id; only these may go without
-        static const std::set<std::string> global = { "project.list", "project.new", "project.open", "job.get", "job.cancel", "job.list", "events.poll", "upload.status" };
+        static const std::set<std::string> global = { "project.list", "project.new", "project.open", "job.get", "job.cancel", "job.list", "events.poll", "upload.status",
+                                                      "project.catalog", "plugin.catalog", "plugin.rescan", "plugin.probe", "plugin.tag", "plugin.unblacklist",
+                                                      "template.list", "template.get", "template.delete", "delivery.list_adapters",
+                                                      "recipe.list", "recipe.get", "recipe.save", "recipe.delete" };
 
         if (! global.count (name))
             CHECK (t["inputSchema"]["properties"].contains ("project_id"));
@@ -239,7 +246,7 @@ ROVOX_TEST (mcp, tools_list_has_schemas_unique_names_and_pagination)
     CHECK (viaUnderscore["result"]["isError"] == false);
 
     // reserved namespaces answer NOT_IMPLEMENTED, not "unknown tool"
-    for (auto* reserved : { "template.list", "notation.import", "recipe.run", "midi.edit" })
+    for (auto* reserved : { "notation.import", "notation.engrave", "mixer.set_gain" })
     {
         auto rr = h.tool (reserved, json::object());
         CHECK (rr["error"]["code"] == "NOT_IMPLEMENTED");
@@ -1350,4 +1357,205 @@ ROVOX_TEST (mcp, transport_and_meter_tools_are_real_commands_not_reserved_stubs)
 
     auto accepted = h.tool ("agent.accept", { { "project_id", project }, { "up_to_revision", 5 } });
     CHECK (accepted["data"]["accepted_revision"] == 5);
+}
+
+
+//==============================================================================
+// M4 / M5 tools
+
+ROVOX_TEST (mcp, m4_m5_tools_exist_with_schemas_and_are_no_longer_reserved)
+{
+    Harness h;
+    std::set<std::string> names;
+
+    for (auto* t : h.server.tools())
+        names.insert (t->name);
+
+    for (auto* n : { "plugin.catalog", "plugin.rescan", "plugin.probe", "plugin.tag", "project.catalog", "fx.presets", "fx.preset_load", "fx.preset_save", "fx.move",
+                     "item.create_midi", "item.duplicate", "midi.get", "midi.write", "midi.edit", "midi.transpose", "midi.quantize", "midi.import_file",
+                     "routing.list", "routing.send_create", "routing.send_update", "routing.send_delete", "track.duplicate",
+                     "template.list", "template.get", "template.save", "template.apply", "template.delete",
+                     "delivery.list_adapters", "delivery.send", "delivery.release", "delivery.list",
+                     "recipe.list", "recipe.get", "recipe.save", "recipe.delete", "recipe.run" })
+    {
+        CHECK (names.count (n) == 1);
+        const auto* tool = h.server.findTool (n);
+
+        if (tool != nullptr)
+        {
+            CHECK (tool->inputSchema["type"] == "object");
+            CHECK (! tool->description.empty());
+        }
+    }
+
+    // one undo step per mutating call: item.create_midi with notes, and template.apply
+    const auto project = h.newProject();
+    const auto track = h.data ("track.create", { { "project_id", project }, { "name", "Keys" } })["track_id"].get<std::string>();
+    auto created = h.tool ("item.create_midi", { { "project_id", project }, { "track_id", track }, { "undo_label", "riff" },
+                                                 { "notes", json::array ({ { { "pitch", "C4" }, { "start_qn", 0 }, { "length_qn", 1 } }, { { "pitch", "E4" }, { "start_qn", 1 }, { "length_qn", 1 } } }) } });
+    REQUIRE (created["ok"] == true);
+    CHECK (created["revision"].is_number());
+    auto history = h.data ("history.list", { { "project_id", project } });
+    CHECK (history["undo"].back()["label"].get<std::string>().find ("riff") != std::string::npos);
+    CHECK (h.tool ("undo", { { "project_id", project } })["ok"] == true);
+    CHECK (h.data ("item.list", { { "project_id", project } })["items"].empty());
+
+    auto bad = h.tool ("midi.write", { { "project_id", project }, { "item_id", "itm_x" }, { "notes", json::array ({ { { "pitch", 60 } } }) } });
+    CHECK (bad["ok"] == false);
+    CHECK (bad["error"]["code"] == "INVALID_PARAMS");
+}
+
+ROVOX_TEST (mcp, delivery_tools_hold_release_and_never_show_secrets)
+{
+    Mock mock;
+    mock.defaultReply = { 200, R"({"ok":true,"result":{"message_id":7}})" };
+    ::setenv ("ROVOX_TEST_TG3", "888:mcp-secret-token-XYZ", 1);
+    Harness h;
+    h.server.delivery().registry().add (makeTelegramAdapter ("telegram.me", { "ROVOX_TEST_TG3", "" }, "4242", mock.url()));
+    h.server.delivery().setRetryBackoffMs (10);
+
+    const auto project = sineTracks (h.env, { -18.0 }, 3.0, "deliv");
+    auto adapters = h.data ("delivery.list_adapters");
+    bool listed = false;
+
+    for (auto& a : adapters["adapters"])
+        listed = listed || (a["id"] == "telegram.me" && a["kind"] == "telegram");
+
+    CHECK (listed);
+    CHECK (adapters.dump().find ("888:mcp-secret") == std::string::npos);
+    CHECK (adapters.dump().find ("4242") == std::string::npos);
+
+    auto render = h.data ("render.start", { { "project_id", project }, { "name", "clip" }, { "format", { { "container", "mp3" }, { "bitrate_kbps", 128 } } }, { "wait_s", 30 } });
+    REQUIRE (render["state"] == "succeeded");
+
+    // with the hold on the file is queued
+    h.data ("project.update", { { "project_id", project }, { "delivery_hold", true } });
+    auto held = h.data ("delivery.send", { { "project_id", project }, { "source", { { "job_id", render["job_id"] } } }, { "adapter", "telegram.me" }, { "caption", "bass +2 dB" } });
+    CHECK (held["status"] == "HELD");
+    CHECK (mock.count() == 0);
+    CHECK (h.data ("delivery.list", { { "project_id", project }, { "status", "held" } })["deliveries"].size() == 1);
+
+    auto released = h.data ("delivery.release", { { "project_id", project }, { "wait_s", 30 } });
+    REQUIRE (released["released"].size() == 1);
+    CHECK (released["released"][0]["status"] == "sent");
+    CHECK (released["released"][0]["receipt"]["message_id"] == 7);
+    REQUIRE (mock.count() == 1);
+    CHECK (mock.at (0).path.find ("/sendAudio") != std::string::npos);
+    CHECK (mock.at (0).fields["caption"] == "bass +2 dB");
+    CHECK (h.data ("delivery.release", { { "project_id", project } })["released"].empty());
+
+    // hold off: sent in the same call, and a repeat with the same client_request_id is not sent twice
+    h.data ("project.update", { { "project_id", project }, { "delivery_hold", false } });
+    json args { { "project_id", project }, { "source", { { "file", "renders/clip.mp3" } } }, { "adapter", "telegram.me" }, { "client_request_id", "once" } };
+    auto sent = h.data ("delivery.send", args);
+    CHECK (sent["status"] == "sent");
+    CHECK (sent["receipt"]["message_id"] == 7);
+    CHECK (sent["created"] == true);
+    auto repeat = h.data ("delivery.send", args);
+    CHECK (repeat["created"] == false);
+    CHECK (mock.count() == 2);
+
+    // errors are tool errors with codes
+    auto unknown = h.tool ("delivery.send", { { "project_id", project }, { "source", { { "file", "renders/clip.mp3" } } }, { "adapter", "telegram.nobody" } });
+    CHECK (unknown["error"]["code"] == "NOT_FOUND");
+    CHECK (unknown["error"]["details"]["adapters"].is_array());
+
+    mock.defaultReply = { 401, R"({"ok":false,"description":"bad token 888:mcp-secret-token-XYZ"})" };
+    auto denied = h.tool ("delivery.send", { { "project_id", project }, { "source", { { "file", "renders/clip.mp3" } } }, { "adapter", "telegram.me" } });
+    CHECK (denied["ok"] == false);
+    CHECK (denied.dump().find ("888:mcp-secret") == std::string::npos);
+
+    // the project log has the deliveries, without secrets
+    auto activity = h.data ("project.activity", { { "project_id", project }, { "limit", 100 } });
+    bool logged = false;
+
+    for (auto& e : activity["activity"])
+        logged = logged || e["name"] == "delivery.sent";
+
+    CHECK (logged);
+    CHECK (activity.dump().find ("888:mcp-secret") == std::string::npos);
+}
+
+ROVOX_TEST (mcp, recipes_run_tools_in_order_with_substitution_and_one_undo_step)
+{
+    Harness h;
+    auto list = h.data ("recipe.list");
+    bool builtin = false;
+
+    for (auto& r : list["recipes"])
+        builtin = builtin || r["recipe_id"] == "render_and_deliver";
+
+    CHECK (builtin);
+
+    // a saved recipe: create a track, give it a volume, add a compressor
+    const auto project = h.newProject();
+    auto saved = h.tool ("recipe.save", { { "recipe", { { "id", "vocal_chain" }, { "name", "Vocal chain" },
+                                                        { "params", { { "type", "object" }, { "required", { "name" } }, { "properties", { { "name", { { "type", "string" } } }, { "volume_db", { { "type", "number" } } } } } } },
+                                                        { "defaults", { { "volume_db", -4.0 } } },
+                                                        { "steps", json::array ({ { { "tool", "track.create" }, { "arguments", { { "name", "${params.name}" }, { "volume_db", "${params.volume_db}" } } } },
+                                                                                { { "tool", "fx.add" }, { "arguments", { { "track_id", "${steps.0.track_id}" }, { "builtin", "compressor" } } } },
+                                                                                { { "tool", "marker.upsert" }, { "arguments", { { "markers", json::array ({ { { "name", "Added ${params.name}" }, { "time_s", 1.0 } } }) } } } } }) } } } });
+    REQUIRE (saved["ok"] == true);
+    CHECK (h.tool ("recipe.save", { { "recipe", { { "id", "bad" }, { "steps", json::array ({ { { "tool", "recipe.run" } } }) } } } })["ok"] == false);
+
+    auto run = h.tool ("recipe.run", { { "recipe_id", "vocal_chain" }, { "project_id", project }, { "params", { { "name", "Lead vox" } } } });
+    if (run["ok"] != true)
+        std::cerr << "    " << run.dump() << "\n";
+
+    REQUIRE (run["ok"] == true);
+    CHECK (run["data"]["steps"].size() == 3);
+    auto tracks = h.data ("track.list", { { "project_id", project } });
+    REQUIRE (tracks["tracks"].size() == 1);
+    CHECK (tracks["tracks"][0]["name"] == "Lead vox");
+    CHECK_NEAR (tracks["tracks"][0]["volume_db"].get<double>(), -4.0, 0.05);
+    CHECK (h.data ("marker.list", { { "project_id", project } })["markers"][0]["name"] == "Added Lead vox");
+
+    // the three project edits are ONE undo step
+    auto history = h.data ("history.list", { { "project_id", project } });
+    CHECK (history["undo"].size() == 1);
+    h.data ("undo", { { "project_id", project } });
+    CHECK (h.data ("track.list", { { "project_id", project } })["tracks"].empty());
+
+    // a failing step stops the run and says which
+    auto failing = h.tool ("recipe.run", { { "recipe_id", "vocal_chain" }, { "project_id", project }, { "params", json::object() } });
+    CHECK (failing["ok"] == false);
+    CHECK (failing["error"]["code"] == "INVALID_PARAMS");
+
+    auto missingStep = h.tool ("recipe.save", { { "recipe", { { "id", "broken" }, { "steps", json::array ({ { { "tool", "track.delete" }, { "arguments", { { "track_id", "trk_nope" } } } } }) } } } });
+    REQUIRE (missingStep["ok"] == true);
+    auto broken = h.tool ("recipe.run", { { "recipe_id", "broken" }, { "project_id", project } });
+    CHECK (broken["ok"] == false);
+    CHECK (broken["error"]["details"]["recipe_step"] == 0);
+    CHECK (h.tool ("recipe.delete", { { "recipe_id", "broken" } })["ok"] == true);
+    CHECK (h.tool ("recipe.delete", { { "recipe_id", "render_and_deliver" } })["ok"] == false);
+
+    // render_and_deliver: render at a loudness target, then deliver through the file adapter
+    const auto mixProject = sineTracks (h.env, { -18.0 }, 4.0, "recipe-mix");
+    auto delivered = h.tool ("recipe.run", { { "recipe_id", "render_and_deliver" }, { "project_id", mixProject }, { "params", { { "adapter", "file.exports" }, { "target_lufs", -14.0 }, { "container", "wav" } } } });
+    if (delivered["ok"] != true)
+        std::cerr << "    " << delivered.dump() << "\n";
+
+    REQUIRE (delivered["ok"] == true);
+    CHECK (delivered["data"]["steps"][1]["result"]["status"] == "sent");
+    CHECK (fs::exists (h.env.pm.host().dataDir() / "exports" / "mix.wav"));
+}
+
+ROVOX_TEST (mcp, project_catalog_tool_lists_disk_projects)
+{
+    Harness h;
+    const auto id = h.newProject ("Listed on disk");
+    h.data ("project.close", { { "project_id", id } });
+    auto cat = h.data ("project.catalog");
+    bool found = false;
+
+    for (auto& p : cat["projects"])
+        if (p["project_id"] == id)
+        {
+            found = true;
+            CHECK (p["open"] == false);
+            CHECK (p["name"] == "Listed on disk");
+        }
+
+    CHECK (found);
+    CHECK (h.data ("project.open", { { "target", id } }).contains ("project_id"));
 }

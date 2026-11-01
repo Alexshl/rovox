@@ -22,16 +22,28 @@ target_sources(rovox_engine_tests PRIVATE
     rpp_test.cpp
     upload_test.cpp
     cli_test.cpp
+    delivery_test.cpp
     mcp_test.cpp
+    plugin_test.cpp
     transport_test.cpp)
 
 target_link_libraries(rovox_engine_tests PRIVATE rovox_mcp)
 
-foreach(suite core engine project import render rpp upload cli mcp transport web)
+foreach(suite core engine project import render rpp upload cli mcp transport web plugins midi routing fx templates projects delivery)
     add_test(NAME ${suite} COMMAND rovox_engine_tests ${suite})
 endforeach()
 
 # the cli suite drives the real executable
 add_dependencies(rovox_engine_tests rovox)
 set_tests_properties(cli web PROPERTIES ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE:rovox>")
+# the plugin suites start plugin-probe / render-child helper processes (the executable) and use the fixture plugins built below
+set_tests_properties(plugins midi routing fx templates projects mcp PROPERTIES
+    ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE:rovox>;ROVOX_TEST_LV2_DIR=${CMAKE_CURRENT_BINARY_DIR}/lv2")
 set_tests_properties(transport PROPERTIES ENVIRONMENT "ROVOX_TEST_AUDIO=browser")
+
+# Test fixture plugins (LV2 effects that crash on purpose), built into <build>/tests/lv2/rovox-test.lv2
+add_library(rovox_test_lv2 MODULE fixtures/rovox-test.lv2/crash.c)
+set_target_properties(rovox_test_lv2 PROPERTIES PREFIX "" OUTPUT_NAME crash LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lv2/rovox-test.lv2)
+configure_file(fixtures/rovox-test.lv2/manifest.ttl ${CMAKE_CURRENT_BINARY_DIR}/lv2/rovox-test.lv2/manifest.ttl COPYONLY)
+configure_file(fixtures/rovox-test.lv2/crash.ttl ${CMAKE_CURRENT_BINARY_DIR}/lv2/rovox-test.lv2/crash.ttl COPYONLY)
+add_dependencies(rovox_engine_tests rovox_test_lv2)

@@ -104,6 +104,19 @@ int main (int argc, char** argv)
     mcp->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (default $ROVOX_SOURCE_URL)");
     mcp->callback ([&] { std::exit (rovox::cli::runMcp (o)); });
 
+    // helper processes of the server (task 410): a plugin is loaded and tested, or a project with plugins is rendered, outside the server process
+    auto* probe = app.add_subcommand ("plugin-probe", "internal: load one plugin in this process and print what it does as JSON");
+    probe->group ("");
+    probe->add_option ("description", o.probeFile, "XML file with the plugin description")->required();
+    probe->add_flag ("--presets-only", o.presetsOnly, "only list the programs");
+    probe->callback ([&] { std::exit (rovox::cli::runPluginProbe (o)); });
+
+    auto* renderChild = app.add_subcommand ("render-child", "internal: render a project copy and print PROGRESS / RESULT lines");
+    renderChild->group ("");
+    renderChild->add_option ("snapshot", o.snapshotDir, "project copy directory")->required();
+    renderChild->add_option ("request", o.requestFile, "request.json")->required();
+    renderChild->callback ([&] { std::exit (rovox::cli::runRenderChildCommand (o)); });
+
     auto* bench = app.add_subcommand ("bench", "Resource benchmark (the spike binary rovox_spikes bench covers it for now)");
     bench->callback ([] { std::cerr << "rovox bench is not available yet; see spikes/p5_bench.\n"; std::exit (2); });
 

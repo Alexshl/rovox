@@ -7,6 +7,7 @@ add_library(rovox_mcp INTERFACE)
 
 target_sources(rovox_mcp INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/McpHttp.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/McpExtras.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/McpServer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/McpStdio.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/McpTools.cpp)

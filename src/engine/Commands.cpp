@@ -4,6 +4,7 @@
 #include "Command.h"
 
 #include "Ids.h"
+#include "PluginHost.h"
 #include "ProjectManager.h"
 
 #include <cmath>
@@ -136,6 +137,12 @@ void registerProjectCommands (CommandRegistry& r)
             return json { { "projects", out } };
         }));
 
+    r.add (makeGlobalCommand ("project.catalog", obj ({ { "include_ephemeral", boolean() } }), obj ({ { "projects", { { "type", "array" } } } }), false,
+        [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
+        {
+            return json { { "projects", pm.catalog (ctx.tenant, p.value ("include_ephemeral", false)) } };
+        }));
+
     r.add (makeGlobalCommand ("project.open", obj ({ { "target", strMin (1) } }, { "target" }), obj ({ { "project_id", str() } }), false,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {
@@ -204,9 +211,15 @@ void registerProjectCommands (CommandRegistry& r)
                           { "can_undo", p.edit().getUndoManager().canUndo() }, { "can_redo", p.edit().getUndoManager().canRedo() } };
         }));
 
-    r.add (makeProjectCommand ("project.update", obj ({ { "name", strMin (1) } }), obj ({ { "name", str() } }), true,
+    r.add (makeProjectCommand ("project.update", obj ({ { "name", strMin (1) }, { "delivery_hold", boolean() } }), obj ({ { "name", str() }, { "delivery_hold", boolean() } }), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
+            static const juce::Identifier holdId ("rovox:deliveryHold");
+
+            // "don't send yet": delivery.send queues instead of sending while this is on (undoable like the name)
+            if (params.contains ("delivery_hold"))
+                p.edit().state.setProperty (holdId, params["delivery_hold"].get<bool>(), &p.edit().getUndoManager());
+
             // the manifest is not part of the Edit tree: the name is kept as an Edit property so that the change is undoable and reported, and copied to the manifest on save
             if (params.contains ("name"))
             {
@@ -214,7 +227,7 @@ void registerProjectCommands (CommandRegistry& r)
                 p.edit().state.setProperty (nameId, toJuce (params["name"].get<std::string>()), &p.edit().getUndoManager());
             }
 
-            return json { { "name", p.name() } };
+            return json { { "name", p.name() }, { "delivery_hold", (bool) p.edit().state.getProperty (holdId, false) } };
         }));
 
     r.add (makeProjectCommand ("project.save", obj ({}), obj ({ { "revision", integer() } }), false,
@@ -375,7 +388,7 @@ std::string builtinPluginType (const std::string& name)
 
 void registerFxCommands (CommandRegistry& r)
 {
-    json pluginDesc = obj ({ { "format", str() }, { "uid", str() }, { "name", str() }, { "file", str() } }, { "format", "uid" });
+    json pluginDesc = obj ({ { "format", str() }, { "uid", str() }, { "plugin_uid", str() }, { "name", str() }, { "file", str() } });
 
     r.add (makeProjectCommand ("fx.add",
         obj ({ { "track_id", strMin (1) },
@@ -406,6 +419,7 @@ void registerFxCommands (CommandRegistry& r)
                 return makeError (errc::invalidParams, "give exactly one of builtin / plugin");
 
             te::Plugin::Ptr plugin;
+            json probeInfo;
 
             if (params.contains ("builtin"))
             {
@@ -413,13 +427,16 @@ void registerFxCommands (CommandRegistry& r)
             }
             else
             {
-                juce::PluginDescription d;
-                d.pluginFormatName = toJuce (params["plugin"]["format"].get<std::string>());
-                d.fileOrIdentifier = toJuce (params["plugin"].value ("file", params["plugin"]["uid"].get<std::string>()));
-                d.uniqueId = toJuce (params["plugin"]["uid"].get<std::string>()).hashCode();
-                d.name = toJuce (params["plugin"].value ("name", params["plugin"]["uid"].get<std::string>()));
-                d.isInstrument = false;
-                plugin = p.edit().getPluginCache().createNewPlugin (te::ExternalPlugin::xmlTypeName, d);
+                if (! params["plugin"].contains ("plugin_uid") && ! params["plugin"].contains ("uid"))
+                    return makeError (errc::invalidParams, "plugin needs plugin_uid (from plugin.catalog) or format + uid", json { { "path", "/plugin" } });
+
+                // catalog entries are probed in a child process first: a plugin that crashes on load never reaches this process
+                auto created = createExternalPlugin (p, params["plugin"], &probeInfo);
+
+                if (! created.ok())
+                    return created.error();
+
+                plugin = created.value();
             }
 
             if (plugin == nullptr)
@@ -438,7 +455,17 @@ void registerFxCommands (CommandRegistry& r)
             list->insertPlugin (plugin, index, nullptr);
             plugin->initialiseFully();
             ChangeCollector::assignMissingIds (plugin->state);
-            return json { { "plugin_id", Project::idOf (plugin->state) }, { "plugin", pluginJson (*plugin) } };
+            json out { { "plugin_id", Project::idOf (plugin->state) }, { "plugin", pluginJson (*plugin) } };
+
+            if (auto* ext = dynamic_cast<te::ExternalPlugin*> (plugin.get()))
+            {
+                out["plugin"]["is_instrument"] = ext->isSynth();
+
+                if (! probeInfo.is_null() && probeInfo.contains ("audible"))
+                    out["plugin"]["probe"] = { { "audible", probeInfo["audible"] }, { "latency_samples", probeInfo.value ("latency_samples", 0) } };
+            }
+
+            return out;
         }));
 
     r.add (makeProjectCommand ("fx.remove", obj ({ { "plugin_id", strMin (1) } }, { "plugin_id" }), obj ({ { "plugin_id", str() } }), true,
@@ -544,6 +571,7 @@ void registerHistoryCommands (CommandRegistry& r)
 
             const auto label = toStd (um.getUndoDescription());
             um.undo();
+            resyncPluginStates (p.edit());
 
             if (! p.undoSteps().empty())
             {
@@ -564,6 +592,7 @@ void registerHistoryCommands (CommandRegistry& r)
 
             const auto label = toStd (um.getRedoDescription());
             um.redo();
+            resyncPluginStates (p.edit());
 
             if (! p.redoSteps().empty())
             {
@@ -590,6 +619,10 @@ void registerHistoryCommands (CommandRegistry& r)
 void registerImportCommands (CommandRegistry&);
 void registerEditCommands (CommandRegistry&);
 void registerTransportCommands (CommandRegistry&);
+void registerPluginCommands (CommandRegistry&);
+void registerMidiCommands (CommandRegistry&);
+void registerRoutingCommands (CommandRegistry&);
+void registerTemplateCommands (CommandRegistry&);
 
 void registerBuiltinCommands (CommandRegistry& r)
 {
@@ -601,6 +634,10 @@ void registerBuiltinCommands (CommandRegistry& r)
     registerImportCommands (r);
     registerEditCommands (r);
     registerTransportCommands (r);
+    registerPluginCommands (r);
+    registerMidiCommands (r);
+    registerRoutingCommands (r);
+    registerTemplateCommands (r);
 }
 
 } // namespace rovox

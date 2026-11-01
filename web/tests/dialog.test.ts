@@ -91,6 +91,26 @@ describe('projectPicker', () => {
     expect(onOpened).toHaveBeenCalledTimes(2);
   });
 
+  it('asks for the catalog, so projects that exist only on disk are listed and opened by id', async () => {
+    const cmd = vi.fn(async (_name: string) => ({
+      ok: true,
+      data: { projects: [{ project_id: 'a', name: 'On disk', tracks: 2, modified: 1_700_000_000, open: false }, { project_id: 'b', name: 'Running', tracks: 1, open: true }] },
+    }));
+    const openProject = vi.fn();
+    const app = { projects: new Map(), cmd, openProject, setActive: vi.fn() } as unknown as App;
+    const picker = projectPicker(app);
+    document.body.append(picker.el);
+    await tick();
+    expect(cmd).toHaveBeenCalledWith('project.catalog');
+    const rows = picker.el.querySelectorAll<HTMLButtonElement>('.project-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.classList.contains('open')).toBe(false);
+    expect(rows[0]!.textContent).not.toContain('відкрито');
+    expect(rows[1]!.textContent).toContain('відкрито');
+    rows[0]!.click();
+    expect(openProject).toHaveBeenCalledWith('a');
+  });
+
   it('opens by path with Enter and ArrowDown moves focus', async () => {
     const { app, openProject } = fakeApp([]);
     const picker = projectPicker(app);

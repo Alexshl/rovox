@@ -4,10 +4,13 @@
 add_library(rovox_core STATIC
     ActivityLog.cpp
     Cgroup.cpp
+    Delivery.cpp
+    Hmac.cpp
     EventHub.cpp
     Ids.cpp
     Sha1.cpp
     Sha256.cpp
+    Subprocess.cpp
     UploadStore.cpp
     JsonSchema.cpp
     Loudness.cpp
@@ -16,7 +19,7 @@ add_library(rovox_core STATIC
     JobManager.cpp
     Version.cpp)
 target_include_directories(rovox_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(rovox_core PUBLIC nlohmann_json::nlohmann_json PkgConfig::EBUR128 Threads::Threads)
+target_link_libraries(rovox_core PUBLIC nlohmann_json::nlohmann_json PkgConfig::EBUR128 PkgConfig::HTTPLIB PkgConfig::TOMLPP Threads::Threads)
 target_compile_definitions(rovox_core PRIVATE
     ROVOX_VERSION="${PROJECT_VERSION}"
     ROVOX_GIT_SHA="${ROVOX_GIT_SHA}"

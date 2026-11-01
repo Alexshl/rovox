@@ -14,6 +14,8 @@
 namespace rovox
 {
 
+class PluginCatalog;
+
 enum class AudioMode { None, BrowserStream, Device };
 
 std::optional<AudioMode> parseAudioMode (std::string_view);
@@ -52,6 +54,9 @@ public:
     /** none: no device is ever opened; device: JUCE default device; browser-stream: the engine was created with the stream device. */
     Result<void> setAudioMode (AudioMode);
 
+    /** Plugin catalog of this data directory (created on first use). */
+    PluginCatalog& catalog();
+
     /** The browser-stream device (nullptr unless the engine was created with AudioMode::BrowserStream). */
     BrowserStream* stream()                 { return stream_.get(); }
 
@@ -66,6 +71,7 @@ private:
     CpuBudget budget_;
     std::unique_ptr<te::Engine> engine_;
     std::unique_ptr<BrowserStream> stream_;
+    std::unique_ptr<PluginCatalog> catalog_;     // destroyed before the engine
 };
 
 } // namespace rovox

@@ -31,6 +31,10 @@ inline constexpr const char* notImplemented      = "NOT_IMPLEMENTED";
 inline constexpr const char* serverRestarted     = "SERVER_RESTARTED";
 inline constexpr const char* resyncRequired      = "RESYNC_REQUIRED";
 inline constexpr const char* forbiddenPath       = "FORBIDDEN_PATH";
+inline constexpr const char* pluginCrashed       = "PLUGIN_CRASHED";
+inline constexpr const char* pluginBlacklisted   = "PLUGIN_BLACKLISTED";
+inline constexpr const char* pluginLoadFailed    = "PLUGIN_LOAD_FAILED";
+inline constexpr const char* fileTooLarge        = "FILE_TOO_LARGE";
 } // namespace errc
 
 struct Error

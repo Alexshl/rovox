@@ -11,6 +11,8 @@
 #include "JobManager.h"
 #include "McpHttp.h"
 #include "McpStdio.h"
+#include "PluginCatalog.h"
+#include "PluginHost.h"
 #include "PluginScan.h"
 #include "ProjectManager.h"
 #include "Render.h"
@@ -28,6 +30,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <thread>
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -463,6 +466,7 @@ mcp::McpConfig mcpConfig (const Options& o)
     c.underscoreNames = o.toolNames == "underscore";
     c.reaperCompat = o.reaperCompat || std::getenv ("ROVOX_REAPER_COMPAT") != nullptr;
     c.allowedOrigins = o.allowOrigins;
+    c.configFile = o.config;
 
     if (! o.sourceUrl.empty())
         c.sourceUrl = o.sourceUrl;
@@ -565,6 +569,11 @@ int runServe (const Options& o)
     std::signal (SIGTERM, onSignal);
     std::signal (SIGINT, onSignal);
 
+    {
+        std::error_code ec;
+        fs::remove_all (cfg.dataDir / "cache" / "render-child", ec);       // project copies of renders that a crash left behind
+    }
+
     EngineHost host (cfg);
     EventHub hub;
     ProjectManager pm (host, hub);
@@ -624,12 +633,16 @@ int runServe (const Options& o)
     if (so.webDir.empty())
         std::cout << "web UI not found (build web/ and pass --web-dir); the API, MCP and /ws are available" << std::endl;
 
+    // the plugin catalog is scanned in the background (the scan itself runs in a child process); plugin.catalog reports the scan state meanwhile
+    std::thread catalogScan ([&host] { host.catalog().rescan(); });
+
     ServeTimer timer (pm, &server.uploads(), &mcpStack.server);
     timer.startTimer (200);
     juce::MessageManager::getInstance()->runDispatchLoop();
     timer.stopTimer();
 
     std::cout << "rovox shutting down" << std::endl;
+    catalogScan.join();
     mcpStack.server.shutdown();
     gateway.shutdown();
     server.stop();
@@ -768,6 +781,16 @@ int runUpload (const Options& o)
 
     std::cout << json { { "batch_id", batch["batch_id"] }, { "files", batch["files"] } }.dump (2) << "\n";
     return 0;
+}
+
+int runPluginProbe (const Options& o)
+{
+    return runPluginProbeChild (o.probeFile, o.presetsOnly);
+}
+
+int runRenderChildCommand (const Options& o)
+{
+    return runRenderChild (engineConfig (o, false), o.snapshotDir, o.requestFile);
 }
 
 int runPlugins (const Options& o)

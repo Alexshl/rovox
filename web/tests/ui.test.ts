@@ -77,6 +77,7 @@ function answer(msg: Record<string, any>, ws: FakeWebSocket): void {
     const reply = (data: unknown) => ws.push({ t: 'result', id: msg.id, ok: true, revision: 10, data });
     switch (msg.name) {
       case 'project.list':
+      case 'project.catalog':
         return reply({ projects: [{ project_id: 'p_1', name: 'rahiv' }] });
       case 'project.get':
         return reply(project);

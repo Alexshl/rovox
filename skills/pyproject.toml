@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Rovox contributors
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rovox-skills"
+version = "0.1.0"
+description = "Open skills sidecar for the Rovox DAW server: talks to the core over MCP, no LLM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = []            # the core client and the skills use the standard library only
+
+[project.optional-dependencies]
+# heavy analysis stays optional; the skills of this version do not need it
+analysis = ["numpy", "soundfile", "librosa"]
+
+[project.scripts]
+rovox-skills = "rovox_skills.cli:main"
+
+[tool.setuptools]
+packages = ["rovox_skills"]

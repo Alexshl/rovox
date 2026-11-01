@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -753,6 +754,16 @@ ROVOX_TEST (project, every_mutating_command_is_exactly_one_step)
         return e.ok (id, "item.list")["items"][0]["item_id"];
     };
     auto aPlugin = [&] (test::Env& e, const std::string& id) { return e.ok (id, "fx.add", { { "track_id", firstTrack (e, id) }, { "builtin", "compressor" } })["plugin_id"]; };
+    auto aMidiItem = [&] (test::Env& e, const std::string& id)
+    {
+        return e.ok (id, "item.create_midi", { { "track_id", firstTrack (e, id) }, { "start_s", 10.0 },
+                                               { "notes", json::array ({ { { "pitch", 60 }, { "start_qn", 0.2 }, { "length_qn", 1 } }, { { "pitch", 64 }, { "start_qn", 2 }, { "length_qn", 1 } } }) } })["item_id"];
+    };
+    auto aSend = [&] (test::Env& e, const std::string& id)
+    {
+        auto t = e.ok (id, "track.list")["tracks"];
+        return e.ok (id, "routing.send_create", { { "track_id", t[0]["track_id"] }, { "to_track_id", t[1]["track_id"] } })["send_id"];
+    };
     const std::map<std::string, Params> cases = {
         { "track.create",   [] (test::Env&, const std::string&) { return json { { "name", "New" }, { "volume_db", -3 } }; } },
         { "track.update",   [&] (test::Env& e, const std::string& id) { return json { { "track_id", firstTrack (e, id) }, { "name", "Renamed" }, { "pan", 0.3 } }; } },
@@ -778,14 +789,52 @@ ROVOX_TEST (project, every_mutating_command_is_exactly_one_step)
                                                                                                                      { { "name", "Fresh" }, { "time", { { "bar", 3 } } } } }) } }; } },
         { "tempo.set",      [] (test::Env&, const std::string&) { return json { { "points", json::array ({ { { "bpm", 90.0 } }, { { "bpm", 140.0 }, { "bar", 5 } } }) } }; } },
         { "fx.update",      [&] (test::Env& e, const std::string& id) { return json { { "plugin_id", aPlugin (e, id) }, { "enabled", false } }; } },
+
+        // M4
+        { "item.create_midi", [&] (test::Env& e, const std::string& id) { return json { { "track_id", firstTrack (e, id) }, { "notes", json::array ({ { { "pitch", 60 }, { "start_qn", 0 }, { "length_qn", 1 } } }) } }; } },
+        { "item.duplicate", [&] (test::Env& e, const std::string& id) { return json { { "item_id", aMidiItem (e, id) }, { "count", 2 } }; } },
+        { "midi.write",     [&] (test::Env& e, const std::string& id) { return json { { "item_id", aMidiItem (e, id) }, { "notes", json::array ({ { { "pitch", 72 }, { "start_qn", 1 }, { "length_qn", 1 } } }) } }; } },
+        { "midi.edit",      [&] (test::Env& e, const std::string& id) { return json { { "item_id", aMidiItem (e, id) }, { "add", json::array ({ { { "pitch", 55 }, { "start_qn", 3 }, { "length_qn", 1 } } }) } }; } },
+        { "midi.transpose", [&] (test::Env& e, const std::string& id) { return json { { "item_id", aMidiItem (e, id) }, { "semitones", 5 } }; } },
+        { "midi.quantize",  [&] (test::Env& e, const std::string& id) { return json { { "item_id", aMidiItem (e, id) }, { "grid_qn", 1.0 } }; } },
+        { "midi.import_file", [&] (test::Env& e, const std::string& id)
+          {
+              juce::MidiMessageSequence seq;
+              seq.addEvent (juce::MidiMessage::noteOn (1, 60, 0.8f), 0);
+              seq.addEvent (juce::MidiMessage::noteOff (1, 60), 480);
+              juce::MidiFile file;
+              file.setTicksPerQuarterNote (480);
+              file.addTrack (seq);
+              juce::FileOutputStream out (toFile (rppDir / "one.mid"));
+              out.setPosition (0);
+              out.truncate();
+              file.writeTo (out);
+              out.flush();
+              return json { { "track_id", firstTrack (e, id) }, { "file", (rppDir / "one.mid").string() } };
+          } },
+        { "routing.send_create", [&] (test::Env& e, const std::string& id) { auto t = e.ok (id, "track.list")["tracks"]; return json { { "track_id", t[0]["track_id"] }, { "to_track_id", t[1]["track_id"] }, { "gain_db", -9 } }; } },
+        { "routing.send_update", [&] (test::Env& e, const std::string& id) { return json { { "send_id", aSend (e, id) }, { "gain_db", -20 } }; } },
+        { "routing.send_delete", [&] (test::Env& e, const std::string& id) { return json { { "send_id", aSend (e, id) } }; } },
+        { "track.duplicate", [&] (test::Env& e, const std::string& id) { return json { { "track_id", firstTrack (e, id) } }; } },
+        { "fx.move",        [&] (test::Env& e, const std::string& id)
+          {
+              const auto track = firstTrack (e, id);
+              e.ok (id, "fx.add", { { "track_id", track }, { "builtin", "reverb" } });
+              const auto second = e.ok (id, "fx.add", { { "track_id", track }, { "builtin", "equaliser" } })["plugin_id"];
+              return json { { "plugin_id", second }, { "to_index", 0 } };
+          } },
+        { "template.apply", [] (test::Env&, const std::string&) { return json { { "template_id", "audio-band" } }; } },
     };
+
+    // Covered by a test of their own, where the plugin is real (an external plugin's state is not part of this comparison)
+    const std::set<std::string> covered = { "fx.preset_load" };
 
     // a new mutating project command without a case here fails this test
     test::Env registryEnv;
 
     for (auto* c : registryEnv.registry.all())
         if (c->mutates() && ! c->isGlobal() && ! c->manualUndo())
-            CHECK (cases.count (std::string (c->name())) == 1);
+            CHECK (cases.count (std::string (c->name())) + covered.count (std::string (c->name())) == 1);
 
     for (auto& [name, makeParams] : cases)
     {
@@ -826,6 +875,10 @@ ROVOX_TEST (project, every_mutating_command_is_exactly_one_step)
         CHECK (env.project (id).revision() == rev + 1);
 
         const auto after = test::snapshot (env, id);
+
+        if (after == before)
+            std::cerr << "    " << name << " changed nothing the snapshot sees\n";
+
         CHECK (after != before);
         REQUIRE (env.run (id, "undo").ok);
         test::pumpMessages (30);

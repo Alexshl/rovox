@@ -5,12 +5,16 @@
 
 #include "Ids.h"
 
+#include <algorithm>
 #include <cstring>
+#include <ctime>
+#include <set>
 #include <fstream>
 #include <sstream>
 
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace rovox
@@ -315,6 +319,91 @@ std::vector<ProjectSummary> ProjectManager::list (const std::string& tenant, boo
             out.push_back (s);
 
     return out;
+}
+
+json ProjectManager::catalog (const std::string& tenant, bool includeEphemeral) const
+{
+    std::map<std::string, ProjectSummary> open;
+    {
+        std::lock_guard<std::mutex> lock (snapshotMutex_);
+
+        for (auto& [id, s] : snapshot_)
+            if (s.tenant == tenant)
+                open[id] = s;
+    }
+
+    std::vector<json> items;
+    std::set<std::string> seen;
+    std::error_code ec;
+
+    auto epoch = [] (const fs::path& f)
+    {
+        struct stat st {};
+        return ::stat (f.c_str(), &st) == 0 ? (long long) st.st_mtime : 0LL;
+    };
+
+    for (auto& entry : fs::directory_iterator (projectsRoot (tenant), ec))
+    {
+        const auto dir = entry.path() / "project.rvx";
+        std::ifstream in (dir / manifestFileName);
+
+        if (! in)
+            continue;
+
+        auto doc = json::parse (in, nullptr, false);
+
+        if (doc.is_discarded() || ! doc.is_object() || doc.value ("project_id", "").empty() || doc.value ("tenant_id", "local") != tenant)
+            continue;
+
+        const auto id = doc["project_id"].get<std::string>();
+        const bool ephemeral = doc.value ("ephemeral", false);
+
+        if (ephemeral && ! includeEphemeral && open.count (id) == 0)
+            continue;
+
+        json item { { "project_id", id }, { "name", doc.value ("name", "Untitled") }, { "tenant_id", tenant }, { "revision", doc.value ("revision", 0) }, { "dirty", false },
+                    { "path", dir.string() }, { "ephemeral", ephemeral }, { "ttl_s", doc.value ("ttl_s", json (nullptr)) }, { "open", false },
+                    { "created_at", doc.value ("created_at", "") }, { "saved_at", doc.value ("saved_at", "") },
+                    { "modified", epoch (dir / editFileName) }, { "tracks", 0 } };
+
+        if (auto o = open.find (id); o != open.end())
+        {
+            item["open"] = true;
+            item["name"] = o->second.name;
+            item["revision"] = o->second.revision;
+            item["dirty"] = o->second.dirty;
+            item["tracks"] = o->second.tracks;
+            item["path"] = o->second.dir.string();
+        }
+        else if (std::error_code sz; fs::file_size (dir / editFileName, sz) < 64u * 1024u * 1024u && ! sz)
+        {
+            if (auto xml = juce::parseXML (toFile (dir / editFileName)))
+            {
+                int tracks = 0;
+
+                for (auto* c : xml->getChildIterator())
+                    if (c->hasTagName ("TRACK"))
+                        ++tracks;
+
+                item["tracks"] = tracks;
+            }
+        }
+
+        seen.insert (id);
+        items.push_back (std::move (item));
+    }
+
+    for (auto& [id, s] : open)                      // opened from a path outside the projects directory
+        if (seen.count (id) == 0 && (includeEphemeral || ! s.ephemeral))
+        {
+            auto item = s.toJson();
+            item["open"] = true;
+            item["modified"] = (long long) std::time (nullptr);
+            items.push_back (std::move (item));
+        }
+
+    std::sort (items.begin(), items.end(), [] (const json& a, const json& b) { return a.value ("modified", 0LL) > b.value ("modified", 0LL); });
+    return items;
 }
 
 std::optional<std::uint64_t> ProjectManager::revisionOf (const std::string& id) const

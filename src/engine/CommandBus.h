@@ -34,6 +34,7 @@ public:
     CommandResult runBatchNow (const std::vector<Op>&, const CommandContext&);
 
     CommandRegistry& registry()     { return registry_; }
+    MessageThreadExecutor& executor()   { return executor_; }
 
 private:
     CommandResult runInProject (Project&, const std::vector<Op>&, const CommandContext&, bool isBatch);

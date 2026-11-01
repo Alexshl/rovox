@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
-// Project picker: the projects of the server (project.list) to open with a click or Enter, plus opening by path / id / name.
+// Project picker: every project of the server, open or only on disk (project.catalog), to open with a click or Enter, plus opening by path / id / name.
 import { clear, h } from '../lib/dom';
 import type { App } from '../store/session';
 import { openModal } from './dialog';
@@ -14,6 +14,8 @@ export interface ServerProject {
   dirty?: boolean;
   duration_s?: number;
   modified?: number | string;
+  /** true while the server has the project open; false for a project that only exists on disk. */
+  open?: boolean;
 }
 
 function formatDuration(s: number): string {
@@ -39,7 +41,7 @@ export function projectMeta(p: ServerProject): string {
 }
 
 export async function fetchServerProjects(app: App): Promise<ServerProject[]> {
-  const r = await app.cmd<{ projects: ServerProject[] }>('project.list');
+  const r = await app.cmd<{ projects: ServerProject[] }>('project.catalog');
   return r.ok && r.data ? r.data.projects : [];
 }
 
@@ -89,9 +91,9 @@ export function projectPicker(app: App, onOpened?: () => void): ProjectPicker {
   const refresh = async () => {
     const projects = await fetchServerProjects(app);
     clear(list);
-    if (!projects.length) list.append(h('div', { class: 'none', text: 'На сервері немає відкритих проектів.' }));
+    if (!projects.length) list.append(h('div', { class: 'none', text: 'На сервері ще немає проектів.' }));
     for (const p of projects) {
-      const isOpen = app.projects.has(p.project_id);
+      const isOpen = app.projects.has(p.project_id) || p.open === true;
       const meta = projectMeta(p);
       const row = h(
         'button',

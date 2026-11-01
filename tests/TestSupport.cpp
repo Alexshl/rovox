@@ -38,6 +38,13 @@ EngineHost& host()
 {
     static EngineHost h ([]
     {
+        // fixture plugins (LV2 effects that crash on purpose) are found next to the system ones
+        if (const char* fixtures = std::getenv ("ROVOX_TEST_LV2_DIR"))
+        {
+            const char* current = std::getenv ("LV2_PATH");
+            ::setenv ("LV2_PATH", ((current != nullptr && *current != 0 ? std::string (current) : std::string ("/usr/lib/lv2:/usr/local/lib/lv2")) + ":" + fixtures).c_str(), 1);
+        }
+
         EngineConfig c;
         c.dataDir = testRoot() / "data";
 
@@ -200,7 +207,26 @@ json snapshot (Env& env, const std::string& projectId)
 
     std::sort (plugins.begin(), plugins.end(), [] (const json& a, const json& b) { return a["id"] < b["id"]; });
     tracks.erase ("revision");
-    return { { "tracks", tracks["tracks"] }, { "markers", markers["markers"] }, { "plugins", plugins }, { "name", p.name() } };
+
+    // MIDI notes (without their ids, which are handed out on first look) and the sends are part of the project too
+    json midi = json::array();
+
+    for (auto* ct : te::getClipTracks (p.edit()))
+        for (auto* c : ct->getClips())
+            if (auto* mc = dynamic_cast<te::MidiClip*> (c))
+            {
+                json notes = json::array();
+
+                for (auto* n : mc->getSequence().getNotes())
+                    notes.push_back ({ n->getNoteNumber(), n->getStartBeat().inBeats(), n->getLengthBeats().inBeats(), n->getVelocity() });
+
+                std::sort (notes.begin(), notes.end());
+                midi.push_back ({ Project::idOf (c->state), notes });
+            }
+
+    std::sort (midi.begin(), midi.end());
+    auto routing = env.ok (projectId, "routing.list");
+    return { { "tracks", tracks["tracks"] }, { "markers", markers["markers"] }, { "plugins", plugins }, { "name", p.name() }, { "midi", midi }, { "sends", routing["sends"] } };
 }
 
 void pumpMessages (int ms)

@@ -7,7 +7,7 @@ FROM debian:bookworm-slim AS base
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libasound2 libatomic1 libfreetype6 libfontconfig1 \
-      libebur128-1 libmp3lame0 libcpp-httplib0.11 libopus0 \
+      libebur128-1 libmp3lame0 libcpp-httplib0.11 libopus0 libtomlplusplus3 \
  && rm -rf /var/lib/apt/lists/*
 
 # ---- web: the browser UI (TypeScript, Vite); unit tests run here, the bundle is copied into the runtime image -----------
@@ -24,7 +24,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config git ca-certificates ccache \
       libasound2-dev libfreetype-dev libfontconfig1-dev libopus-dev \
-      nlohmann-json3-dev libcli11-dev libcpp-httplib-dev libebur128-dev libmp3lame-dev \
+      nlohmann-json3-dev libcli11-dev libcpp-httplib-dev libebur128-dev libmp3lame-dev libtomlplusplus-dev \
       libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxi-dev \
  && rm -rf /var/lib/apt/lists/*
 # Tracktion's nested JUCE submodule is declared with an ssh URL (git@github.com:...). Rewrite it to https so that
@@ -39,6 +39,11 @@ ARG ROVOX_BUILD_SPIKES=OFF
 # Optional: cap compiler parallelism (Tracktion/JUCE translation units need ~1.5 GB each; 15 jobs OOM a 12 GB Docker VM)
 ARG ROVOX_BUILD_JOBS=
 ENV ROVOX_GIT_SHA=${ROVOX_GIT_SHA}
+# open LV2 plugins from Debian for the plugin tests (instruments that play MIDI, effects); the tests fail, not skip, when they are missing
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends calf-plugins zynaddsubfx-lv2 lsp-plugins-lv2 x42-plugins avldrums.lv2 avldrums.lv2-soundfont \
+ && rm -rf /var/lib/apt/lists/*
+ENV ROVOX_REQUIRE_LV2=1
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/ccache \
@@ -64,6 +69,15 @@ WORKDIR /src
 FROM base AS runtime
 RUN useradd --uid 10001 --create-home --home-dir /home/rovox --shell /usr/sbin/nologin rovox \
  && mkdir -p /data && chown 10001:10001 /data
+# The open LV2 pack (task 400/620): instruments and effects the agent can load without anything mounted. Debian packages, GPL / LGPL, installed
+# from the distribution and not part of the Rovox source (see NOTICE.md). Mount your own plugins at /plugins. python3 runs the rovox-skills sidecar
+# and the end-to-end scripts.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 calf-plugins zynaddsubfx-lv2 lsp-plugins-lv2 x42-plugins avldrums.lv2 avldrums.lv2-soundfont \
+ && rm -rf /var/lib/apt/lists/*
+COPY skills/rovox_skills /opt/rovox-skills/rovox_skills
+COPY tools/m45_e2e.py /opt/rovox-skills/m45_e2e.py
+ENV PYTHONPATH=/opt/rovox-skills
 COPY --from=build /out/bin/rovox /usr/local/bin/rovox
 COPY --from=web /web/dist /usr/share/rovox/web
 USER 10001
@@ -95,3 +109,12 @@ COPY spikes/p4_mcp /opt/rovox/spikes/p4_mcp
 USER 10001
 ENTRYPOINT ["rovox_spikes"]
 CMD []
+
+# ---- skills: the rovox-skills sidecar alone (Python, standard library only); talks to the core over MCP
+FROM python:3.12-slim-bookworm AS skills
+COPY skills /opt/rovox-skills
+RUN pip install --no-cache-dir /opt/rovox-skills
+USER 10001
+ENV ROVOX_URL=http://rovox:4810/mcp
+ENTRYPOINT ["rovox-skills"]
+CMD ["list"]

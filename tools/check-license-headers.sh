@@ -19,7 +19,7 @@ while IFS= read -r -d '' f; do
         echo "missing license header: $f" >&2
         status=1
     fi
-done < <(find src tests spikes \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.mm' \) -print0 2>/dev/null)
+done < <(find src tests spikes \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.mm' -o -name '*.c' \) -print0 2>/dev/null)
 
 while IFS= read -r -d '' f; do
     head3="$(head -n 3 "$f")"
@@ -27,10 +27,10 @@ while IFS= read -r -d '' f; do
         *"$spdx"*"$copyright"*) ;;
         *) echo "missing license header: $f" >&2; status=1 ;;
     esac
-done < <(find src tests spikes tools cmake docker .github web \
+done < <(find src tests spikes tools cmake docker .github web skills \
               \( -name node_modules -o -name dist \) -prune -o \
               \( -name '*.py' -o -name '*.sh' -o -name '*.cmake' -o -name 'CMakeLists.txt' -o -name 'Dockerfile' \
-                 -o -name '*.yml' -o -name '*.yaml' -o -name '*.html' -o -name '*.js' -o -name '*.mjs' -o -name '*.ts' -o -name '*.css' \) -print0 2>/dev/null
+                 -o -name '*.yml' -o -name '*.yaml' -o -name '*.html' -o -name '*.js' -o -name '*.mjs' -o -name '*.ts' -o -name '*.css' -o -name '*.ttl' -o -name '*.toml' \) -print0 2>/dev/null
          printf '%s\0' CMakeLists.txt)
 
 exit $status

@@ -3,6 +3,8 @@
 
 #include "EngineHost.h"
 
+#include "PluginCatalog.h"
+
 #include <algorithm>
 #include <cstdlib>
 
@@ -101,8 +103,33 @@ fs::path resolveDataDir (const fs::path& explicitDir)
     return fs::temp_directory_path() / "rovox";
 }
 
+namespace
+{
+/** lilv and the VST3 scanner read LV2_PATH / VST3_PATH when the plugin formats are created, so the search paths must be settled before the engine.
+    The plugin directory (--plugins, /plugins in the container) is added to the system locations. */
+void settlePluginSearchPaths (const fs::path& pluginsDir)
+{
+    auto settle = [&] (const char* var, const std::string& systemDefault, const std::vector<std::string>& extra)
+    {
+        std::string value = std::getenv (var) != nullptr && *std::getenv (var) != 0 ? std::getenv (var) : systemDefault;
+
+        for (auto& e : extra)
+            if (! e.empty() && value.find (e) == std::string::npos)
+                value += ":" + e;
+
+        ::setenv (var, value.c_str(), 1);
+    };
+
+    const std::string dir = pluginsDir.string();
+    settle ("LV2_PATH", "/usr/lib/lv2:/usr/local/lib/lv2", { "/plugins/lv2", dir.empty() ? "" : dir + "/lv2", dir });
+    settle ("VST3_PATH", "/usr/lib/vst3:/usr/local/lib/vst3", { "/plugins/vst3", dir.empty() ? "" : dir + "/vst3", dir });
+}
+} // namespace
+
 EngineHost::EngineHost (const EngineConfig& c) : config_ (c), budget_ (rovox::cpuBudget())
 {
+    settlePluginSearchPaths (config_.pluginsDir);
+
     if (config_.dataDir.empty())
         config_.dataDir = resolveDataDir ({});
 
@@ -121,8 +148,17 @@ EngineHost::EngineHost (const EngineConfig& c) : config_ (c), budget_ (rovox::cp
         stream_ = std::make_unique<BrowserStream> (*engine_);
 }
 
+PluginCatalog& EngineHost::catalog()
+{
+    if (catalog_ == nullptr)
+        catalog_ = std::make_unique<PluginCatalog> (*this);
+
+    return *catalog_;
+}
+
 EngineHost::~EngineHost()
 {
+    catalog_.reset();
     if (stream_ != nullptr)
         engine_->getDeviceManager().closeDevices();         // no more callbacks into the stream
 

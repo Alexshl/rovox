@@ -7,6 +7,7 @@
 #include "Import.h"
 #include "JsonSchema.h"
 #include "Loudness.h"
+#include "PluginHost.h"
 #include "ProjectManager.h"
 #include "Spectrum.h"
 #include "TimePos.h"
@@ -55,7 +56,9 @@ struct JobService::Prepared
 {
     Captured cap;
     RenderRequest req;
-    std::shared_ptr<te::Edit> snapshot;
+    std::shared_ptr<te::Edit> snapshot;                 // null when the render runs in a child process (the project has external plugins)
+    fs::path childDir;                                  // project copy for the child process; empty = no external plugins
+    std::shared_ptr<void> childCleanup;
     std::shared_ptr<void> activeToken;         // decrements Project::activeJobs on the message thread when released
     json args;
     std::vector<std::string> kinds;
@@ -168,7 +171,7 @@ Result<void> parseRenderArgs (Project& p, const json& args, RenderRequest& req)
 }
 } // namespace
 
-Result<std::shared_ptr<JobService::Prepared>> JobService::prepare (const JobContextInfo& who, const json& args, const std::string&, bool wantTrackIds)
+Result<std::shared_ptr<JobService::Prepared>> JobService::prepare (const JobContextInfo& who, const json& args, const std::string& kind, bool wantTrackIds)
 {
     auto fut = executor_.run ([&]() -> Result<std::shared_ptr<Prepared>>
     {
@@ -221,10 +224,24 @@ Result<std::shared_ptr<JobService::Prepared>> JobService::prepare (const JobCont
             cap.barStarts.emplace_back (bar, s);
         }
 
-        prep->snapshot = std::shared_ptr<te::Edit> (makeRenderSnapshot (*project).release(), [ex = &executor_] (te::Edit* e)
+        // Projects with external plugins: the render runs in a child process, so a crashing plugin cannot take the server down (task 410).
+        // The server never creates a second in-process copy of those plugins for a render; previews and analysis still analyse in-process,
+        // but only after the same render passed in the child (the guard).
+        if (editHasExternalPlugins (project->edit()))
         {
-            ex->run ([e] { delete e; });        // an Edit must be destroyed on the message thread
-        });
+            prep->childDir = writeProjectSnapshot (*project, "job-" + newUlid());
+
+            if (prep->childDir.empty())
+                return makeError (errc::io, "cannot prepare the project copy for the render process");
+
+            prep->childCleanup = std::shared_ptr<void> (static_cast<void*> (prep.get()), [dir = prep->childDir] (void*) { std::error_code ec; fs::remove_all (dir, ec); });
+        }
+
+        if (prep->childDir.empty() || kind != "render")
+            prep->snapshot = std::shared_ptr<te::Edit> (makeRenderSnapshot (*project).release(), [ex = &executor_] (te::Edit* e)
+            {
+                ex->run ([e] { delete e; });        // an Edit must be destroyed on the message thread
+            });
 
         ++project->activeJobs();
         const auto id = project->id();
@@ -287,7 +304,7 @@ Result<StartedJob> JobService::startRender (const JobContextInfo& who, const jso
     auto p = prep.value();
     p->req.preflightOnly = preflightOnly;
 
-    return submit (who, preflightOnly ? "preflight" : "render", "render", 0, args, [p] (JobContext& jc) -> Result<json>
+    return submit (who, preflightOnly ? "preflight" : "render", "render", 0, args, [this, p, who] (JobContext& jc) -> Result<json>
     {
         auto req = p->req;
         req.hooks.shouldCancel = [&jc] { return jc.cancelled(); };
@@ -298,6 +315,17 @@ Result<StartedJob> JobService::startRender (const JobContextInfo& who, const jso
         ctx.projectId = p->cap.projectId;
         ctx.sourceRevision = p->cap.revision;
         ctx.projectSampleRate = p->cap.sampleRate;
+
+        if (! p->childDir.empty())
+            return renderInChild (p->childDir, projects_.host().dataDir(), ctx, req, [this, who, &jc] (const json& info)
+            {
+                json event = info;
+                event["type"] = "plugin.crashed";
+                event["project_id"] = who.projectId;
+                event["job_id"] = jc.id();
+                projects_.hub().publish (who.tenant, who.projectId, event);
+            });
+
         return renderEdit (*p->snapshot, ctx, req);
     });
 }
@@ -481,6 +509,36 @@ Result<json> JobService::runAnalysisJob (JobContext& jc, Prepared& p, bool keepC
     ctx.projectId = p.cap.projectId;
     ctx.sourceRevision = p.cap.revision;
     ctx.projectSampleRate = p.cap.sampleRate;
+
+    if (! p.childDir.empty())
+    {
+        // the guard: the same render in a child process, kept only to learn whether a plugin survives it
+        auto guard = p.req;
+        guard.name = "guard";
+        guard.format = RenderFormat { "wav", 16, 128, p.cap.sampleRate, 2 };
+        guard.loudness.mode = "none";
+        guard.failOn.clear();
+        guard.warnOn.clear();
+        guard.tailS = 0.0;
+        guard.hooks = {};
+        guard.hooks.shouldCancel = [&jc] { return jc.cancelled(); };
+        RenderContext gctx = ctx;
+        gctx.rendersDir = tmpDir / "guard";
+        fs::create_directories (gctx.rendersDir, ec);
+        jc.progress (0.0, "rendering in a separate process (plugin check)");
+
+        auto g = renderInChild (p.childDir, projects_.host().dataDir(), gctx, guard, [this, &p, &jc] (const json& info)
+        {
+            json event = info;
+            event["type"] = "plugin.crashed";
+            event["project_id"] = p.cap.projectId;
+            event["job_id"] = jc.id();
+            projects_.hub().publish (p.cap.tenant, p.cap.projectId, event);
+        });
+
+        if (! g.ok())
+            return g.error();
+    }
 
     const auto clipName = req.name;
     auto result = renderEdit (*p.snapshot, ctx, req);

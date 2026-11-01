@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Rovox contributors
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<urn:rovox:test:crash-early> a lv2:Plugin ; lv2:binary <crash.so> ; rdfs:seeAlso <crash.ttl> .
+<urn:rovox:test:crash-late>  a lv2:Plugin ; lv2:binary <crash.so> ; rdfs:seeAlso <crash.ttl> .
+<urn:rovox:test:pass>        a lv2:Plugin ; lv2:binary <crash.so> ; rdfs:seeAlso <crash.ttl> .

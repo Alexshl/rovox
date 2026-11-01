@@ -13,12 +13,18 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandBus.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Commands.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsEdit.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CommandsMidi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CommandsPlugins.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CommandsRouting.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsTransport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/DeliveryService.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/EngineHost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Gateway.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/HttpServer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Import.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Peaks.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PluginCatalog.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PluginHost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginScan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Project.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ProjectFormat.cpp
@@ -26,6 +32,7 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/Render.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RenderJobs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RppImport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Templates.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TimePos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/WebSocket.cpp)

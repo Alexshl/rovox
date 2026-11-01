@@ -28,6 +28,8 @@ Installed from the distribution (Debian packages), not bundled. Linked dynamical
 | libebur128 | ITU-R BS.1770-4 loudness | MIT |
 | LAME (libmp3lame) | MP3 encoding, dynamic linking | LGPL-2.1-or-later |
 | libopus | Opus encoding of the browser audio stream, dynamic linking | BSD-3-Clause |
+| toml++ (libtomlplusplus3) | reading `rovox.toml` (delivery adapters), dynamic linking | MIT |
+| OpenSSL (libssl3, through cpp-httplib) | HTTPS for the Telegram, S3 and webhook delivery adapters, dynamic linking | Apache-2.0 |
 
 ## Web UI (`web/`)
 
@@ -39,3 +41,24 @@ Built in the Docker image (Node 22) and served as static files by `rovox serve`.
 | IBM Plex Sans, IBM Plex Mono (`@fontsource/ibm-plex-*`) | UI and readout fonts, self-hosted woff2 | SIL OFL 1.1 |
 
 Build and test tools only (not shipped): Vite, TypeScript, Vitest, jsdom, node-canvas (optional, canvas tests) — MIT.
+
+## LV2 plugins in the runtime image
+
+The runtime image installs these Debian packages so that the agent has instruments and effects out of the box. They are separate programs loaded
+at run time (in child processes), not linked into Rovox and not part of this repository; each keeps its own license.
+
+| Package | Provides | License |
+|---|---|---|
+| zynaddsubfx-lv2 | synthesizer (instrument) and effects | GPL-2.0-or-later |
+| avldrums.lv2 (+ avldrums.lv2-soundfont) | drum kits (instrument) | GPL-2.0-or-later |
+| calf-plugins | synthesizers and studio effects | LGPL-2.1-or-later |
+| lsp-plugins-lv2 | dynamics, EQ, reverbs | LGPL-3.0-or-later |
+| x42-plugins | EQ, compressor, limiter, meters | GPL-2.0-or-later |
+
+Commercial plugins are never bypassed: a plugin that needs an activation or a license that the server cannot satisfy simply fails to load and is
+reported (`PLUGIN_LOAD_FAILED`, blacklist), see `plugin.catalog` and `plugin.probe`.
+
+## rovox-skills (`skills/`)
+
+Python 3 standard library only; no third-party dependency is installed. Optional extras (`analysis`: numpy, soundfile, librosa) are not part of
+this version.

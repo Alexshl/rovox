@@ -7,6 +7,7 @@
 #include "Mcp.h"
 
 #include "JsonSchema.h"
+#include "McpExtras.h"
 #include "Sha1.h"
 
 #include <algorithm>
@@ -98,6 +99,8 @@ CommandContext splitEnvelope (McpServer& server, Session& session, json& params,
 
     ctx.undoLabel = params.value ("undo_label", "");
     ctx.dryRun = params.value ("dry_run", false);
+    ctx.coalesce = params.value ("coalesce", false);        // internal: recipe steps continue one undo step; not part of any tool schema
+    params.erase ("coalesce");
     params.erase ("if_revision");
     params.erase ("undo_label");
     params.erase ("dry_run");
@@ -150,10 +153,38 @@ const CommandToolSpec commandTools[] = {
     { "tempo.set", "Set tempo", "Replaces the tempo points; the first is the tempo at the start. Position later points with bar or qn.", false },
     { "time.convert", "Convert time", "Converts a time ({s} | {bar,beat,tick} | {qn} | {marker}) to seconds, quarter notes and bar.beat.tick under the project's tempo map.", true },
     { "fx.list", "List plugins", "The plugin chain of a track (or target=\"master\"), in order. The volume fader shows up as is_fader.", true },
-    { "fx.add", "Add plugin", "Adds a built-in effect (builtin: equaliser, compressor, reverb, delay, chorus, phaser, lowpass) or an external plugin to a track or the master, before the fader.", false },
+    { "fx.add", "Add plugin", "Adds a built-in effect (builtin: equaliser, compressor, reverb, delay, chorus, phaser, lowpass) or an external plugin (plugin: {plugin_uid} from plugin.catalog) to a track or the master, before the fader. Instruments go on the track whose MIDI items they should play. The plugin is tested in a separate process first.", false },
     { "fx.remove", "Remove plugin", "Removes a plugin by plugin_id.", false },
     { "fx.params", "Plugin parameters", "Lists the parameters of a plugin: ident, name, value in the parameter's own unit, display text, min, max.", true },
     { "fx.update", "Update plugin", "Sets enabled and/or params {ident_or_name: number | \"text such as -6 dB\"} of a plugin in one undo step.", false },
+    { "project.catalog", "Project catalog", "Every project of this server, open or only on disk: id, name, tracks, modified time, open flag. project.open takes the project_id.", true },
+    { "plugin.catalog", "Plugin catalog", "Installed plugins the agent can load: plugin_uid, name, vendor, kind (instrument|effect), io, status (ok|blacklisted), tags and, with include_presets, factory presets. Filter by kind/query/tag/format. Use the plugin_uid with fx.add.", true },
+    { "plugin.rescan", "Rescan plugins", "Scans the plugin directories again (in a child process). Unchanged directories return the cached catalog at once; force=true rescans anyway.", false },
+    { "plugin.probe", "Probe plugin", "Loads one plugin in a separate process, pushes audio through it and, for an instrument, plays notes: reports latency, parameter count and whether it makes sound. A plugin that crashes is blacklisted; the server is not affected.", false },
+    { "plugin.tag", "Tag plugin", "Sets free-form tags (genre, role) on a catalog entry so plugin.catalog can find it by tag.", false },
+    { "plugin.unblacklist", "Unblacklist plugin", "Removes a plugin from the blacklist so that it can be probed and loaded again.", false },
+    { "fx.presets", "Plugin presets", "Factory and user presets of a loaded external plugin: preset_id, name, source.", true },
+    { "fx.preset_load", "Load plugin preset", "Loads a preset into a plugin on the track (undoable).", false },
+    { "fx.preset_save", "Save plugin preset", "Stores the plugin's current state as a user preset (name, tags) under the data directory.", false },
+    { "fx.move", "Move plugin", "Moves a plugin to to_index inside its chain (track or master).", false },
+    { "item.create_midi", "Create MIDI item", "Creates a MIDI item on a track at a time, optionally with notes {pitch (60 or \"C4\"), start_qn, length_qn, velocity}; note times are quarter notes from the item start. The track's instrument plugin plays it.", false },
+    { "item.duplicate", "Duplicate item", "Copies an item (audio or MIDI) after the original, or at a time / on another track; count repeats it.", false },
+    { "midi.get", "Get MIDI notes", "The notes of a MIDI item with note_id, pitch, start_qn, length_qn, velocity.", true },
+    { "midi.write", "Write MIDI notes", "Replaces (mode=replace, default) or appends (mode=append) the notes of a MIDI item; the item grows to fit unless extend=false.", false },
+    { "midi.edit", "Edit MIDI notes", "Adds, updates and deletes notes of a MIDI item by note_id in one undo step.", false },
+    { "midi.transpose", "Transpose MIDI notes", "Shifts the pitches of an item (or the given note_ids) by semitones.", false },
+    { "midi.quantize", "Quantize MIDI notes", "Snaps note starts (and optionally lengths) to a grid in quarter notes; strength 0..1 moves partway.", false },
+    { "midi.import_file", "Import MIDI file", "Reads a standard MIDI file on the server into a new MIDI item on a track.", false },
+    { "routing.list", "List sends", "Aux sends (send_id, from track, to_track_id, gain_db, pre_fader) and the return tracks of the project.", true },
+    { "routing.send_create", "Create send", "Sends a track to a bus track (reverb, parallel compression). The bus track gets a return automatically; put the effect on that track with fx.add.", false },
+    { "routing.send_update", "Update send", "Changes gain_db, mute, pre_fader or the destination of a send.", false },
+    { "routing.send_delete", "Delete send", "Removes a send (and the return when nothing else feeds it).", false },
+    { "track.duplicate", "Duplicate track", "Copies a track with its plugins and items (sends are not copied).", false },
+    { "template.list", "List templates", "Project templates (built-in and saved): id, name, description, tags.", true },
+    { "template.get", "Get template", "The full template document: tracks, instruments, effects, sends, master chain.", true },
+    { "template.save", "Save template", "Saves the structure of a project (tracks, instruments, effects, sends, master chain, tempo) as a template under the data directory.", false },
+    { "template.apply", "Apply template", "Creates the template's tracks, instruments, effects, sends and master chain in a project as ONE undo step. Fails with PRECONDITION_FAILED listing the missing plugins when it needs instruments that are not installed. bindings {role: {notes | midi_file}} puts MIDI on tracks.", false },
+    { "template.delete", "Delete template", "Deletes a saved template.", false },
     { "import.rpp", "Import REAPER project", "Imports a REAPER .RPP file into the project: tracks, items, markers, tempo. Unsupported FX are reported, not translated.", false },
     { "import.apply", "Apply import plan", "Creates the tracks and items of a plan made by import.plan. rename maps source keys (REC01) or planned names to track names.", false },
 };
@@ -695,6 +726,225 @@ void McpServer::buildTools()
                 return ToolOutput::failure (r.error());
 
             return ToolOutput::success (r.value());
+        };
+        add (std::move (t));
+    }
+
+    // ---- delivery (task 510) -------------------------------------------------------------------------------------
+    {
+        ToolDef t;
+        t.name = "delivery.list_adapters";
+        t.title = "List delivery adapters";
+        t.description = "Where renders can be sent: id (such as telegram.me, s3.backup, webhook.n8n, file.exports), kind and a short description. Never shows tokens, chat ids or bucket credentials.";
+        t.inputSchema = schema (json::object());
+        t.annotations = { { "readOnlyHint", true } };
+        t.handler = [] (ToolCall& c) -> ToolOutput { return ToolOutput::success (c.server.delivery().listAdapters()); };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "delivery.send";
+        t.title = "Deliver a render";
+        t.description = "Sends a finished render or preview (source {job_id} of a render.start / render.preview job, or {file: \"renders/mix.mp3\"}) with an adapter from delivery.list_adapters. "
+                        "If the project is on hold (project.update delivery_hold) the file is queued and the status is HELD until delivery.release. client_request_id makes a repeat harmless; transient failures are retried.";
+        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "source", schema ({ { "job_id", str() }, { "file", str ("path inside the project, e.g. renders/mix.mp3") } }) },
+                                  { "adapter", str() }, { "caption", str() }, { "title", str() }, { "options", { { "type", "object" } } },
+                                  { "force", boolean ("send although the project is on hold") }, { "client_request_id", str() },
+                                  { "wait_s", { { "type", "number" }, { "minimum", 0 }, { "maximum", 120 } } } }, { "project_id", "source", "adapter" });
+        t.annotations = { { "readOnlyHint", false }, { "destructiveHint", false }, { "openWorldHint", true } };
+        t.mayBlock = true;
+        t.handler = [waitForJob, jobWait] (ToolCall& c) -> ToolOutput
+        {
+            const std::string projectId = c.args["project_id"];
+            DeliverySendArgs a;
+            a.tenant = c.session.tenant;
+            a.projectId = projectId;
+            a.adapter = c.args["adapter"];
+            a.caption = c.args.value ("caption", "");
+            a.title = c.args.value ("title", "");
+            a.clientRequestId = c.args.value ("client_request_id", "");
+            a.source = c.args["source"];
+            a.options = c.args.value ("options", json::object());
+            a.force = c.args.value ("force", false);
+            a.origin = c.session.origin().toJson();
+            auto started = c.server.delivery().send (a);
+
+            if (! started.ok())
+                return ToolOutput::failure (started.error(), std::nullopt, projectId);
+
+            if (! started.value().held.is_null())
+            {
+                auto d = started.value().held;
+                return ToolOutput::success ({ { "delivery_id", d["delivery_id"] }, { "status", "HELD" }, { "adapter", d["adapter"] }, { "file", d["file"] },
+                                              { "note", "the project is on hold: the file is queued; delivery.release sends it" } }, std::nullopt, projectId);
+            }
+
+            if (! started.value().existing.is_null())
+            {
+                auto d = started.value().existing;
+                return ToolOutput::success ({ { "delivery_id", d["delivery_id"] }, { "status", d["status"] }, { "adapter", d["adapter"] }, { "receipt", d.value ("receipt", json (nullptr)) }, { "created", false } }, std::nullopt, projectId);
+            }
+
+            auto out = waitForJob (c, started.value().jobId, true, jobWait (c.args, 60, 120), projectId, true);
+
+            if (out.ok && out.data.value ("state", "") == "succeeded")
+            {
+                const auto& d = out.data["result"];
+                out.data = { { "delivery_id", d["delivery_id"] }, { "status", "sent" }, { "adapter", d["adapter"] }, { "receipt", d.value ("receipt", json (nullptr)) },
+                             { "attempts", d.value ("attempts", 1) }, { "job_id", started.value().jobId }, { "created", true } };
+            }
+            else if (out.ok)
+            {
+                out.data["status"] = "sending";
+            }
+
+            return out;
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "delivery.release";
+        t.title = "Release held deliveries";
+        t.description = "Sends the deliveries that were queued while the project was on hold (one delivery_id, or all). Each is sent exactly once. Turn the hold off with project.update delivery_hold=false.";
+        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "delivery_id", str() }, { "wait_s", { { "type", "number" }, { "minimum", 0 }, { "maximum", 120 } } } }, { "project_id" });
+        t.annotations = { { "readOnlyHint", false }, { "openWorldHint", true } };
+        t.mayBlock = true;
+        t.handler = [waitForJob, jobWait] (ToolCall& c) -> ToolOutput
+        {
+            const std::string projectId = c.args["project_id"];
+            auto started = c.server.delivery().release (c.session.tenant, projectId, c.args.value ("delivery_id", ""), c.session.origin().toJson());
+
+            if (! started.ok())
+                return ToolOutput::failure (started.error(), std::nullopt, projectId);
+
+            json released = json::array();
+
+            for (auto& s : started.value())
+            {
+                auto out = waitForJob (c, s.jobId, true, jobWait (c.args, 60, 120), projectId, false);
+
+                if (! out.ok)
+                    return out;
+
+                if (out.data.value ("state", "") == "succeeded")
+                {
+                    const auto& d = out.data["result"];
+                    released.push_back ({ { "delivery_id", d["delivery_id"] }, { "status", "sent" }, { "adapter", d["adapter"] }, { "receipt", d.value ("receipt", json (nullptr)) } });
+                }
+                else
+                {
+                    released.push_back ({ { "job_id", s.jobId }, { "status", out.data.value ("state", "") }, { "error", out.data.value ("error", json (nullptr)) } });
+                }
+            }
+
+            return ToolOutput::success ({ { "released", released } }, std::nullopt, projectId);
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "delivery.list";
+        t.title = "List deliveries";
+        t.description = "The delivery journal of a project: delivery_id, adapter, file, status (held|pending|sending|sent|failed), receipt or error.";
+        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "status", str() } }, { "project_id" });
+        t.annotations = { { "readOnlyHint", true } };
+        t.handler = [] (ToolCall& c) -> ToolOutput
+        {
+            auto r = c.server.delivery().list (c.session.tenant, c.args["project_id"], c.args.value ("status", ""));
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error(), std::nullopt, c.args["project_id"]);
+
+            return ToolOutput::success (r.value(), std::nullopt, c.args["project_id"]);
+        };
+        add (std::move (t));
+    }
+
+    // ---- recipes (task 600, MVP) ---------------------------------------------------------------------------------
+    {
+        ToolDef t;
+        t.name = "recipe.list";
+        t.title = "List recipes";
+        t.description = "Named multi-step procedures (built-in and saved): recipe_id, description and the parameters each takes.";
+        t.inputSchema = schema (json::object());
+        t.annotations = { { "readOnlyHint", true } };
+        t.handler = [] (ToolCall& c) -> ToolOutput { return ToolOutput::success ({ { "recipes", listRecipes (c.server.projects().host().dataDir()) } }); };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "recipe.get";
+        t.title = "Get recipe";
+        t.description = "The full recipe: parameter schema, defaults and steps ([{tool, arguments}] with ${params.x} and ${steps.N.field} references).";
+        t.inputSchema = schema ({ { "recipe_id", str() } }, { "recipe_id" });
+        t.annotations = { { "readOnlyHint", true } };
+        t.handler = [] (ToolCall& c) -> ToolOutput
+        {
+            auto r = loadRecipe (c.server.projects().host().dataDir(), c.args["recipe_id"]);
+
+            if (! r)
+                return ToolOutput::failure (makeError (errc::notFound, "no recipe " + c.args["recipe_id"].get<std::string>()));
+
+            return ToolOutput::success ({ { "recipe", *r } });
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "recipe.save";
+        t.title = "Save recipe";
+        t.description = "Stores a recipe: {id, name, description, params (JSON schema), defaults, steps: [{tool, arguments}]}. Steps may use any tool except recipe.* and batch.";
+        t.inputSchema = schema ({ { "recipe", { { "type", "object" } } } }, { "recipe" });
+        t.annotations = { { "readOnlyHint", false } };
+        t.handler = [] (ToolCall& c) -> ToolOutput
+        {
+            auto r = saveRecipe (c.server.projects().host().dataDir(), c.args["recipe"]);
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error());
+
+            return ToolOutput::success ({ { "recipe_id", r.value()["id"] } });
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "recipe.delete";
+        t.title = "Delete recipe";
+        t.description = "Deletes a saved recipe.";
+        t.inputSchema = schema ({ { "recipe_id", str() } }, { "recipe_id" });
+        t.annotations = { { "readOnlyHint", false }, { "destructiveHint", true } };
+        t.handler = [] (ToolCall& c) -> ToolOutput
+        {
+            auto r = deleteRecipe (c.server.projects().host().dataDir(), c.args["recipe_id"]);
+            return r.ok() ? ToolOutput::success ({ { "recipe_id", c.args["recipe_id"] } }) : ToolOutput::failure (r.error());
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "recipe.run";
+        t.title = "Run recipe";
+        t.description = "Runs a recipe step by step with the given params (project_id is filled into project tools). Stops at the first failing step and reports it. The project edits of one run are ONE undo step.";
+        t.inputSchema = schema ({ { "recipe_id", str() }, { "project_id", projectIdProp() }, { "params", { { "type", "object" } } } }, { "recipe_id" });
+        t.annotations = { { "readOnlyHint", false }, { "openWorldHint", true } };
+        t.mayBlock = true;
+        t.handler = [] (ToolCall& c) -> ToolOutput
+        {
+            auto r = loadRecipe (c.server.projects().host().dataDir(), c.args["recipe_id"]);
+
+            if (! r)
+                return ToolOutput::failure (makeError (errc::notFound, "no recipe " + c.args["recipe_id"].get<std::string>()));
+
+            return runRecipe (c, *r, c.args.value ("params", json::object()), c.args.value ("project_id", ""));
         };
         add (std::move (t));
     }

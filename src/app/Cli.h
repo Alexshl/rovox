@@ -31,6 +31,10 @@ struct Options
     bool normalize = false, check = false, json = false, preflightOnly = false;
     std::vector<std::string> trackIds;
 
+    // hidden child commands (plugin-probe, render-child)
+    std::string probeFile, snapshotDir, requestFile;
+    bool presetsOnly = false;
+
     // import / upload
     std::vector<std::string> paths;
     std::string project, newName, preset = "auto", align = "start", takes = "separate", rename, server;
@@ -45,5 +49,7 @@ int runImport (const Options&);
 int runUpload (const Options&);
 int runPlugins (const Options&);
 int runMcp (const Options&);
+int runPluginProbe (const Options&);
+int runRenderChildCommand (const Options&);
 
 } // namespace rovox::cli

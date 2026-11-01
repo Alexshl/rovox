@@ -6,6 +6,7 @@
 #pragma once
 
 #include "CommandBus.h"
+#include "DeliveryService.h"
 #include "EventHub.h"
 #include "JobManager.h"
 #include "ProjectManager.h"
@@ -34,6 +35,7 @@ struct McpConfig
     int sessionTtlS = 1800;                 // idle HTTP sessions expire
     std::function<Result<json> (const std::string&)> uploadBatchStatus;     // set by `serve`; enables upload.status
     std::function<bool()> audioActive;      // optional
+    std::string configFile;                 // TOML with [delivery.*] adapters; empty = $ROVOX_CONFIG, else <data>/config/rovox.toml
 };
 
 /** One client connection. The outbound queue is a ring with ids so that an SSE stream can resume after a drop. */
@@ -154,6 +156,7 @@ public:
     JobManager& jobs()                          { return jobs_; }
     JobService& jobService()                    { return jobService_; }
     EventHub& hub()                             { return hub_; }
+    DeliveryService& delivery()                 { return *delivery_; }
 
     /** Waits for the command-bus future with a deadline and cancellation. */
     CommandResult runCommand (const std::string& name, const json& params, const CommandContext&, const std::atomic<bool>* cancelled = nullptr);
@@ -186,6 +189,7 @@ private:
     JobManager& jobs_;
     JobService& jobService_;
     McpConfig config_;
+    std::unique_ptr<DeliveryService> delivery_;
 
     std::map<std::string, ToolDef> tools_;
     std::map<std::string, std::string> toolAliases_;          // alternative spelling -> canonical name

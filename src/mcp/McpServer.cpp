@@ -71,7 +71,8 @@ Origin Session::origin() const
         if (auto name = clientInfo["name"].get<std::string>(); ! name.empty() && name.size() <= 64)
             label = name;
 
-    return { Origin::Kind::mcp, shortId, label };
+    // the rovox-skills sidecar names itself "skill:<name>": its steps show in the journal as origin skill:<name> and are undoable like any agent step
+    return { label.rfind ("skill:", 0) == 0 ? Origin::Kind::skill : Origin::Kind::mcp, shortId, label };
 }
 
 std::uint64_t Session::push (json message)
@@ -167,6 +168,15 @@ ToolOutput ToolOutput::failure (Error e, std::optional<std::uint64_t> revision, 
 McpServer::McpServer (ProjectManager& p, CommandBus& b, EventHub& h, JobManager& j, JobService& js, McpConfig c)
     : projects_ (p), bus_ (b), hub_ (h), jobs_ (j), jobService_ (js), config_ (std::move (c))
 {
+    {
+        fs::path configFile = config_.configFile;
+
+        if (configFile.empty())
+            configFile = std::getenv ("ROVOX_CONFIG") != nullptr ? fs::path (std::getenv ("ROVOX_CONFIG")) : projects_.host().dataDir() / "config" / "rovox.toml";
+
+        delivery_ = std::make_unique<DeliveryService> (projects_, jobs_, bus_.executor(), configFile);
+    }
+
     buildTools();
     observerId_ = hub_.addObserver ([this] (const Event& e) { onHubEvent (e); });
     flusher_ = std::thread ([this] { flusherLoop(); });
@@ -569,8 +579,7 @@ json McpServer::handleToolsCall (Session& s, const json& params, RequestContext&
     if (tool == nullptr)
     {
         // reserved namespaces answer NOT_IMPLEMENTED with the list of what exists (task 210), anything else is an unknown tool
-        static const char* reserved[] = { "template.", "notation.", "recipe.", "midi.", "routing.", "transport.set", "transport.get", "mixer.", "delivery.",
-                                          "plugin.", "fx.presets", "fx.preset_load", "fx.move", "track.duplicate", "item.duplicate", "item.create_midi" };
+        static const char* reserved[] = { "notation.", "mixer." };
 
         for (auto* r : reserved)
             if (name.rfind (r, 0) == 0 || replaceChar (name, '_', '.').rfind (r, 0) == 0)

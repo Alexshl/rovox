@@ -66,6 +66,10 @@ public:
     std::vector<ProjectSummary> list (const std::string& tenant, bool includeEphemeral = false) const;
     std::optional<std::uint64_t> revisionOf (const std::string& id) const;
 
+    /** Every project of the tenant: the open ones and those that only exist on disk below projectsRoot(), newest first. Each entry has
+        `open` and (from the file times) `modified`; the track count of a closed project is read from its edit.xml. */
+    json catalog (const std::string& tenant, bool includeEphemeral = false) const;
+
     fs::path projectDir (const std::string& tenant, const std::string& id) const;
     /** Project directory of the newest project on disk whose manifest name equals `name`. */
     std::optional<fs::path> findDirByName (const std::string& tenant, const std::string& name) const;

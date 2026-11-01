@@ -127,6 +127,8 @@ te::Plugin* findInstrument (te::Track& t)
 
 /** Plays the plugin instance by hand (a note, then silence) and measures every output channel of every bus,
     not only 0/1 (spike P2: a multi-out drum kit routed the kick to another pair). */
+constexpr double silentPeak = 3.16e-4;      // -70 dBFS
+
 struct PluginProbe
 {
     double peak = 0;
@@ -143,12 +145,18 @@ PluginProbe probePluginInstance (juce::AudioPluginInstance& inst, double sampleR
     PluginProbe out;
     out.channelPeaks.assign ((size_t) inst.getTotalNumOutputChannels(), 0.0);
 
-    for (int block = 0; block < 96; ++block)           // about 1.1 s at 44.1 kHz
+    // Instruments that load samples in a worker thread (avldrums) are silent until that finishes, in wall-clock time, however fast the blocks are
+    // processed. So the note is repeated, the blocks are paced like real time until sound is heard, and the probe ends once it has heard a note.
+    constexpr int maxBlocks = 300;                      // about 3.5 s at 44.1 kHz and 512 samples
+    constexpr int phaseLength = 40;
+
+    for (int block = 0; block < maxBlocks; ++block)
     {
         juce::MidiBuffer midi;
+        const int phase = block % phaseLength;
 
-        if (block == 0)    midi.addEvent (juce::MidiMessage::noteOn (1, note, 0.8f), 0);
-        if (block == 40)   midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+        if (phase == 0)     midi.addEvent (juce::MidiMessage::noteOn (1, note, 0.8f), 0);
+        if (phase == 25)    midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
 
         buf.clear();
         inst.processBlock (buf, midi);
@@ -159,13 +167,22 @@ PluginProbe probePluginInstance (juce::AudioPluginInstance& inst, double sampleR
             out.channelPeaks[(size_t) c] = std::max (out.channelPeaks[(size_t) c], p);
             out.peak = std::max (out.peak, p);
         }
+
+        if (out.peak > silentPeak)
+        {
+            if (phase >= 26)
+                break;
+        }
+        else
+        {
+            juce::Thread::sleep (8);
+        }
     }
 
     inst.releaseResources();
     return out;
 }
 
-constexpr double silentPeak = 3.16e-4;      // -70 dBFS
 } // namespace
 
 //==============================================================================
