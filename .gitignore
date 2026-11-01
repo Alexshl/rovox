@@ -1,0 +1,4 @@
+docs/
+.mcp.json
+.DS_Store
+build/
