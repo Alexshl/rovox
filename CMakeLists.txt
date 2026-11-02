@@ -52,6 +52,30 @@ pkg_check_modules(TOMLPP REQUIRED IMPORTED_TARGET tomlplusplus)
 find_library(ROVOX_LAME_LIB NAMES mp3lame REQUIRED)
 find_path(ROVOX_LAME_INCLUDE lame/lame.h REQUIRED)
 
+# ysfx (Apache-2.0): JSFX runtime on WDL EEL2 (zlib-style license), hosts REAPER JS effects (src/engine/JsfxPlugin). Headless: no graphics.
+# EEL2 has native x86_64 and aarch64 code generators; -DROVOX_YSFX_PORTABLE=ON selects the portable (no JIT) interpreter instead.
+option(ROVOX_YSFX_PORTABLE "Build ysfx/EEL2 without the machine-code generator" OFF)
+set(ROVOX_YSFX_COMMIT "8077347ccf4115567aed81400281dca57acbb0cc")           # jpcima/ysfx
+set(ROVOX_DR_LIBS_COMMIT "f13cbcfd06afe7287f99b1bb5982cefdf3d6a974")         # mackron/dr_libs, the submodule revision ysfx pins at that commit
+include(FetchContent)
+set(YSFX_GFX OFF CACHE BOOL "" FORCE)
+set(YSFX_PLUGIN OFF CACHE BOOL "" FORCE)
+set(YSFX_TESTS OFF CACHE BOOL "" FORCE)
+set(YSFX_TOOLS OFF CACHE BOOL "" FORCE)
+set(YSFX_SKIP_CHECKSUM ON CACHE BOOL "" FORCE)
+set(YSFX_PORTABLE ${ROVOX_YSFX_PORTABLE} CACHE BOOL "" FORCE)
+# Source archives of the pinned commits (a git clone of the dr_libs submodule is slow and not needed); the hashes make a changed archive fail loudly.
+FetchContent_Declare(ysfx
+    URL "https://github.com/jpcima/ysfx/archive/${ROVOX_YSFX_COMMIT}.tar.gz"
+    URL_HASH SHA256=dd59dd86af6c612436b43c06590140b4706326f67d89ff3fffa8d9dc503f7b79)
+FetchContent_Declare(ysfx_dr_libs
+    URL "https://github.com/mackron/dr_libs/archive/${ROVOX_DR_LIBS_COMMIT}.tar.gz"
+    URL_HASH SHA256=cc2695dbdd4902bed9bc8b7f7a0275fe53d657126f732bd28cfb2bd20cbb2701
+    SOURCE_SUBDIR rovox-no-cmake-project)
+FetchContent_MakeAvailable(ysfx_dr_libs ysfx)
+# ysfx expects dr_libs as thirdparty/dr_libs inside its own tree; point the interface target at the separately fetched headers instead
+set_property(TARGET dr_libs PROPERTY INTERFACE_INCLUDE_DIRECTORIES "${ysfx_dr_libs_SOURCE_DIR}")
+
 add_subdirectory(src/core)
 add_subdirectory(src/engine)
 add_subdirectory(src/mcp)

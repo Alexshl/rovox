@@ -28,6 +28,15 @@ docker run --rm -p 4810:4810 -v rovox-data:/data -v ~/songs:/in:ro rovox serve -
 # prints: generated access token ... open http://<host>:4810/?token=...      (or set ROVOX_TOKEN)
 ```
 
+REAPER JS effects (JSFX) run through ysfx. Mount the REAPER `Effects` folder read-only at `/jsfx` (or name your own directories in `ROVOX_JSFX_PATH`,
+colon separated) and they show up in `plugin.catalog` as format `JSFX` (uid `jsfx:<path>`, for example `jsfx:loser/Saturation`), `fx.add` takes them by uid,
+and the `<JS ...>` effects of an imported `.RPP` are loaded with the slider values of the project. The files are never copied into the image or the project:
+
+```
+docker run --rm -p 4810:4810 -v rovox-data:/data -v ~/songs:/in:ro \
+  -v "$HOME/Library/Application Support/REAPER/Effects:/jsfx:ro" rovox serve --bind 0.0.0.0 --audio browser --allow-path /in
+```
+
 Open the printed URL. The shell is served by `rovox serve` itself (built from `web/`, TypeScript + Vite, Canvas for the arrange view,
 no UI framework), with COOP/COEP headers. Everything the UI does is a command of the same layer MCP uses; the page has one WebSocket
 (`/ws`) for commands, events, 30 Hz meters and playhead, and the Opus audio of the browser stream (`--audio browser`: 48 kHz stereo,
@@ -49,10 +58,17 @@ python3 tools/web_e2e.py --token T agent  --project "My song"                  #
 rovox import ZOOM0001.zprj --new "My song" --rename "REC01=Guitar,REC02=Bass"
 rovox render "My song" --out mix.wav --check                      # exit 0 ok, 2 checks failed, 1 error
 rovox render "My song" --out mix.mp3 --check --target-lufs -14 --normalize --json
-rovox import song.RPP --new "From REAPER"
+rovox import song.RPP --new "From REAPER"                          # FX: JSFX from ROVOX_JSFX_PATH, Rea* settings from song.rovoxfx.json if present
 rovox serve --data-dir /data --bind 0.0.0.0                       # HTTP API, tus uploads, autosave; SIGTERM saves and exits
 rovox upload ZOOM0001.zprj --server http://host:4810 --token T    # resumable, run again after a dropped connection
 ```
+
+### REAPER effect settings
+
+An `.RPP` stores the settings of REAPER's own effects (ReaEQ, ReaComp, ReaLimit, ReaGate, ReaVerbate, ReaDelay) in a binary chunk that Rovox does not read.
+To carry them over, open the project in REAPER and run `tools/reaper/rovox_export_fx.lua` once (Actions > Show action list > Load ReaScript). It writes
+`song.rovoxfx.json` next to `song.RPP`; `import.rpp` (and `rovox import`) finds it there, or takes `fx_sidecar` explicitly, and translates the values REAPER
+shows into the Rovox stock effects (the report lists what was `translated` and what is `untranslated`). Without the file those effects get default parameters.
 
 ## MCP
 

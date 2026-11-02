@@ -6,6 +6,7 @@
 #include "Command.h"
 
 #include "ParamsAction.h"
+#include "JsfxPlugin.h"
 #include "StockPlugins.h"
 #include "TimePos.h"
 
@@ -92,6 +93,18 @@ json pluginInfo (te::Plugin& p, bool withParams)
 
         if (withParams)
             j["meters"] = extras["meters"];
+    }
+
+    if (auto extras = jsfxPluginExtras (p); extras.is_object())
+    {
+        j["jsfx"] = true;
+        j["jsfx_file"] = extras["jsfx_file"];
+        j["units"] = extras["units"];
+        j["latency_samples"] = extras["latency_samples"];
+        j["loaded"] = extras["loaded"];
+
+        if (! extras["loaded"].get<bool>())
+            j["load_error"] = extras["load_error"];
     }
 
     if (withParams)

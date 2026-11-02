@@ -3,6 +3,7 @@
 
 #include "EngineHost.h"
 
+#include "JsfxPlugin.h"
 #include "PluginCatalog.h"
 #include "StockPlugins.h"
 
@@ -143,6 +144,7 @@ EngineHost::EngineHost (const EngineConfig& c) : config_ (c), budget_ (rovox::cp
                                             std::make_unique<te::UIBehaviour>(),
                                             std::make_unique<RovoxEngineBehaviour> (config_, budget_));
     registerStockPlugins (*engine_);
+    registerJsfxPlugin (*engine_);
 
     if (config_.audio == AudioMode::Device)
         setAudioMode (AudioMode::Device);

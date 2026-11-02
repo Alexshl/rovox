@@ -33,7 +33,8 @@ int main (int argc, char** argv)
 
     app.add_option ("--data-dir,--projects", o.dataDir, "Writable data directory (default: $ROVOX_DATA_DIR, else ~/.local/share/rovox)");
 
-    auto* serve = app.add_subcommand ("serve", "Run the server: HTTP API, uploads, autosave");
+    auto* serve = app.add_subcommand ("serve", "Run the server: HTTP API, uploads, autosave. REAPER JS effects: mount the REAPER Effects folder read-only at /jsfx "
+                                           "(docker run -v \"$HOME/Library/Application Support/REAPER/Effects:/jsfx:ro\") or set ROVOX_JSFX_PATH (colon separated)");
     serve->add_option ("--port", o.port, "Listen port")->capture_default_str();
     serve->add_option ("--bind", o.bind, "Listen address")->capture_default_str();
     serve->add_option ("--audio", o.audio, "Audio mode: none | browser | device")->capture_default_str();

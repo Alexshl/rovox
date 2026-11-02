@@ -3,6 +3,7 @@
 
 #include "PluginCatalog.h"
 #include "StockPlugins.h"
+#include "JsfxPlugin.h"
 
 #include "PluginHost.h"
 #include "ProjectFormat.h"
@@ -352,6 +353,9 @@ std::optional<json> PluginCatalog::find (const std::string& key) const
     if (auto* stock = findStockPlugin (key))
         return stockCatalogRecord (*stock);
 
+    if (isJsfxUid (key))
+        return jsfxCatalogRecord (key);
+
     std::lock_guard<std::mutex> lock (mutex_);
 
     if (plugins_.contains (key))
@@ -553,6 +557,9 @@ json PluginCatalog::query (const CatalogQuery& q)
 
         for (auto& stock : stockPlugins())
             source[stock.uid] = stockCatalogRecord (stock);
+
+        for (auto& rec : jsfxCatalogRecords())
+            source[rec["plugin_uid"].get<std::string>()] = rec;
 
         for (auto& [uid, rec] : source.items())
         {

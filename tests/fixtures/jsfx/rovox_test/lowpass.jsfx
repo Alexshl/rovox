@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Rovox contributors
+// Test fixture written for Rovox: a one-pole low-pass.
+desc:Rovox test one-pole low-pass
+slider1:1000<20,20000,1>Frequency (Hz)
+
+@init
+l = 0;
+r = 0;
+
+@slider
+a = exp(-2*$pi*slider1/srate);
+
+@sample
+l = (1-a)*spl0 + a*l;
+r = (1-a)*spl1 + a*r;
+spl0 = l;
+spl1 = r;

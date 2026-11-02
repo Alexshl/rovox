@@ -6,6 +6,7 @@
 #include "Ids.h"
 #include "PluginHost.h"
 #include "ProjectManager.h"
+#include "JsfxPlugin.h"
 #include "StockPlugins.h"
 
 #include <cmath>
@@ -444,7 +445,23 @@ void registerFxCommands (CommandRegistry& r)
                     if (stock == nullptr && params["plugin"].contains (field) && params["plugin"][field].is_string())
                         stock = findStockPlugin (params["plugin"][field].get<std::string>());
 
-                if (stock != nullptr)
+                std::string jsfxKey;
+
+                for (const char* field : { "plugin_uid", "uid", "name" })
+                    if (jsfxKey.empty() && params["plugin"].contains (field) && params["plugin"][field].is_string() && isJsfxUid (params["plugin"][field].get<std::string>()))
+                        jsfxKey = params["plugin"][field].get<std::string>();
+
+                if (! jsfxKey.empty())
+                {
+                    // REAPER JS effects (plugin_uid "jsfx:<path below ROVOX_JSFX_PATH>") are built in: no probe, no child process
+                    auto created = createJsfxPlugin (p.edit(), jsfxKey);
+
+                    if (! created.ok())
+                        return created.error();
+
+                    plugin = created.value();
+                }
+                else if (stock != nullptr)
                 {
                     plugin = p.edit().getPluginCache().createNewPlugin (toJuce (stock->xmlType), {});
                 }

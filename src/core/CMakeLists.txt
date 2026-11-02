@@ -14,6 +14,7 @@ add_library(rovox_core STATIC
     UploadStore.cpp
     JsonSchema.cpp
     Limiter.cpp
+    ReaperFx.cpp
     Loudness.cpp
     StockFx.cpp
     RppParser.cpp

@@ -16,6 +16,17 @@ The complete per-component audit is still to be done before the first release.
 
 Rovox is distributed under AGPL-3.0-or-later, which is compatible with GPL-3.0 components.
 
+## Fetched at configure time (CMake FetchContent, linked statically)
+
+| Component | Use | License |
+|---|---|---|
+| ysfx (jpcima/ysfx, pinned commit in the top-level `CMakeLists.txt`) | runs REAPER JS effects (JSFX) as the `jsfx` plugin type | Apache-2.0 |
+| WDL / EEL2 (Cockos, vendored inside ysfx) | the EEL2 compiler and runtime that ysfx is built on | zlib-style (WDL license) |
+| dr_libs (mackron, a submodule of ysfx) | WAV / FLAC reading for JSFX file functions | public domain / MIT-0 |
+
+The JSFX effect files themselves are not part of Rovox or of its image: they are read at run time from the directories of `ROVOX_JSFX_PATH`
+(for example a read-only mount of the REAPER `Effects` folder) and keep their own licenses.
+
 ## System libraries used by the Rovox executables
 
 Installed from the distribution (Debian packages), not bundled. Linked dynamically unless noted.

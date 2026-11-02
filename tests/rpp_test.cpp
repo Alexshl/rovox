@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
+#include "ReaperFx.h"
 #include "RppImport.h"
 #include "RppParser.h"
 #include "Render.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 
@@ -302,6 +304,310 @@ ROVOX_TEST (rpp, no_copy_media_references_files_in_place_and_broken_files_change
     CHECK (! r.ok);
     CHECK (test::snapshot (env, id) == before);
     CHECK (! env.run (id, "import.rpp", { { "path", "/nonexistent.RPP" } }).ok);
+}
+
+//==============================================================================
+namespace
+{
+/** One track with six REAPER stock FX (BYPASS comes before a block, FXID after it) plus a second ReaComp that has no entry in the sidecar. */
+const char* const fxRpp = R"RPP(<REAPER_PROJECT 0.1 "7.0/macOS-arm64" 1700000000
+  TEMPO 120 4 4 0
+  <TRACK {AAAAAAAA-0000-0000-0000-0000000000F1}
+    NAME "Vox"
+    ISBUS 0 0
+    <FXCHAIN
+      BYPASS 0 0 0
+      <VST "VST: ReaEQ (Cockos)" reaeq.vst.dylib 0 "" 1919247729
+        AAAA
+      >
+      FLOATPOS 0 0 0 0
+      FXID {11111111-1111-1111-1111-111111111111}
+      WAK 0 0
+      BYPASS 0 0 0
+      <VST "VST: ReaComp (Cockos)" reacomp.vst.dylib 0 "" 1919247213
+        AAAA
+      >
+      FXID {22222222-2222-2222-2222-222222222222}
+      WAK 0 0
+      BYPASS 1 0 0
+      <VST "VST: ReaVerbate (Cockos)" reaverbate.vst.dylib 0 "" 1919252066
+        AAAA
+      >
+      FXID {33333333-3333-3333-3333-333333333333}
+      BYPASS 0 0 0
+      <VST "VST: ReaLimit (Cockos)" realimit.vst.dylib 0 "" 1919709556
+        AAAA
+      >
+      FXID {44444444-4444-4444-4444-444444444444}
+      BYPASS 0 0 0
+      <VST "VST: ReaGate (Cockos)" reagate.vst.dylib 0 "" 1919247975
+        AAAA
+      >
+      FXID {55555555-5555-5555-5555-555555555555}
+      BYPASS 0 0 0
+      <VST "VST: ReaDelay (Cockos)" readelay.vst.dylib 0 "" 1919247468
+        AAAA
+      >
+      FXID {66666666-6666-6666-6666-666666666666}
+      BYPASS 0 0 0
+      <VST "VST: ReaComp (Cockos)" reacomp.vst.dylib 0 "" 1919247213
+        AAAA
+      >
+      FXID {77777777-7777-7777-7777-777777777777}
+    >
+  >
+>
+)RPP";
+
+json p (int index, const char* name, double normalized, const char* formatted)
+{
+    return { { "index", index }, { "name", name }, { "normalized", normalized }, { "formatted", formatted } };
+}
+
+/** What tools/reaper/rovox_export_fx.lua writes, with synthetic values. The limiter's GUID differs from the RPP's (found by track index + order). */
+json fxSidecar()
+{
+    json eq { { "index", 0 }, { "name", "VST: ReaEQ (Cockos)" }, { "guid", "{11111111-1111-1111-1111-111111111111}" }, { "enabled", true },
+              { "config", { { "BANDTYPE0", "0" }, { "BANDTYPE1", "2" }, { "BANDTYPE2", "1" }, { "BANDENABLED0", "1" }, { "BANDENABLED1", "1" }, { "BANDENABLED2", "0" } } },
+              { "params", json::array ({ p (0, "Freq-Low shelf", 0.1, "100.0 Hz"), p (1, "Gain-Low shelf", 0.6, "3.0 dB"), p (2, "BW-Low shelf", 0.3, "2.00 oct"),
+                                         p (3, "Freq-Band 2", 0.5, "2.50 kHz"), p (4, "Gain-Band 2", 0.4, "-4.5 dB"), p (5, "Q-Band 2", 0.2, "2.00"),
+                                         p (6, "Freq-High shelf", 0.8, "9000 Hz"), p (7, "Gain-High shelf", 0.5, "1.5 dB"), p (8, "BW-High shelf", 0.2, "1.00 oct") }) } };
+    json comp { { "index", 1 }, { "name", "VST: ReaComp (Cockos)" }, { "guid", "{22222222-2222-2222-2222-222222222222}" }, { "enabled", true },
+                { "params", json::array ({ p (0, "Thresh", 0.4, "-24.5 dB"), p (1, "Ratio", 0.1, "3.0:1"), p (2, "Attack", 0.1, "15.0 ms"), p (3, "Release", 0.2, "0.25 s"),
+                                           p (4, "Pre-comp", 0.0, "2.0 ms"), p (5, "Knee size", 0.2, "4.0 dB"), p (6, "RMS size", 0.1, "10.0 ms"),
+                                           p (7, "Auto-release", 0.0, "Off"), p (8, "Wet", 1.0, "-3.0 dB"), p (9, "Dry", 0.0, "-inf dB"), p (10, "Feedback detector", 0.0, "Off") }) } };
+    json verb { { "index", 2 }, { "name", "VST: ReaVerbate (Cockos)" }, { "guid", "{33333333-3333-3333-3333-333333333333}" }, { "enabled", false },
+                { "params", json::array ({ p (0, "Wet", 0.5, "-9.0 dB"), p (1, "Dry", 0.0, "-inf dB"), p (2, "Room size", 0.8, "80.0 %"), p (3, "Dampening", 0.3, "30.0 %"),
+                                           p (4, "Stereo width", 0.75, "75.0 %"), p (5, "Initial delay", 0.1, "15.0 ms"), p (6, "Lowpass", 0.9, "9.50 kHz"), p (7, "Highpass", 0.1, "120 Hz") }) } };
+    json limit { { "index", 3 }, { "name", "VST: ReaLimit (Cockos)" }, { "guid", "{99999999-9999-9999-9999-999999999999}" }, { "enabled", true },
+                 { "params", json::array ({ p (0, "Threshold", 0.5, "-6.0 dB"), p (1, "Ceiling", 0.99, "-0.3 dB"), p (2, "Release", 0.3, "120 ms") }) } };
+    json gate { { "index", 4 }, { "name", "VST: ReaGate (Cockos)" }, { "guid", "{55555555-5555-5555-5555-555555555555}" }, { "enabled", true },
+                { "params", json::array ({ p (0, "Threshold", 0.5, "-35.0 dB"), p (1, "Attack", 0.1, "2.0 ms"), p (2, "Release", 0.2, "150 ms"), p (3, "Hold", 0.1, "40 ms"),
+                                           p (4, "Hysteresis", 0.1, "4.0 dB"), p (5, "Dry", 0.2, "-24.0 dB"), p (6, "Pre-open", 0.0, "0.0 ms") }) } };
+    json delay { { "index", 5 }, { "name", "VST: ReaDelay (Cockos)" }, { "guid", "{66666666-6666-6666-6666-666666666666}" }, { "enabled", true },
+                 { "params", json::array ({ p (0, "Wet", 0.5, "-6.0 dB"), p (1, "Dry", 0.5, "0.0 dB"),
+                                            p (2, "Tap 1 enabled", 1.0, "On"), p (3, "Length 1 (time)", 0.1, "375 ms"), p (4, "Feedback 1", 0.5, "-6.0 dB"),
+                                            p (5, "Lowpass 1", 0.5, "5.00 kHz"), p (6, "Volume 1", 0.5, "-2.0 dB"), p (7, "Pan 1", 0.4, "20% L"),
+                                            p (8, "Tap 2 enabled", 1.0, "On"), p (9, "Length 2 (musical)", 0.1, "1/8"), p (10, "Volume 2", 0.5, "-3.0 dB") }) } };
+    return { { "version", 1 }, { "tracks", json::array ({ { { "index", 0 }, { "name", "Vox" }, { "guid", "{AAAAAAAA-0000-0000-0000-0000000000F1}" },
+                                                             { "fx", json::array ({ eq, comp, verb, limit, gate, delay }) } } }) },
+             { "master", { { "name", "MASTER" }, { "fx", json::array() } } } };
+}
+
+json findParamIn (const json& fxInfo, const std::string& ident)
+{
+    for (auto& q : fxInfo["params"])
+        if (q["ident"] == ident)
+            return q;
+
+    return nullptr;
+}
+
+double valueOf (test::Env& env, const std::string& project, const json& mapped, const char* ident)
+{
+    auto info = env.ok (project, "fx.params", { { "plugin_id", mapped["plugin_id"] } })["fx"];
+    auto param = findParamIn (info, ident);
+    REQUIRE (! param.is_null());
+    return param["value"].get<double>();
+}
+
+bool translatedHas (const json& mapped, const std::string& to, double value, double tol = 1.0e-3)
+{
+    for (auto& t : mapped["translated"])
+        if (t["to"] == to && std::abs (t["value"].get<double>() - value) <= tol)
+            return true;
+
+    return false;
+}
+} // namespace
+
+ROVOX_TEST (rpp, reaper_value_text_is_parsed_with_its_unit)
+{
+    auto v = parseReaperValue ("1.50 kHz");
+    CHECK (v.ok && v.unit == "khz" && std::abs (v.value - 1.5) < 1e-9);
+    v = parseReaperValue ("-12.0 dB");
+    CHECK (v.ok && v.unit == "db" && std::abs (v.value + 12.0) < 1e-9);
+    v = parseReaperValue ("-inf dB");
+    CHECK (v.ok && v.infinite && v.value < 0 && v.unit == "db");
+    v = parseReaperValue ("3.0:1");
+    CHECK (v.ok && v.unit == ":1" && std::abs (v.value - 3.0) < 1e-9);
+    v = parseReaperValue ("inf:1");
+    CHECK (v.ok && v.infinite && v.value > 0);
+    v = parseReaperValue ("250 ms");
+    CHECK (v.ok && v.unit == "ms");
+    v = parseReaperValue ("On");
+    CHECK (! v.ok);
+    CHECK (normaliseReaperGuid ("{1A2B3C4D-0000-ABCD-0000-000000000001}") == normaliseReaperGuid ("1a2b3c4d-0000-abcd-0000-000000000001"));
+
+    // the Rovox EQ design formula and its inverse
+    const double q = 2.0, bw = bandwidthOctForQ (q), p2 = std::pow (2.0, bw);
+    CHECK_NEAR (std::sqrt (p2) / (p2 - 1.0), q, 1e-6);
+}
+
+ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("rpp-fx");
+    std::ofstream (dir / "fxsong.RPP") << fxRpp;
+    std::ofstream (dir / "fxsong.rovoxfx.json") << fxSidecar().dump (1);          // next to the RPP, named like the project
+
+    const auto id = env.newProject ("fx sidecar");
+    auto r = env.run (id, "import.rpp", { { "path", (dir / "fxsong.RPP").string() } });
+
+    if (! r.ok && r.error)
+        std::cerr << "    import.rpp: " << r.error->message << "\n";
+
+    REQUIRE (r.ok);
+    const auto& mapped = r.data["mapped"];
+    REQUIRE (mapped.size() == 7);
+    CHECK (r.data["unsupported"].empty());
+
+    const auto& eq = mapped[0];
+    const auto& comp = mapped[1];
+    const auto& verb = mapped[2];
+    const auto& limit = mapped[3];
+    const auto& gate = mapped[4];
+    const auto& delay = mapped[5];
+    const auto& plain = mapped[6];
+
+    for (auto* m : { &eq, &comp, &verb, &limit, &gate, &delay })
+    {
+        CHECK ((*m)["status"] == "mapped (params translated)");
+        CHECK ((*m)["translated"].is_array() && ! (*m)["translated"].empty());
+        CHECK ((*m)["untranslated"].is_array());
+    }
+
+    // the second ReaComp has no sidecar entry: defaults, as before
+    CHECK (plain["status"] == "mapped (default params, original settings not translated)");
+    CHECK (! plain.contains ("translated"));
+    CHECK_NEAR (valueOf (env, id, plain, "threshold"), -18.0, 1e-3);
+
+    // ReaEQ: low shelf, peak (Q 2 turned into octaves), high shelf (disabled by BANDENABLED2), the other slots off
+    CHECK_NEAR (valueOf (env, id, eq, "b1_type"), 0.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b1_freq"), 100.0, 1e-2);
+    CHECK_NEAR (valueOf (env, id, eq, "b1_gain"), 3.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b1_bw"), 2.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b1_on"), 1.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b2_type"), 2.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b2_freq"), 2500.0, 1e-1);
+    CHECK_NEAR (valueOf (env, id, eq, "b2_gain"), -4.5, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b2_bw"), bandwidthOctForQ (2.0), 2e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b3_type"), 1.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b3_freq"), 9000.0, 1.0);
+    CHECK_NEAR (valueOf (env, id, eq, "b3_on"), 0.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b4_on"), 0.0, 1e-6);          // the Rovox default has band 4 on; ReaEQ has three bands
+    CHECK_NEAR (valueOf (env, id, eq, "b8_on"), 0.0, 1e-6);
+    CHECK (translatedHas (eq, "b2_bw", bandwidthOctForQ (2.0), 2e-3));
+
+    // ReaComp: ratio "3.0:1", release "0.25 s" in ms, pre-comp, wet -3 dB / dry -inf = makeup -3 dB at 100 % wet; Auto-release is listed as untranslated
+    CHECK_NEAR (valueOf (env, id, comp, "threshold"), -24.5, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "ratio"), 3.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "attack"), 15.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "release"), 250.0, 1e-2);
+    CHECK_NEAR (valueOf (env, id, comp, "knee"), 4.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "lookahead"), 2.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "rms"), 10.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "makeup"), -3.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "mix"), 100.0, 1e-3);
+    bool autoRelease = false;
+
+    for (auto& u : comp["untranslated"])
+        autoRelease = autoRelease || u["param"] == "Auto-release";
+
+    CHECK (autoRelease);
+
+    // ReaLimit (matched by track index and order, the GUID differs): input gain = ceiling - threshold
+    CHECK_NEAR (valueOf (env, id, limit, "input_gain"), 5.7, 1e-3);
+    CHECK_NEAR (valueOf (env, id, limit, "ceiling"), -0.3, 1e-3);
+    CHECK_NEAR (valueOf (env, id, limit, "release"), 120.0, 1e-2);
+
+    // ReaGate; its dry level is the attenuation while closed
+    CHECK_NEAR (valueOf (env, id, gate, "threshold"), -35.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "attack"), 2.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "hold"), 40.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "release"), 150.0, 1e-2);
+    CHECK_NEAR (valueOf (env, id, gate, "hysteresis"), 4.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "range"), -24.0, 1e-3);
+
+    // ReaVerbate (also bypassed in the RPP)
+    CHECK_NEAR (valueOf (env, id, verb, "wet"), -9.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, verb, "dry"), -96.0, 1e-3);          // -inf dB, clamped to the Rovox floor
+    CHECK_NEAR (valueOf (env, id, verb, "room_size"), 0.8, 1e-3);
+    CHECK_NEAR (valueOf (env, id, verb, "damping"), 0.3, 1e-3);
+    CHECK_NEAR (valueOf (env, id, verb, "width"), 0.75, 1e-3);
+    CHECK_NEAR (valueOf (env, id, verb, "pre_delay"), 15.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, verb, "high_cut"), 9500.0, 1e-1);
+    CHECK_NEAR (valueOf (env, id, verb, "low_cut"), 120.0, 1e-2);
+
+    // ReaDelay: tap 1 in ms with feedback (-6 dB = 50.1 %), tap 2 musical (1/8 = 0.5 beats, synced), taps 3 and 4 off
+    CHECK_NEAR (valueOf (env, id, delay, "t1_time"), 375.0, 1e-2);
+    CHECK_NEAR (valueOf (env, id, delay, "t1_on"), 1.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, delay, "t1_sync"), 0.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, delay, "feedback"), 50.12, 0.05);
+    CHECK_NEAR (valueOf (env, id, delay, "lowpass"), 5000.0, 1e-1);
+    CHECK_NEAR (valueOf (env, id, delay, "t1_gain"), -2.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, delay, "t1_pan"), -0.2, 1e-3);
+    CHECK_NEAR (valueOf (env, id, delay, "t2_on"), 1.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, delay, "t2_sync"), 1.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, delay, "t2_beats"), 0.5, 1e-3);
+    CHECK_NEAR (valueOf (env, id, delay, "t2_gain"), -3.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, delay, "t3_on"), 0.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, delay, "wet"), -6.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, delay, "dry"), 0.0, 1e-3);
+
+    // bypass carries over: the ReaVerbate is bypassed in the RPP (and disabled in the sidecar), the others are enabled
+    CHECK (verb["enabled"] == false);
+    CHECK (env.ok (id, "fx.params", { { "plugin_id", verb["plugin_id"] } })["fx"]["enabled"] == false);
+    CHECK (env.ok (id, "fx.params", { { "plugin_id", eq["plugin_id"] } })["fx"]["enabled"] == true);
+    CHECK (env.ok (id, "fx.params", { { "plugin_id", plain["plugin_id"] } })["fx"]["enabled"] == true);
+}
+
+ROVOX_TEST (rpp, bypass_carries_over_without_a_sidecar_and_an_explicit_sidecar_path_is_accepted)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("rpp-fx2");
+    std::ofstream (dir / "song.RPP") << fxRpp;
+
+    // no sidecar: every Rea effect keeps its defaults, the bypassed one stays bypassed
+    const auto id = env.newProject ("fx plain");
+    auto r = env.run (id, "import.rpp", { { "path", (dir / "song.RPP").string() } });
+    REQUIRE (r.ok);
+    REQUIRE (r.data["mapped"].size() == 7);
+
+    for (auto& m : r.data["mapped"])
+    {
+        CHECK (m["status"] == "mapped (default params, original settings not translated)");
+        CHECK (! m.contains ("translated"));
+    }
+
+    CHECK (r.data["mapped"][2]["enabled"] == false);
+    CHECK (env.ok (id, "fx.params", { { "plugin_id", r.data["mapped"][2]["plugin_id"] } })["fx"]["enabled"] == false);
+    CHECK_NEAR (valueOf (env, id, r.data["mapped"][0], "b2_freq"), 400.0, 1e-3);
+
+    // explicit fx_sidecar, a name that is not looked up beside the RPP
+    std::ofstream (dir / "elsewhere.json") << fxSidecar().dump();
+    const auto id2 = env.newProject ("fx explicit");
+    auto r2 = env.run (id2, "import.rpp", { { "path", (dir / "song.RPP").string() }, { "fx_sidecar", (dir / "elsewhere.json").string() } });
+
+    if (! r2.ok && r2.error)
+        std::cerr << "    import.rpp: " << r2.error->message << "\n";
+
+    REQUIRE (r2.ok);
+    CHECK (r2.data["mapped"][1]["status"] == "mapped (params translated)");
+    CHECK_NEAR (valueOf (env, id2, r2.data["mapped"][1], "threshold"), -24.5, 1e-3);
+
+    // a broken sidecar is a warning, not a failure
+    std::ofstream (dir / "broken.json") << "{ nope";
+    const auto id3 = env.newProject ("fx broken");
+    auto r3 = env.run (id3, "import.rpp", { { "path", (dir / "song.RPP").string() }, { "fx_sidecar", (dir / "broken.json").string() } });
+    REQUIRE (r3.ok);
+    CHECK (r3.data["mapped"][1]["status"] == "mapped (default params, original settings not translated)");
+    bool warned = false;
+
+    for (auto& w : r3.data["warnings"])
+        warned = warned || w["code"] == "FX_SIDECAR_INVALID";
+
+    CHECK (warned);
 }
 
 ROVOX_TEST (rpp, local_reaper_projects_if_present)

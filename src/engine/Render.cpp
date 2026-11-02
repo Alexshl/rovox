@@ -4,6 +4,7 @@
 #include "Render.h"
 
 #include "AudioSink.h"
+#include "JsfxPlugin.h"
 #include "Limiter.h"
 #include "Loudness.h"
 #include "Sha256.h"
@@ -277,6 +278,15 @@ PreflightReport runPreflight (te::Edit& edit, const RenderRequest& req, te::Time
                 addFinding (report, req, "plugin_not_loaded", "plugin '" + toStd (ext->getName()) + "' did not load (" + reason + "); the render would silently bypass it",
                             owner, json { { "plugin_id", Project::idOf (ext->state) }, { "plugin", toStd (ext->getName()) }, { "reason", reason } });
             }
+
+    // 2b. JSFX plugins whose file is missing under ROVOX_JSFX_PATH or does not compile pass the audio through unchanged
+    for (auto p : te::getAllPlugins (edit, false))
+        if (auto extras = jsfxPluginExtras (*p); extras.is_object() && p->isEnabled() && ! extras["loaded"].get<bool>())
+        {
+            const auto reason = extras["load_error"].get<std::string>();
+            addFinding (report, req, "plugin_not_loaded", "JSFX '" + extras["jsfx_file"].get<std::string>() + "' did not load (" + reason + "); the render would pass the audio through",
+                        p->getOwnerTrack(), json { { "plugin_id", Project::idOf (p->state) }, { "plugin", extras["jsfx_file"] }, { "reason", reason } });
+        }
 
     // 4. instruments: every MIDI track with notes in range must produce sound
     for (auto* at : te::getAudioTracks (edit))

@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Rovox contributors
+// Test fixture written for Rovox: a delay that reports its latency (pdc_delay).
+desc:Rovox test latency
+slider1:64<0,512,1>Delay (samples)
+
+@init
+pos = 0;
+
+@slider
+pdc_delay = slider1|0;
+pdc_bot_ch = 0;
+pdc_top_ch = 2;
+
+@sample
+d = slider1|0;
+buf[pos] = spl0;
+buf[pos+1024] = spl1;
+rp = pos - d;
+rp < 0 ? rp += 1024;
+spl0 = buf[rp];
+spl1 = buf[rp+1024];
+pos += 1;
+pos >= 1024 ? pos = 0;

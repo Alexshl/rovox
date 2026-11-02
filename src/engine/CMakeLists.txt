@@ -22,6 +22,7 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/Gateway.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/HttpServer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Import.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/JsfxPlugin.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Peaks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginCatalog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginHost.cpp
@@ -53,6 +54,7 @@ target_compile_definitions(rovox_engine INTERFACE
 
 target_link_libraries(rovox_engine INTERFACE
     rovox_core
+    ysfx::ysfx
     tracktion::tracktion_core
     tracktion::tracktion_engine
     tracktion::tracktion_graph

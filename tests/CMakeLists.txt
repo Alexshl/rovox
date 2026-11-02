@@ -25,12 +25,13 @@ target_sources(rovox_engine_tests PRIVATE
     delivery_test.cpp
     mcp_test.cpp
     plugin_test.cpp
+    jsfx_test.cpp
     stock_test.cpp
     transport_test.cpp)
 
 target_link_libraries(rovox_engine_tests PRIVATE rovox_mcp)
 
-foreach(suite core engine project import render rpp upload cli mcp transport web stock plugins midi routing fx templates projects delivery)
+foreach(suite core engine project import render rpp upload cli mcp transport web stock jsfx plugins midi routing fx templates projects delivery)
     add_test(NAME ${suite} COMMAND rovox_engine_tests ${suite})
 endforeach()
 
@@ -41,6 +42,8 @@ set_tests_properties(cli web PROPERTIES ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE
 set_tests_properties(plugins midi routing fx templates projects mcp PROPERTIES
     ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE:rovox>;ROVOX_TEST_LV2_DIR=${CMAKE_CURRENT_BINARY_DIR}/lv2")
 set_tests_properties(transport PROPERTIES ENVIRONMENT "ROVOX_TEST_AUDIO=browser")
+# the JSFX suite runs the effects written for the tests
+set_tests_properties(jsfx PROPERTIES ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE:rovox>;ROVOX_TEST_JSFX_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jsfx")
 
 # Test fixture plugins (LV2 effects that crash on purpose), built into <build>/tests/lv2/rovox-test.lv2
 add_library(rovox_test_lv2 MODULE fixtures/rovox-test.lv2/crash.c)

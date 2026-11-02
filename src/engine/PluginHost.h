@@ -35,6 +35,7 @@ ProbeOutcome probePluginInChild (const juce::PluginDescription&, const fs::path&
 int runPluginProbeChild (const std::string& descXmlFile, bool presetsOnly);
 
 //==============================================================================
+/** True if the edit has a plugin that is not part of the engine: an external plugin or a JSFX effect (those are rendered in the child process). */
 bool editHasExternalPlugins (te::Edit&);
 
 /** A copy of the project (edit state + manifest + media symlink) under <data>/cache/render-child/<tag>/ that a child process can open

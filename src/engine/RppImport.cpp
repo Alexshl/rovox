@@ -6,6 +6,8 @@
 #include "Command.h"
 #include "Ids.h"
 #include "Import.h"
+#include "JsfxPlugin.h"
+#include "ReaperFx.h"
 #include "RppParser.h"
 #include "Sha256.h"
 #include "StockPlugins.h"
@@ -412,9 +414,180 @@ struct Importer
         return fx.args.empty() ? fx.name : fx.args[0];
     }
 
-    /** A REAPER stock FX becomes the Rovox stock effect with default parameters; the original chunk is kept on the plugin. false if the FX is not one. */
-    bool mapStockFx (const RppNode& fx, te::PluginList& list, const std::string& trackId)
+    //==========================================================================
+    /** An FX of an FXCHAIN with the lines around it: BYPASS comes before the block, FXID after it. */
+    struct ChainFx
     {
+        const RppNode* node = nullptr;
+        bool bypassed = false;
+        std::string guid;
+        size_t order = 0;           // position in the chain
+    };
+
+    static std::vector<ChainFx> collectChain (const RppNode& chain)
+    {
+        std::vector<ChainFx> out;
+        bool bypass = false;
+
+        for (auto& e : chain.entries)
+        {
+            if (e.isBlock())
+            {
+                out.push_back ({ &e.children[0], bypass, {}, out.size() });
+                bypass = false;
+            }
+            else if (! e.tokens.empty() && e.tokens[0] == "BYPASS")
+            {
+                // BYPASS <bypassed> <offline> <...>
+                bypass = (e.tokens.size() > 1 && e.tokens[1] != "0") || (e.tokens.size() > 2 && e.tokens[2] != "0");
+            }
+            else if (! e.tokens.empty() && e.tokens[0] == "FXID" && e.tokens.size() > 1 && ! out.empty())
+            {
+                out.back().guid = e.tokens[1];
+            }
+        }
+
+        return out;
+    }
+
+    //==========================================================================
+    json sidecarDoc;                                            // `<project>.rovoxfx.json`, object or null
+    std::map<std::string, const json*> sidecarByGuid;           // normalised FX GUID -> sidecar FX
+    std::string sidecarPath;
+
+    void loadSidecar()
+    {
+        fs::path file = options.fxSidecar;
+        std::error_code ec;
+
+        if (file.empty())
+        {
+            // next to the RPP: song.rovoxfx.json (what the exporter writes for song.RPP) or song.RPP.rovoxfx.json
+            for (auto candidate : { fs::path (rppFile).replace_extension (".rovoxfx.json"), fs::path (rppFile.string() + ".rovoxfx.json") })
+                if (fs::is_regular_file (candidate, ec))
+                {
+                    file = candidate;
+                    break;
+                }
+
+            if (file.empty())
+                return;
+        }
+
+        std::ifstream in (file);
+        auto doc = in ? json::parse (in, nullptr, false) : json (json::value_t::discarded);
+
+        if (doc.is_discarded() || ! doc.is_object())
+        {
+            report.warnings.push_back ({ { "code", "FX_SIDECAR_INVALID" }, { "message", "cannot read the FX sidecar " + file.string() + "; Rea* effects get default parameters" } });
+            return;
+        }
+
+        sidecarDoc = std::move (doc);
+        sidecarPath = file.string();
+        auto index = [&] (json& list)
+        {
+            if (list.is_array())
+                for (auto& fx : list)
+                    if (fx.is_object() && fx.contains ("guid") && fx["guid"].is_string())
+                        sidecarByGuid[normaliseReaperGuid (fx["guid"].get<std::string>())] = &fx;
+        };
+
+        // pointers into sidecarDoc itself (it outlives them), never into copies
+        if (sidecarDoc.contains ("tracks") && sidecarDoc["tracks"].is_array())
+            for (auto& t : sidecarDoc["tracks"])
+                if (t.is_object() && t.contains ("fx"))
+                    index (t["fx"]);
+
+        if (sidecarDoc.contains ("master") && sidecarDoc["master"].is_object() && sidecarDoc["master"].contains ("fx"))
+            index (sidecarDoc["master"]["fx"]);
+    }
+
+    /** The sidecar entry of an FX: by GUID, else by track position and FX order (when the name agrees). nullptr if none. */
+    const json* sidecarFor (const ChainFx& cfx, long trackIndex, const std::string& trackGuid, const StockInfo& stock) const
+    {
+        if (sidecarDoc.is_null())
+            return nullptr;
+
+        if (! cfx.guid.empty())
+            if (auto it = sidecarByGuid.find (normaliseReaperGuid (cfx.guid)); it != sidecarByGuid.end())
+                return it->second;
+
+        const json* fxList = nullptr;
+
+        if (trackIndex < 0)
+        {
+            if (sidecarDoc.contains ("master") && sidecarDoc["master"].is_object() && sidecarDoc["master"].contains ("fx"))
+                fxList = &sidecarDoc["master"]["fx"];
+        }
+        else if (sidecarDoc.contains ("tracks") && sidecarDoc["tracks"].is_array())
+        {
+            const json* byIndex = nullptr;
+
+            for (auto& t : sidecarDoc["tracks"])
+            {
+                if (! t.is_object() || ! t.contains ("fx"))
+                    continue;
+
+                if (! trackGuid.empty() && t.value ("guid", "") != "" && normaliseReaperGuid (t.value ("guid", "")) == normaliseReaperGuid (trackGuid))
+                {
+                    byIndex = &t;
+                    break;
+                }
+
+                if (t.value ("index", -1L) == trackIndex)
+                    byIndex = &t;
+            }
+
+            if (byIndex != nullptr)
+                fxList = &(*byIndex)["fx"];
+        }
+
+        if (fxList == nullptr || ! fxList->is_array() || cfx.order >= fxList->size())
+            return nullptr;
+
+        const auto& candidate = (*fxList)[cfx.order];
+        const auto* candidateStock = candidate.is_object() ? stockForReaperName (candidate.value ("name", "")) : nullptr;
+        return candidateStock == &stock ? &candidate : nullptr;
+    }
+
+    /** Sets a Rovox parameter (clamped to its range); returns the value actually set, nullopt if the plugin has no such parameter. */
+    static std::optional<double> setStockParam (te::Plugin& plugin, const std::string& id, double value)
+    {
+        for (auto* ap : plugin.getAutomatableParameters())
+            if (toStd (ap->paramID) == id)
+            {
+                const auto range = ap->getValueRange();
+                const float v = std::clamp ((float) value, range.getStart(), range.getEnd());
+                ap->setParameter (v, juce::dontSendNotification);
+                return (double) v;
+            }
+
+        return std::nullopt;
+    }
+
+    static void insertBeforeFader (te::PluginList& list, const te::Plugin::Ptr& plugin)
+    {
+        int index = list.size();
+
+        for (auto* existing : list.getPlugins())
+            if (dynamic_cast<te::VolumeAndPanPlugin*> (existing) != nullptr)
+            {
+                index = list.indexOf (existing);        // before the fader
+                break;
+            }
+
+        list.insertPlugin (plugin, index, nullptr);
+        plugin->initialiseFully();
+        ChangeCollector::assignMissingIds (plugin->state);
+    }
+
+    /** A REAPER stock FX becomes the Rovox stock effect. With a sidecar entry its settings are translated, else the parameters stay at their defaults.
+        The original chunk is kept on the plugin. false if the FX is not one. */
+    bool mapStockFx (const ChainFx& cfx, te::PluginList& list, const std::string& trackId, long trackIndex, const std::string& trackGuid)
+    {
+        const auto& fx = *cfx.node;
+
         if (fx.name == "JS")
             return false;
 
@@ -428,21 +601,110 @@ struct Importer
         if (plugin == nullptr)
             return false;
 
-        int index = list.size();
+        insertBeforeFader (list, plugin);
+        plugin->state.setProperty ("rovox:reaper_fx", toJuce (fx.toText()), nullptr);
+        bool enabled = ! cfx.bypassed;
+        json entry { { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId }, { "mapped_to", stock->name },
+                     { "plugin_id", Project::idOf (plugin->state) }, { "status", "mapped (default params, original settings not translated)" } };
 
-        for (auto* existing : list.getPlugins())
-            if (dynamic_cast<te::VolumeAndPanPlugin*> (existing) != nullptr)
+        if (const json* side = sidecarFor (cfx, trackIndex, trackGuid, *stock))
+        {
+            const auto parsed = parseReaperFxEntry (*side);
+            const auto result = translateReaperFx (stock->shortId, parsed);
+            json translated = json::array(), untranslated = json::array();
+
+            for (auto& t : result.translated)
             {
-                index = list.indexOf (existing);        // before the fader
-                break;
+                const auto set = setStockParam (*plugin, t.to, t.value);
+
+                if (! set)
+                {
+                    untranslated.push_back ({ { "param", t.from }, { "formatted", t.formatted }, { "reason", "the Rovox effect has no parameter " + t.to } });
+                    continue;
+                }
+
+                json item { { "param", t.from }, { "formatted", t.formatted }, { "to", t.to }, { "value", *set } };
+
+                if (std::abs (*set - t.value) > 1.0e-9)
+                    item["clamped_from"] = t.value;
+
+                if (! t.note.empty())
+                    item["note"] = t.note;
+
+                translated.push_back (std::move (item));
             }
 
-        list.insertPlugin (plugin, index, nullptr);
-        plugin->initialiseFully();
-        ChangeCollector::assignMissingIds (plugin->state);
+            for (auto& u : result.untranslated)
+                untranslated.push_back ({ { "param", u.from }, { "formatted", u.formatted }, { "reason", u.reason } });
+
+            enabled = enabled && parsed.enabled;
+            entry["status"] = "mapped (params translated)";
+            entry["translated"] = translated;
+            entry["untranslated"] = untranslated;
+        }
+
+        if (! enabled)
+        {
+            plugin->setEnabled (false);
+            entry["enabled"] = false;
+        }
+
+        report.mapped.push_back (std::move (entry));
+        return true;
+    }
+
+    /** `<JS name "">` with the slider line: the REAPER JS effect from the JSFX path, slider values from the project. false if not a JS block. */
+    bool mapJsfx (const ChainFx& cfx, te::PluginList& list, const std::string& trackId)
+    {
+        const auto& fx = *cfx.node;
+
+        if (fx.name != "JS" || fx.args.empty())
+            return false;
+
+        std::map<int, double> sliders;
+
+        for (auto& e : fx.entries)
+        {
+            if (e.isBlock())
+                continue;
+
+            // the first line holds the slider values, space separated, '-' for the ones that were never touched
+            for (size_t k = 0; k < e.tokens.size() && k < 64; ++k)
+            {
+                char* end = nullptr;
+                const double v = std::strtod (e.tokens[k].c_str(), &end);
+
+                if (end != e.tokens[k].c_str() && *end == 0)
+                    sliders[(int) k + 1] = v;
+            }
+
+            break;
+        }
+
+        auto created = createJsfxPlugin (project.edit(), fx.args[0], sliders);
+
+        if (! created.ok())
+        {
+            const bool missing = created.error().code == errc::notFound;
+            report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId },
+                                            { "reason", missing ? "JSFX file not found under ROVOX_JSFX_PATH" : created.error().message } });
+            return true;
+        }
+
+        auto plugin = created.value();
+        insertBeforeFader (list, plugin);
         plugin->state.setProperty ("rovox:reaper_fx", toJuce (fx.toText()), nullptr);
-        report.mapped.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId }, { "mapped_to", stock->name },
-                                   { "plugin_id", Project::idOf (plugin->state) }, { "status", "mapped (default params, original settings not translated)" } });
+        json entry { { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId },
+                     { "mapped_to", "JSFX " + toStd (plugin->state["jsfx_file"].toString()) }, { "plugin_id", Project::idOf (plugin->state) },
+                     { "status", "mapped (JSFX, slider values from the project)" }, { "sliders_set", (int) sliders.size() } };
+
+        if (cfx.bypassed)
+        {
+            plugin->setEnabled (false);
+            entry["enabled"] = false;
+        }
+
+        report.mapped.push_back (std::move (entry));
         return true;
     }
 
@@ -467,6 +729,7 @@ struct Importer
         if (auto* rp = root.line ("RECORD_PATH"))
             recordPath = rp->size() > 1 ? (*rp)[1] : std::string();
 
+        loadSidecar();
         finder = std::make_unique<MediaFinder> (rppFile.parent_path(), recordPath);
         importTempo (root, edit);
 
@@ -536,16 +799,17 @@ struct Importer
 
             for (auto* chain : node.blocks ("FXCHAIN"))
             {
-                for (auto& e : chain->entries)
-                    if (e.isBlock())
-                    {
-                        const auto& fx = e.children[0];
+                const std::string trackGuid = node.args.empty() ? std::string() : node.args[0];
 
-                        if (auto* at = dynamic_cast<te::AudioTrack*> (track); at != nullptr && mapStockFx (fx, at->pluginList, trackId))
-                            continue;
+                for (auto& cfx : collectChain (*chain))
+                {
+                    auto* at = dynamic_cast<te::AudioTrack*> (track);
 
-                        report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId } });
-                    }
+                    if (at != nullptr && (mapStockFx (cfx, at->pluginList, trackId, (long) index, trackGuid) || mapJsfx (cfx, at->pluginList, trackId)))
+                        continue;
+
+                    report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (*cfx.node) }, { "format", cfx.node->name }, { "track_id", trackId } });
+                }
 
                 track->state.setProperty ("rovox:unsupported_fx", toJuce (chain->toText()), nullptr);
             }
@@ -613,9 +877,9 @@ struct Importer
         importMarkers (root, edit);
 
         if (auto* mfx = root.block ("MASTERFXLIST"))
-            for (auto& e : mfx->entries)
-                if (e.isBlock() && ! mapStockFx (e.children[0], edit.getMasterPluginList(), "master"))
-                    report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (e.children[0]) }, { "track_id", "master" } });
+            for (auto& cfx : collectChain (*mfx))
+                if (! mapStockFx (cfx, edit.getMasterPluginList(), "master", -1, {}) && ! mapJsfx (cfx, edit.getMasterPluginList(), "master"))
+                    report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (*cfx.node) }, { "track_id", "master" } });
 
         return {};
     }
@@ -635,7 +899,8 @@ Result<RppImportReport> importRpp (Project& project, const fs::path& rppFile, co
 void registerRppCommands (CommandRegistry& r)
 {
     r.add (makeProjectCommand ("import.rpp",
-        { { "type", "object" }, { "properties", { { "path", { { "type", "string" }, { "minLength", 1 } } }, { "copy_media", { { "type", "boolean" } } } } },
+        { { "type", "object" }, { "properties", { { "path", { { "type", "string" }, { "minLength", 1 } } }, { "copy_media", { { "type", "boolean" } } },
+                                                  { "fx_sidecar", { { "type", "string" }, { "minLength", 1 } } } } },
           { "required", { "path" } }, { "additionalProperties", false } },
         { { "type", "object" } }, true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
@@ -643,7 +908,17 @@ void registerRppCommands (CommandRegistry& r)
             if (auto allowed = p.host().checkPath (params["path"].get<std::string>()); ! allowed.ok())
                 return allowed.error();
 
-            auto report = importRpp (p, params["path"].get<std::string>(), { .copyMedia = params.value ("copy_media", true) });
+            fs::path sidecar;
+
+            if (params.contains ("fx_sidecar"))
+            {
+                if (auto allowed = p.host().checkPath (params["fx_sidecar"].get<std::string>()); ! allowed.ok())
+                    return allowed.error();
+
+                sidecar = params["fx_sidecar"].get<std::string>();
+            }
+
+            auto report = importRpp (p, params["path"].get<std::string>(), { .copyMedia = params.value ("copy_media", true), .fxSidecar = sidecar });
 
             if (! report.ok())
                 return report.error();

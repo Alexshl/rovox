@@ -4,6 +4,7 @@
 // M4 commands (tasks 400, 410, 420): plugin.catalog / rescan / probe / tag / unblacklist, fx.presets / preset_load / preset_save / move.
 #include "Command.h"
 
+#include "JsfxPlugin.h"
 #include "PluginCatalog.h"
 #include "ParamsAction.h"
 #include "PluginHost.h"
@@ -125,6 +126,7 @@ void registerPluginCommands (CommandRegistry& r)
     r.add (makeGlobalCommand ("plugin.rescan", obj ({ { "force", boolean() } }), anyObject(), false,
         [] (ProjectManager& pm, const json& params, const CommandContext&) -> Result<json>
         {
+            jsfxRescan();
             return pm.host().catalog().rescan (params.value ("force", false));
         }));
 

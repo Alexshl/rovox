@@ -185,7 +185,7 @@ const CommandToolSpec commandTools[] = {
     { "template.save", "Save template", "Saves the structure of a project (tracks, instruments, effects, sends, master chain, tempo) as a template under the data directory.", false },
     { "template.apply", "Apply template", "Creates the template's tracks, instruments, effects, sends and master chain in a project as ONE undo step. Fails with PRECONDITION_FAILED listing the missing plugins when it needs instruments that are not installed. bindings {role: {notes | midi_file}} puts MIDI on tracks.", false },
     { "template.delete", "Delete template", "Deletes a saved template.", false },
-    { "import.rpp", "Import REAPER project", "Imports a REAPER .RPP file into the project: tracks, items, markers, tempo. Unsupported FX are reported, not translated.", false },
+    { "import.rpp", "Import REAPER project", "Imports a REAPER .RPP file into the project: tracks, items, markers, tempo. Rea* effects become Rovox stock effects (settings from <project>.rovoxfx.json beside the RPP or fx_sidecar, written by tools/reaper/rovox_export_fx.lua; else defaults), JS effects become JSFX when found under ROVOX_JSFX_PATH (slider values from the project); the rest is reported as unsupported.", false },
     { "import.apply", "Apply import plan", "Creates the tracks and items of a plan made by import.plan. rename maps source keys (REC01) or planned names to track names.", false },
 };
 } // namespace

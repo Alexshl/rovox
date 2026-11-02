@@ -2,9 +2,12 @@
 // Copyright (C) 2026 Rovox contributors
 
 // REAPER .RPP import (task 150): tracks, folders, audio and MIDI items, markers/regions, tempo, aux sends.
-// FX chains are not translated: they are listed as unsupported and kept verbatim on the track (`rovox:unsupported_fx`). REAPER stock FX
-// (ReaEQ, ReaComp, ReaGate, ReaLimit, ReaDelay, ReaVerbate) get the Rovox stock effect with default settings (listed under `mapped`; the
-// original chunk stays verbatim on the track and on the new plugin as `rovox:reaper_fx`). Their binary state is not read.
+// FX chains: REAPER stock FX (ReaEQ, ReaComp, ReaGate, ReaLimit, ReaDelay, ReaVerbate) become the Rovox stock effect (listed under `mapped`;
+// the original chunk stays verbatim on the track and on the new plugin as `rovox:reaper_fx`). Their binary state is not read: with a sidecar
+// file `<project>.rovoxfx.json` (written by tools/reaper/rovox_export_fx.lua inside REAPER) the settings are translated from the values REAPER
+// shows, without one the parameters stay at their defaults. REAPER JS effects (`<JS ...>`) become JSFX plugins when the file is found under
+// $ROVOX_JSFX_PATH, with the slider values of the project. Bypass / offline state carries over. Everything else is listed as unsupported and
+// kept verbatim on the track (`rovox:unsupported_fx`).
 #pragma once
 
 #include "Project.h"
@@ -15,6 +18,7 @@ namespace rovox
 struct RppImportOptions
 {
     bool copyMedia = true;      // false: reference external files in place (absolute path, flagged `external` in the manifest)
+    fs::path fxSidecar;         // REAPER FX settings from tools/reaper/rovox_export_fx.lua; empty: `<rpp>.rovoxfx.json` beside the RPP if it exists
 };
 
 struct RppImportReport

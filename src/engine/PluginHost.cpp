@@ -4,6 +4,7 @@
 #include "PluginHost.h"
 
 #include "Ids.h"
+#include "JsfxPlugin.h"
 #include "PluginCatalog.h"
 #include "ProjectFormat.h"
 
@@ -224,8 +225,9 @@ int runPluginProbeChild (const std::string& descXmlFile, bool presetsOnly)
 //==============================================================================
 bool editHasExternalPlugins (te::Edit& edit)
 {
+    // JSFX counts: it runs machine code that ysfx generates from third-party effect files, so it is rendered in the child process as well
     for (auto p : te::getAllPlugins (edit, true))
-        if (dynamic_cast<te::ExternalPlugin*> (p) != nullptr)
+        if (dynamic_cast<te::ExternalPlugin*> (p) != nullptr || jsfxPluginExtras (*p).is_object())
             return true;
 
     return false;
