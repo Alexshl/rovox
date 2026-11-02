@@ -419,6 +419,12 @@ void HttpServer::installRoutes()
                 return reply (res, 404, { { "ok", false }, { "error", { { "code", errc::notFound }, { "message", "no such file" } } } });
 
             const auto file = *projectDir / dir / name;
+
+            // a render that only exists in the bucket (this server started with an empty cache) is fetched on first use
+            if (dir == "renders" && projects_.storage() != nullptr)
+                if (std::error_code probe; ! fs::exists (file, probe))
+                    projects_.storage()->fetchRender ("local", req.matches[1], name, file);
+
             std::ifstream in (file, std::ios::binary);
 
             if (! in)

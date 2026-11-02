@@ -16,6 +16,7 @@ import {
   type ProjectGet,
   type ServerInfo,
   type ServerMessage,
+  type StorageInfo,
   type TransportState,
   frameType,
   parseAudio,
@@ -445,6 +446,10 @@ export class App {
       this.changed.emit();
     } else if (type === 'transport.changed' && p) {
       this.applyTransport(p, ev as unknown as TransportState);
+    } else if (type === 'storage.changed' && p) {
+      p.storage = ev['storage'] as StorageInfo;
+      p.state.emit();
+      this.changed.emit();
     } else if (type === 'agent.accepted' && p) {
       p.accept(ev['accepted_revision'] as number);
     } else if (type === 'projects.changed') {

@@ -147,6 +147,9 @@ void registerProjectGet (CommandRegistry& r)
                        { "length_s", p.edit().getLength().inSeconds() }, { "can_undo", p.edit().getUndoManager().canUndo() },
                        { "can_redo", p.edit().getUndoManager().canRedo() }, { "dirty", p.dirty() } };
 
+            if (p.storageStatus)
+                out["storage"] = p.storageStatus();
+
             if (wants ("tracks"))
             {
                 json tracks = json::array();

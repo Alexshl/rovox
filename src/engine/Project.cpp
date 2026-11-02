@@ -147,6 +147,9 @@ Result<void> Project::save (const SaveOptions& opt)
     {
         dirty_ = false;
         manifest_.savedAt = nowIso8601();
+
+        if (onPersisted)
+            onPersisted (dir_, false);
     }
 
     return r;
@@ -157,7 +160,12 @@ Result<void> Project::autosave()
     collector_->beginScope();
     edit_->flushState();
     collector_->endScope();
-    return writeAutosave (dir_, edit_->state, manifest_);
+    auto r = writeAutosave (dir_, edit_->state, manifest_);
+
+    if (r.ok() && onPersisted)
+        onPersisted (dir_ / "autosave" / (std::to_string (manifest_.revision) + ".rvx"), true);
+
+    return r;
 }
 
 } // namespace rovox

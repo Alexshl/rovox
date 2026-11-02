@@ -6,7 +6,7 @@ import { clear, h, rafThrottle } from '../lib/dom';
 import { GRIDS } from '../lib/snap';
 import { formatBBT, formatBpm, formatClock, formatWallClock } from '../lib/time';
 import type { App } from '../store/session';
-import { isAgent } from '../store/project';
+import { type ProjectStore, isAgent } from '../store/project';
 import { ArrangeView } from './arrange';
 import { MixerView } from './mixer';
 import { textDialog } from './dialog';
@@ -35,6 +35,29 @@ interface MenuEntry {
   action?: () => void;
   disabled?: boolean;
   separator?: boolean;
+}
+
+/** Object-storage sync state of a project for its tab: cloud ok / uploading / error. Nothing for local storage. */
+export function syncState(p: ProjectStore): 'ok' | 'uploading' | 'error' | undefined {
+  const s = p.storage;
+  if (!s || s.backend !== 's3') return undefined;
+  if (s.last_error) return 'error';
+  return s.pending_uploads > 0 ? 'uploading' : 'ok';
+}
+
+function syncBadge(p: ProjectStore): HTMLElement | null {
+  const st = syncState(p);
+  if (!st) return null;
+  const s = p.storage!;
+  const title =
+    st === 'error'
+      ? `Помилка синхронізації з хмарою: ${s.last_error}`
+      : st === 'uploading'
+        ? 'Вивантаження змін у хмару…'
+        : s.synced_revision !== null
+          ? `Збережено в хмарі (ревізія ${s.synced_revision})`
+          : 'Підключено до хмари';
+  return h('span', { class: `sync ${st}`, text: '☁', title, attrs: { 'aria-label': title, role: 'img' } });
 }
 
 export class Shell {
@@ -330,7 +353,7 @@ export class Shell {
 
   private renderTabs(): void {
     const app = this.app;
-    const sig = app.order.map((id) => { const q = app.projects.get(id); return q ? `${id}:${q.name}:${app.tabStatus(q)}:${q.dirty}:${id === app.activeId}` : id; }).join('|');
+    const sig = app.order.map((id) => { const q = app.projects.get(id); return q ? `${id}:${q.name}:${app.tabStatus(q)}:${q.dirty}:${syncState(q) ?? ''}:${q.storage?.last_error ?? ''}:${id === app.activeId}` : id; }).join('|');
     if (sig === this.tabsSignature) return;
     this.tabsSignature = sig;
     clear(this.tabs);
@@ -346,6 +369,7 @@ export class Shell {
         h('span', { class: 'name', text: p.name || id, title: p.name }),
         h('span', { class: 'state', text: label }),
         p.dirty ? h('span', { class: 'dirty', text: '●', title: 'Є незбережені зміни' }) : null,
+        syncBadge(p),
         h('button', { class: 'close', text: '×', title: 'Закрити проект', attrs: { 'aria-label': 'Закрити проект' }, on: { click: (e) => { e.stopPropagation(); void app.closeProject(id); } } }),
       );
       tab.addEventListener('click', () => app.setActive(id));

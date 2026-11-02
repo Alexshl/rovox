@@ -15,6 +15,7 @@
 #include "PluginHost.h"
 #include "PluginScan.h"
 #include "ProjectManager.h"
+#include "RemoteStorage.h"
 #include "Render.h"
 #include "RenderJobs.h"
 #include "Sha1.h"
@@ -34,6 +35,7 @@
 
 #include <fcntl.h>
 #include <sys/file.h>
+#include <limits.h>
 #include <unistd.h>
 
 namespace rovox::cli
@@ -417,6 +419,74 @@ int runImport (const Options& o)
 //==============================================================================
 namespace
 {
+std::string instanceOwnerId()
+{
+    char host[256] = {};
+    ::gethostname (host, sizeof (host) - 1);
+    std::random_device rd;
+    static const char hex[] = "0123456789abcdef";
+    std::string suffix;
+
+    for (int i = 0; i < 6; ++i)
+        suffix.push_back (hex[rd() % 16]);
+
+    return std::string (host[0] != 0 ? host : "rovox") + ":" + std::to_string ((long) ::getpid()) + ":" + suffix;
+}
+
+std::shared_ptr<RemoteStorage> makeRemoteStorage (const StorageConfig& cfg)
+{
+    auto store = makeS3ObjectStore (cfg.store);
+    return std::make_shared<RemoteStorage> (store, StorageKeys { cfg.prefix }, store->describe(), instanceOwnerId(), cfg.leaseTtlS);
+}
+
+/** Storage from --storage / the S3_* environment. Local storage gives a null pointer (and no error). The bucket is listed once so that wrong
+    credentials stop the server at start-up instead of showing up as a failed save later; an unreachable endpoint only warns. */
+Result<std::shared_ptr<RemoteStorage>> setupStorage (const Options& o, ProjectManager* pm)
+{
+    auto cfg = StorageConfig::fromEnvironment (o.storage);
+
+    if (! cfg.ok())
+        return cfg.error();
+
+    if (! cfg.value().s3)
+        return std::shared_ptr<RemoteStorage>();
+
+    auto storage = makeRemoteStorage (cfg.value());
+
+    if (auto r = storage->refreshHeads(); ! r.ok())
+    {
+        if (r.error().code == errc::preconditionFailed || r.error().code == errc::invalidParams)
+            return r.error();
+
+        std::cerr << "warning: object storage not reachable yet: " << r.error().message << "\n";
+    }
+
+    storage->start();
+
+    if (pm != nullptr)
+        pm->setStorage (storage);
+
+    std::cout << "storage: s3 bucket " << cfg.value().store.bucket << " at " << cfg.value().store.endpoint << ", prefix '" << cfg.value().prefix << "' (source of truth; "
+              << "the data directory is a working cache)" << std::endl;
+    return storage;
+}
+
+/** Flushes the upload queue (bounded) and releases the writer leases. */
+void shutdownStorage (const std::shared_ptr<RemoteStorage>& storage)
+{
+    if (storage == nullptr)
+        return;
+
+    std::cout << "flushing uploads to the object store" << std::endl;
+
+    if (! storage->shutdown (std::chrono::seconds (30)))
+        std::cerr << "warning: some snapshots were not uploaded within 30 s; they stay in the data directory (autosave/) and go up with the next start or `rovox storage push`\n";
+}
+} // namespace
+
+//==============================================================================
+namespace
+{
 /** One flock per data directory: a second `serve` on the same /data refuses with an explanation. */
 int lockDataDir (const fs::path& dataDir, std::string& holderPid)
 {
@@ -592,6 +662,11 @@ int runServe (const Options& o)
     MessageThreadExecutor executor;
     CommandBus bus (pm, registry, executor);
 
+    auto storage = setupStorage (o, &pm);
+
+    if (! storage.ok())
+        return fail (storage.error().message);
+
     ServerOptions so;
     so.bind = o.bind;
     so.port = o.port;
@@ -657,6 +732,7 @@ int runServe (const Options& o)
     gateway.shutdown();
     server.stop();
     pm.closeAll (SaveMode::autosave);       // dirty projects land in autosave/, ready for crash-style recovery on the next start
+    shutdownStorage (storage.value());      // ... and, with object storage, in the bucket (bounded wait)
     ::close (lockFd);
     return 0;
 }
@@ -675,6 +751,11 @@ int runMcp (const Options& o)
     registerBuiltinCommands (registry);
     MessageThreadExecutor executor;
     CommandBus bus (pm, registry, executor);
+    auto storage = setupStorage (o, &pm);
+
+    if (! storage.ok())
+        return fail (storage.error().message);
+
     McpStack stack (host, pm, bus, hub, executor, mcpConfig (o));
 
     std::atomic<bool> readerDone { false };
@@ -699,6 +780,7 @@ int runMcp (const Options& o)
 
     stack.jobs.shutdown();
     pm.closeAll (SaveMode::autosave);       // dirty projects land in autosave/, as with `serve`
+    shutdownStorage (storage.value());
     return 0;
 }
 
@@ -791,6 +873,88 @@ int runUpload (const Options& o)
 
     std::cout << json { { "batch_id", batch["batch_id"] }, { "files", batch["files"] } }.dump (2) << "\n";
     return 0;
+}
+
+int runStoragePush (const Options& o)
+{
+    auto cfg = StorageConfig::fromEnvironment (o.storage.empty() ? "s3" : o.storage);
+
+    if (! cfg.ok())
+        return fail (cfg.error().message);
+
+    if (! cfg.value().s3)
+        return fail ("storage push needs object storage: set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY");
+
+    auto storage = makeRemoteStorage (cfg.value());
+    const auto dataDir = resolveDataDir (o.dataDir);
+    std::vector<std::pair<std::string, fs::path>> roots { { "local", dataDir / "projects" } };
+    std::error_code ec;
+
+    for (auto& t : fs::directory_iterator (dataDir / "tenants", ec))
+        if (t.is_directory())
+            roots.push_back ({ t.path().filename().string(), t.path() / "projects" });
+
+    json pushed = json::array(), skipped = json::array(), failed = json::array();
+    int renders = 0;
+
+    for (auto& [tenant, root] : roots)
+        for (auto& entry : fs::directory_iterator (root, ec))
+        {
+            const auto dir = entry.path() / "project.rvx";
+
+            if (! fs::exists (dir / manifestFileName, ec))
+                continue;
+
+            ProjectHead head;
+            const auto summary = summarizeEdit (dir / editFileName);
+            head.tracks = summary.tracks;
+            head.durationS = summary.durationS;
+            auto job = readSnapshot (dir, dir, head);
+
+            if (! job.ok())
+            {
+                failed.push_back ({ { "project", entry.path().filename().string() }, { "error", job.error().message } });
+                continue;
+            }
+
+            auto& snap = job.value();
+
+            if (snap.tenant != tenant)
+            {
+                failed.push_back ({ { "project_id", snap.projectId }, { "error", "the manifest says tenant " + snap.tenant + " but the project lives under " + tenant } });
+                continue;
+            }
+
+            const json item { { "project_id", snap.projectId }, { "name", snap.head.name }, { "tenant_id", tenant }, { "revision", snap.revision } };
+            auto remote = storage->fetchHead (tenant, snap.projectId);
+
+            if (remote.ok() && remote.value().revision >= snap.revision)
+            {
+                skipped.push_back (item);
+            }
+            else if (auto r = storage->push (snap); r.ok())
+            {
+                pushed.push_back (item);
+            }
+            else
+            {
+                auto f = item;
+                f["error"] = r.error().message;
+                failed.push_back (f);
+                continue;
+            }
+
+            auto up = storage->pushRenders (tenant, snap.projectId, dir);
+
+            if (up.ok())
+                renders += up.value();
+            else
+                failed.push_back ({ { "project_id", snap.projectId }, { "error", up.error().message } });
+        }
+
+    const json report { { "pushed", pushed }, { "up_to_date", skipped }, { "failed", failed }, { "renders_uploaded", renders } };
+    std::cout << report.dump (2) << "\n";
+    return failed.empty() ? 0 : 1;
 }
 
 int runPluginProbe (const Options& o)

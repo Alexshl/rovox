@@ -9,6 +9,7 @@
 #include <charconv>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <sstream>
 
 #include <fcntl.h>
@@ -16,6 +17,35 @@
 
 namespace rovox
 {
+
+EditSummary summarizeEdit (const fs::path& editXml)
+{
+    EditSummary out;
+    std::error_code ec;
+
+    if (fs::file_size (editXml, ec) > 256u * 1024u * 1024u || ec)
+        return out;
+
+    auto xml = juce::parseXML (toFile (editXml));
+
+    if (xml == nullptr)
+        return out;
+
+    for (auto* c : xml->getChildIterator())
+        if (c->hasTagName ("TRACK"))
+            ++out.tracks;
+
+    std::function<void (const juce::XmlElement&)> visit = [&] (const juce::XmlElement& e)
+    {
+        if (e.getTagName().containsIgnoreCase ("CLIP") && e.hasAttribute ("start") && e.hasAttribute ("length"))
+            out.durationS = std::max (out.durationS, e.getDoubleAttribute ("start") + e.getDoubleAttribute ("length"));
+
+        for (auto* c : e.getChildIterator())
+            visit (*c);
+    };
+    visit (*xml);
+    return out;
+}
 
 std::string nowIso8601()
 {

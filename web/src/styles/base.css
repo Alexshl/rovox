@@ -75,6 +75,10 @@ input, select { font: inherit; color: inherit; }
 .tab .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .tab .state { font-family: var(--rx-font-mono); font-size: 10px; color: var(--rx-ink-muted); flex: none; }
 .tab .dirty { color: var(--rx-orange); flex: none; }
+.tab .sync { flex: none; font-size: 12px; line-height: 1; color: var(--rx-ink-muted); }
+.tab .sync.ok { color: var(--rx-signal-green); }
+.tab .sync.uploading { color: var(--rx-amber); animation: pulse 1.4s ease-in-out infinite; }
+.tab .sync.error { color: var(--rx-red); }
 .tab .close { background: none; border: 0; padding: 0 4px; color: var(--rx-ink-muted); line-height: 1; border-radius: var(--rx-radius-sm); flex: none; }
 .tab .close:hover { color: var(--rx-ink); background: var(--rx-panel-700); }
 .tabs .add { height: 28px; width: 28px; background: transparent; border: 0; color: var(--rx-ink-muted); font-size: 16px; flex: none; }

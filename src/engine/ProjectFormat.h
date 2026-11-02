@@ -96,6 +96,14 @@ Result<void> writeAutosave (const fs::path& dir, const juce::ValueTree& editStat
 std::vector<std::uint64_t> listAutosaves (const fs::path& dir);      // ascending revisions
 Result<LoadedProject> readAutosave (const fs::path& dir, std::uint64_t revision);
 
+/** Track count and length of an edit.xml without loading an Edit (project.catalog of a closed project, the HEAD object of the bucket). */
+struct EditSummary
+{
+    int tracks = 0;
+    double durationS = 0;
+};
+EditSummary summarizeEdit (const fs::path& editXml);
+
 /** Atomic text write: path.tmp, fsync, rename. */
 Result<void> writeFileAtomic (const fs::path& path, const std::string& content, bool fsync = true);
 void fsyncDirectory (const fs::path& dir);

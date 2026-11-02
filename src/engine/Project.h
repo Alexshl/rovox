@@ -86,6 +86,12 @@ public:
     /** Publishes a non-revision event of this project (transport.changed ...); set by the ProjectManager. */
     std::function<void (const json&)> onEvent;
 
+    /** Called on the message thread after a save (dir() holds the new files) or an autosave (autosave/<revision>.rvx does); set by the ProjectManager
+        when an object store mirrors the project. */
+    std::function<void (const fs::path& writtenDir, bool autosave)> onPersisted;
+    /** `storage` block of project.get / project.list: {backend, synced_revision, pending_uploads, last_error}. */
+    std::function<json()> storageStatus;
+
     /** Saves edit.xml + rovox.json (revision pinned). Clears dirty. */
     Result<void> save (const SaveOptions& = {});
     Result<void> autosave();

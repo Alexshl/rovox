@@ -17,6 +17,7 @@ import type {
   PluginState,
   ProjectChangedEvent,
   ProjectGet,
+  StorageInfo,
   TrackState,
   TransportState,
 } from '../net/protocol';
@@ -72,6 +73,7 @@ export class ProjectStore {
   sampleRate = 44100;
   lengthS = 0;
   dirty = false;
+  storage: StorageInfo | undefined;
   loaded = false;
   canUndo = false;
   canRedo = false;
@@ -109,6 +111,7 @@ export class ProjectStore {
     this.sampleRate = data.sample_rate;
     this.lengthS = data.length_s;
     this.dirty = data.dirty;
+    this.storage = data.storage;
     this.canUndo = data.can_undo;
     this.canRedo = data.can_redo;
     this.tracks = data.tracks ?? [];

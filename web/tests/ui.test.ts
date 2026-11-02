@@ -183,6 +183,28 @@ describe('the window', () => {
     expect(ws.sent.some((m) => m.name === 'agent.accept' && m.params.up_to_revision === 12)).toBe(true);
   });
 
+  it('shows the object-storage sync state next to the project tab: nothing for local, cloud ok / uploading / error with a tooltip', async () => {
+    const { app, ws } = await boot();
+    expect(document.querySelector('.tab .sync')).toBeNull(); // local storage: no indicator
+
+    ws.push({ t: 'event', type: 'storage.changed', project_id: 'p_1', storage: { backend: 's3', synced_revision: 11, pending_uploads: 0, last_error: null } });
+    await tick(300);
+    const ok = document.querySelector('.tab .sync')!;
+    expect(ok.classList.contains('ok')).toBe(true);
+    expect(ok.getAttribute('title')).toContain('11');
+
+    ws.push({ t: 'event', type: 'storage.changed', project_id: 'p_1', storage: { backend: 's3', synced_revision: 11, pending_uploads: 1, last_error: null } });
+    await tick(300);
+    expect(document.querySelector('.tab .sync')!.classList.contains('uploading')).toBe(true);
+
+    ws.push({ t: 'event', type: 'storage.changed', project_id: 'p_1', storage: { backend: 's3', synced_revision: 11, pending_uploads: 1, last_error: 'the bucket refused the credentials' } });
+    await tick(300);
+    const bad = document.querySelector('.tab .sync')!;
+    expect(bad.classList.contains('error')).toBe(true);
+    expect(bad.getAttribute('title')).toContain('the bucket refused the credentials');
+    expect(app.active!.storage?.backend).toBe('s3');
+  });
+
   it('Undo agent sends one undo per agent step and nothing for a person step', async () => {
     const { ws } = await boot();
     project.revision = 12;

@@ -33,6 +33,9 @@ int main (int argc, char** argv)
 
     app.add_option ("--data-dir,--projects", o.dataDir, "Writable data directory (default: $ROVOX_DATA_DIR, else ~/.local/share/rovox)");
 
+    app.add_option ("--storage", o.storage, "Project storage: s3 (S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION, S3_PREFIX; each also as <NAME>_FILE) or local (default: $ROVOX_STORAGE, "
+                                           "else s3 when S3_ENDPOINT and S3_BUCKET are set)")->check (CLI::IsMember ({ "s3", "local" }));
+
     auto* serve = app.add_subcommand ("serve", "Run the server: HTTP API, uploads, autosave. REAPER JS effects: mount the REAPER Effects folder read-only at /jsfx "
                                            "(docker run -v \"$HOME/Library/Application Support/REAPER/Effects:/jsfx:ro\") or set ROVOX_JSFX_PATH (colon separated)");
     serve->add_option ("--port", o.port, "Listen port")->capture_default_str();
@@ -48,6 +51,7 @@ int main (int argc, char** argv)
     serve->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();
     serve->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
     serve->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (AGPL section 13; default $ROVOX_SOURCE_URL)");
+    serve->add_option ("--storage", o.storage, "s3 | local (see the global option)")->check (CLI::IsMember ({ "s3", "local" }));
     serve->callback ([&] { std::exit (rovox::cli::runServe (o)); });
 
     auto* render = app.add_subcommand ("render", "Render a project to an audio file with preflight and post-render checks");
@@ -101,11 +105,18 @@ int main (int argc, char** argv)
     plugins->add_option ("--path", o.pluginsDir, "Extra search path");
     plugins->callback ([&] { std::exit (rovox::cli::runPlugins (o)); });
 
+    auto* storage = app.add_subcommand ("storage", "Object storage (S3-compatible) administration");
+    storage->require_subcommand (1);
+    auto* storagePush = storage->add_subcommand ("push", "Upload every local project (snapshot, media, renders) to the bucket; projects that are already up to date are skipped");
+    storagePush->add_option ("--storage", o.storage, "s3 | local (see the global option)")->check (CLI::IsMember ({ "s3", "local" }));
+    storagePush->callback ([&] { std::exit (rovox::cli::runStoragePush (o)); });
+
     auto* mcp = app.add_subcommand ("mcp", "MCP over stdio: the same tools as 'serve', for Claude Code and other local clients");
     mcp->add_option ("--plugins", o.pluginsDir, "Extra plugin directory (VST3/LV2)");
     mcp->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();
     mcp->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
     mcp->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (default $ROVOX_SOURCE_URL)");
+    mcp->add_option ("--storage", o.storage, "s3 | local (see the global option)")->check (CLI::IsMember ({ "s3", "local" }));
     mcp->callback ([&] { std::exit (rovox::cli::runMcp (o)); });
 
     // helper processes of the server (task 410): a plugin is loaded and tested, or a project with plugins is rendered, outside the server process

@@ -33,6 +33,9 @@ ProjectManager::ProjectManager (EngineHost& host, EventHub& hub) : host_ (host),
 ProjectManager::~ProjectManager()
 {
     closeAll (SaveMode::discard);
+
+    if (storage_)
+        storage_->setListener ({});         // the storage may outlive us; its uploader thread must not publish into a dead hub
 }
 
 fs::path ProjectManager::projectsRoot (const std::string& tenant) const
@@ -71,6 +74,7 @@ Result<int> ProjectManager::acquireLock (const fs::path& dir)
 Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject loaded, const OpenOptions& opts, bool created)
 {
     int lockFd = -1;
+    const bool mirrored = storage_ != nullptr && ! opts.readOnly && ! loaded.manifest.ephemeral;
 
     if (! opts.readOnly)
     {
@@ -84,6 +88,15 @@ Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject l
 
     const auto id = loaded.manifest.projectId;
 
+    if (mirrored)
+        if (auto lease = storage_->acquireLease (loaded.manifest.tenantId, id); ! lease.ok() && lease.error().details.contains ("lease_owner"))
+        {
+            if (lockFd >= 0)
+                ::close (lockFd);
+
+            return lease.error();
+        }
+
     if (loaded.manifest.name.empty())
         loaded.manifest.name = "Untitled";
 
@@ -91,6 +104,10 @@ Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject l
                                               [this] (Project& p, const Project::PublishedEvent& e) { publish (p, e); });
     project->lockFd_ = lockFd;
     project->onEvent = [this, raw = project.get()] (const json& e) { hub_.publish (raw->tenant(), raw->id(), e); };
+    project->storageStatus = [this, tenant = project->tenant(), id] { return storageStatus (tenant, id); };
+
+    if (mirrored)
+        project->onPersisted = [this, raw = project.get()] (const fs::path& written, bool) { queueSnapshot (*raw, written); };
 
     if (created)
     {
@@ -101,6 +118,12 @@ Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject l
     auto* raw = project.get();
     projects_[id] = std::move (project);
     refreshSnapshot (*raw);
+
+    // a project that is newer here than in the bucket (never pushed, or the bucket was empty) goes up now
+    if (mirrored && ! created)
+        if (auto head = storage_->cachedHead (raw->tenant(), id); ! head || head->revision < raw->revision())
+            queueSnapshot (*raw, dir);
+
     hub_.publish (raw->tenant(), "", { { "type", "projects.changed" }, { "project_id", id }, { "change", "opened" } });
     return id;
 }
@@ -176,10 +199,42 @@ Result<std::string> ProjectManager::open (const std::string& target, const OpenO
     {
         dir = *byName;
     }
+    else if (auto remote = findRemoteDirByName (opts.tenant, target))
+    {
+        dir = *remote;
+    }
     else
     {
         return makeError (errc::notFound, "no project '" + target + "' (not a path, a project id or a project name in " + projectsRoot (opts.tenant).string() + ")");
     }
+
+    // a project of the bucket: take the writer lease and bring the cache up to HEAD before anything is read
+    std::string leasedId;
+
+    if (storage_ != nullptr && ! explicitPath && dir.filename() == "project.rvx")
+    {
+        const auto remoteId = dir.parent_path().filename().string();
+
+        if (isValidId (remoteId, "p"))
+        {
+            if (auto* alreadyOpen = find (remoteId, opts.tenant))
+                return alreadyOpen->id();
+
+            if (auto r = syncDown (opts.tenant, remoteId, dir, opts.readOnly); ! r.ok())
+                return r.error();
+
+            if (! opts.readOnly)
+                leasedId = remoteId;
+        }
+    }
+
+    auto fail = [&] (Error e) -> Result<std::string>
+    {
+        if (! leasedId.empty() && find (leasedId) == nullptr)
+            storage_->releaseLease (opts.tenant, leasedId);
+
+        return e;
+    };
 
     std::error_code ec;
     const auto canonical = fs::weakly_canonical (dir, ec);
@@ -206,12 +261,121 @@ Result<std::string> ProjectManager::open (const std::string& target, const OpenO
     }
 
     if (! loaded.ok())
-        return loaded.error();
+        return fail (loaded.error());
 
     if (! explicitPath && loaded.value().manifest.tenantId != opts.tenant)
-        return makeError (errc::notFound, "project " + target + " does not belong to tenant " + opts.tenant);
+        return fail (makeError (errc::notFound, "project " + target + " does not belong to tenant " + opts.tenant));
 
-    return attach (dir, std::move (loaded.value()), opts, false);
+    auto attached = attach (dir, std::move (loaded.value()), opts, false);
+
+    if (! attached.ok())
+        return fail (attached.error());
+
+    return attached;
+}
+
+Result<void> ProjectManager::syncDown (const std::string& tenant, const std::string& id, const fs::path& dir, bool readOnly)
+{
+    const bool haveLocal = fs::exists (dir / manifestFileName);
+
+    if (! readOnly)
+    {
+        // another live writer is final; an unreachable bucket is not: the working cache can still be opened (pushes retry in the background)
+        if (auto lease = storage_->acquireLease (tenant, id); ! lease.ok() && lease.error().details.contains ("lease_owner"))
+            return lease.error();
+    }
+
+    auto head = storage_->fetchHead (tenant, id);
+
+    if (! head.ok())
+    {
+        if (haveLocal)
+            return {};                  // not pushed yet, or the bucket cannot be reached
+
+        if (! readOnly)
+            storage_->releaseLease (tenant, id);
+
+        return head.error();
+    }
+
+    std::uint64_t localRevision = 0;
+
+    if (haveLocal)
+    {
+        std::ifstream in (dir / manifestFileName);
+        const auto doc = json::parse (in, nullptr, false);
+
+        if (doc.is_object())
+            localRevision = doc.value ("revision", (std::uint64_t) 0);
+
+        for (auto r : listAutosaves (dir))
+            localRevision = std::max (localRevision, r);
+    }
+
+    if (haveLocal && localRevision >= head.value().revision)
+        return {};
+
+    auto pulled = storage_->pull (tenant, id, dir);
+
+    if (! pulled.ok() && ! haveLocal)
+    {
+        if (! readOnly)
+            storage_->releaseLease (tenant, id);
+
+        return pulled.error();
+    }
+
+    return {};
+}
+
+std::optional<fs::path> ProjectManager::findRemoteDirByName (const std::string& tenant, const std::string& name)
+{
+    if (storage_ == nullptr)
+        return std::nullopt;
+
+    auto head = storage_->findByName (tenant, name);
+
+    if (! head)
+    {
+        storage_->refreshHeads();
+        head = storage_->findByName (tenant, name);
+    }
+
+    if (! head)
+        return std::nullopt;
+
+    return projectDir (tenant, head->projectId);
+}
+
+void ProjectManager::queueSnapshot (Project& p, const fs::path& writtenDir)
+{
+    if (storage_ == nullptr)
+        return;
+
+    ProjectHead head;
+    head.name = p.name();
+    head.tracks = (int) te::getAudioTracks (p.edit()).size();
+    head.durationS = p.edit().getLength().inSeconds();
+
+    if (auto job = readSnapshot (writtenDir, p.dir(), head); job.ok())
+        storage_->enqueue (std::move (job.value()));
+}
+
+void ProjectManager::setStorage (std::shared_ptr<RemoteStorage> s)
+{
+    storage_ = std::move (s);
+
+    if (storage_)
+        storage_->setListener ([this] (const std::string& tenant, const std::string& id, const json& status)
+                               { hub_.publish (tenant, id, { { "type", "storage.changed" }, { "project_id", id }, { "storage", status } }); });
+}
+
+json ProjectManager::storageStatus (const std::string& tenant, const std::string& id) const
+{
+    if (storage_ == nullptr)
+        return { { "backend", "local" }, { "synced_revision", nullptr }, { "pending_uploads", 0 }, { "last_error", nullptr } };
+
+    return storage_->status (tenant, id);
 }
 
 std::optional<fs::path> ProjectManager::findDirByName (const std::string& tenant, const std::string& name) const
@@ -261,6 +425,9 @@ Result<void> ProjectManager::close (const std::string& id, SaveMode mode)
     const auto tenant = it->second->tenant();
     projects_.erase (it);
 
+    if (storage_)
+        storage_->releaseLease (tenant, id);        // after the snapshot that the save above queued
+
     {
         std::lock_guard<std::mutex> lock (snapshotMutex_);
         snapshot_.erase (id);
@@ -296,7 +463,11 @@ Result<void> ProjectManager::remove (const std::string& id, const std::string& t
         return makeError (errc::busy, "a job is running on project " + id);
 
     const auto dir = p->dir();
+    const bool mirrored = storage_ != nullptr && ! p->manifest().ephemeral;
     close (id, SaveMode::discard);
+
+    if (mirrored)
+        storage_->forget (tenant, id);
 
     std::error_code ec;
     const bool managed = dir.filename() == "project.rvx" && dir.parent_path().filename() == id;
@@ -407,6 +578,23 @@ json ProjectManager::catalog (const std::string& tenant, bool includeEphemeral) 
             item["open"] = true;
             item["modified"] = (long long) std::time (nullptr);
             items.push_back (std::move (item));
+        }
+
+    // the bucket is the source of truth: its projects that this server has no copy of (yet) are listed from their HEAD objects
+    if (storage_ != nullptr)
+        for (auto& h : storage_->heads (tenant))
+        {
+            const auto it = std::find_if (items.begin(), items.end(), [&] (const json& i) { return i.value ("project_id", "") == h.projectId; });
+
+            if (it != items.end())
+            {
+                (*it)["remote_revision"] = h.revision;
+                continue;
+            }
+
+            items.push_back ({ { "project_id", h.projectId }, { "name", h.name }, { "tenant_id", tenant }, { "revision", h.revision }, { "dirty", false }, { "path", "" },
+                               { "ephemeral", false }, { "ttl_s", nullptr }, { "open", false }, { "created_at", "" }, { "saved_at", "" }, { "modified", (long long) h.modified },
+                               { "tracks", h.tracks }, { "duration_s", h.durationS }, { "remote_only", true }, { "remote_revision", h.revision } });
         }
 
     std::sort (items.begin(), items.end(), [] (const json& a, const json& b) { return a.value ("modified", 0LL) > b.value ("modified", 0LL); });

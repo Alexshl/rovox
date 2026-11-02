@@ -11,7 +11,7 @@ namespace rovox::cli
 
 struct Options
 {
-    std::string dataDir;
+    std::string dataDir, storage;       // storage: s3 | local (default: $ROVOX_STORAGE, else s3 when S3_ENDPOINT and S3_BUCKET are set)
 
     // serve
     int port = 4810;
@@ -49,6 +49,7 @@ int runRender (const Options&);
 int runImport (const Options&);
 int runUpload (const Options&);
 int runPlugins (const Options&);
+int runStoragePush (const Options&);
 int runMcp (const Options&);
 int runPluginProbe (const Options&);
 int runRenderChildCommand (const Options&);

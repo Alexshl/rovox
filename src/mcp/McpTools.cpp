@@ -120,7 +120,7 @@ struct CommandToolSpec
 };
 
 const CommandToolSpec commandTools[] = {
-    { "project.list", "List projects", "Lists the open projects of this server with id, name, revision, dirty flag and track count.", true },
+    { "project.list", "List projects", "Lists the open projects of this server with id, name, revision, dirty flag, track count and storage {backend, synced_revision, pending_uploads, last_error}.", true },
     { "project.new", "New project", "Creates and opens an empty project. Returns project_id. ephemeral + ttl_s make it self-deleting.", false },
     { "project.open", "Open project", "Opens a project by .rvx directory, project id or name. Returns project_id.", false },
     { "project.close", "Close project", "Closes a project. save=true (default) saves it first.", false },
@@ -128,7 +128,7 @@ const CommandToolSpec commandTools[] = {
     { "project.set_ttl", "Set project TTL", "Makes a project ephemeral: it is deleted ttl_s seconds after creation.", false },
     { "project.get", "Get project", "One-shot snapshot: tracks (with volume_db, pan), master, items, markers, tempo, fx chains. include narrows it down.", true },
     { "project.update", "Update project", "Renames the project (undoable).", false },
-    { "project.save", "Save project", "Writes the project to disk now (autosave runs every 60 s anyway).", false },
+    { "project.save", "Save project", "Writes the project to disk now (autosave runs every 60 s anyway). With object storage the snapshot is uploaded in the background; project.get storage shows when the bucket has this revision.", false },
     { "project.activity", "Project activity", "The last commands run on the project with origin, params, duration and the revision they produced.", true },
     { "undo", "Undo", "Undoes the last step of the project, whoever made it (undo is linear). Returns the label of the undone step.", false },
     { "redo", "Redo", "Redoes the last undone step.", false },
@@ -157,7 +157,7 @@ const CommandToolSpec commandTools[] = {
     { "fx.remove", "Remove plugin", "Removes a plugin by plugin_id.", false },
     { "fx.params", "Plugin parameters", "Lists the parameters of a plugin: ident, name, value in the parameter's own unit, display text, min, max.", true },
     { "fx.update", "Update plugin", "Sets enabled and/or params {ident_or_name: number | \"text such as -6 dB\"} of a plugin in one undo step.", false },
-    { "project.catalog", "Project catalog", "Every project of this server, open or only on disk: id, name, tracks, modified time, open flag. project.open takes the project_id.", true },
+    { "project.catalog", "Project catalog", "Every project of this server, open, only on disk or (with object storage) only in the bucket: id, name, tracks, modified time, open flag, remote_only. project.open takes the project_id and downloads a bucket-only project into the working cache.", true },
     { "plugin.catalog", "Plugin catalog", "Installed plugins the agent can load: plugin_uid, name, vendor, kind (instrument|effect), io, status (ok|blacklisted), tags and, with include_presets, factory presets. Filter by kind/query/tag/format. Use the plugin_uid with fx.add.", true },
     { "plugin.rescan", "Rescan plugins", "Scans the plugin directories again (in a child process). Unchanged directories return the cached catalog at once; force=true rescans anyway.", false },
     { "plugin.probe", "Probe plugin", "Loads one plugin in a separate process, pushes audio through it and, for an instrument, plays notes: reports latency, parameter count and whether it makes sound. A plugin that crashes is blacklisted; the server is not affected.", false },

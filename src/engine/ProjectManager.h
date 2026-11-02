@@ -5,6 +5,7 @@
 
 #include "EventHub.h"
 #include "Project.h"
+#include "RemoteStorage.h"
 
 #include <map>
 #include <mutex>
@@ -82,6 +83,13 @@ public:
     std::vector<std::string> sweepExpired (std::time_t now = std::time (nullptr));
     const std::vector<json>& ttlLog() const     { return ttlLog_; }
 
+    /** Mirrors every non-ephemeral project to an object store (the bucket is the source of truth, the data directory a cache): saves and autosaves
+        queue snapshots, open takes the writer lease and refreshes the cache from HEAD, catalog lists the bucket too. nullptr = local only. */
+    void setStorage (std::shared_ptr<RemoteStorage>);
+    RemoteStorage* storage() const      { return storage_.get(); }
+    /** `storage` block of project.get / project.list. */
+    json storageStatus (const std::string& tenant, const std::string& id) const;
+
     EngineHost& host()      { return host_; }
     EventHub& hub()         { return hub_; }
 
@@ -90,6 +98,10 @@ private:
     Result<int> acquireLock (const fs::path& dir);
     void publish (Project&, const Project::PublishedEvent&);
     void refreshSnapshot (Project&);
+    void queueSnapshot (Project&, const fs::path& writtenDir);
+    /** Writer lease and cache refresh before a project of the bucket is read. */
+    Result<void> syncDown (const std::string& tenant, const std::string& id, const fs::path& dir, bool readOnly);
+    std::optional<fs::path> findRemoteDirByName (const std::string& tenant, const std::string& name);
 
     EngineHost& host_;
     EventHub& hub_;
@@ -97,6 +109,7 @@ private:
     mutable std::mutex snapshotMutex_;
     std::map<std::string, ProjectSummary> snapshot_;
     std::vector<json> ttlLog_;
+    std::shared_ptr<RemoteStorage> storage_;
 };
 
 } // namespace rovox

@@ -134,7 +134,11 @@ void registerProjectCommands (CommandRegistry& r)
             json out = json::array();
 
             for (auto& s : pm.list (ctx.tenant, p.value ("include_ephemeral", false)))
-                out.push_back (s.toJson());
+            {
+                auto j = s.toJson();
+                j["storage"] = pm.storageStatus (s.tenant, s.id);
+                out.push_back (std::move (j));
+            }
 
             return json { { "projects", out } };
         }));

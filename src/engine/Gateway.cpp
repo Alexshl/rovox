@@ -423,7 +423,7 @@ void Gateway::handleCmd (const std::shared_ptr<Client>& c, const json& msg)
 void Gateway::onHubEvent (const Event& e)
 {
     const auto type = e.body.value ("type", "");
-    const bool projectState = type == "project.changed" || type == "agent.accepted";
+    const bool projectState = type == "project.changed" || type == "agent.accepted" || type == "storage.changed";
     const bool projectTransport = type == "transport.changed";
 
     json out = e.body;

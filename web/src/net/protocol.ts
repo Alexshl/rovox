@@ -66,6 +66,15 @@ export interface MasterState {
   pan?: number;
 }
 
+/** Where the project is stored and how far the bucket is behind (`project.get`, `storage.changed`). `local` = no object storage. */
+export interface StorageInfo {
+  backend: 'local' | 's3';
+  synced_revision: number | null;
+  pending_uploads: number;
+  last_error: string | null;
+  lease?: 'held' | 'lost' | 'none';
+}
+
 /** Result of the `project.get` command. */
 export interface ProjectGet {
   project_id: string;
@@ -76,6 +85,7 @@ export interface ProjectGet {
   can_undo: boolean;
   can_redo: boolean;
   dirty: boolean;
+  storage?: StorageInfo;
   tracks?: TrackState[];
   master?: MasterState;
   items?: ItemState[];

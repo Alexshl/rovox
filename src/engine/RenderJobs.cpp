@@ -44,12 +44,51 @@ std::set<std::string> toSet (const json& a)
 struct Captured
 {
     std::string projectId, tenant;
+    bool ephemeral = false;
     fs::path dir;
     std::uint64_t revision = 0;
     double sampleRate = 44100.0, startS = 0, endS = 0;
     std::vector<std::pair<std::string, std::string>> audioTracks;      // id, name
     std::vector<std::pair<int, double>> barStarts;                     // bar number, absolute start (clamped to the range start)
 };
+
+/** The bucket is the source of truth for renders too: a finished render is uploaded from the job's worker thread and its object key goes into the
+    result. A failed upload does not fail the render (the file is in the cache); it is reported as storage_error and retried by `rovox storage push`. */
+void uploadRenders (RemoteStorage* storage, const std::string& tenant, const std::string& projectId, json& result)
+{
+    if (storage == nullptr || ! result.is_object() || ! result.contains ("files") || ! result["files"].is_array())
+        return;
+
+    json keys = json::array(), errors = json::array();
+
+    for (auto& f : result["files"])
+    {
+        const fs::path file = f.value ("abs_path", "");
+
+        if (file.empty())
+            continue;
+
+        auto key = storage->uploadRender (tenant, projectId, file);
+
+        if (key.ok())
+        {
+            f["key"] = key.value();
+            keys.push_back (key.value());
+        }
+        else
+        {
+            errors.push_back (key.error().message);
+        }
+    }
+
+    if (result["files"].size() > 0 && result.contains ("file") && result["file"].is_object())
+        result["file"] = result["files"][0];
+
+    result["storage"] = { { "backend", "s3" }, { "keys", keys } };
+
+    if (! errors.empty())
+        result["storage_error"] = errors;
+}
 } // namespace
 
 struct JobService::Prepared
@@ -198,6 +237,7 @@ Result<std::shared_ptr<JobService::Prepared>> JobService::prepare (const JobCont
         auto& cap = prep->cap;
         cap.projectId = project->id();
         cap.tenant = project->tenant();
+        cap.ephemeral = project->manifest().ephemeral;
         cap.dir = project->dir();
         cap.revision = project->revision();
         cap.sampleRate = project->manifest().sampleRate;
@@ -308,7 +348,7 @@ Result<StartedJob> JobService::startRender (const JobContextInfo& who, const jso
     auto p = prep.value();
     p->req.preflightOnly = preflightOnly;
 
-    return submit (who, preflightOnly ? "preflight" : "render", "render", 0, args, [this, p, who] (JobContext& jc) -> Result<json>
+    return submit (who, preflightOnly ? "preflight" : "render", "render", 0, args, [this, p, who, preflightOnly] (JobContext& jc) -> Result<json>
     {
         auto req = p->req;
         req.hooks.shouldCancel = [&jc] { return jc.cancelled(); };
@@ -320,17 +360,20 @@ Result<StartedJob> JobService::startRender (const JobContextInfo& who, const jso
         ctx.sourceRevision = p->cap.revision;
         ctx.projectSampleRate = p->cap.sampleRate;
 
-        if (! p->childDir.empty())
-            return renderInChild (p->childDir, projects_.host().dataDir(), ctx, req, [this, who, &jc] (const json& info)
-            {
-                json event = info;
-                event["type"] = "plugin.crashed";
-                event["project_id"] = who.projectId;
-                event["job_id"] = jc.id();
-                projects_.hub().publish (who.tenant, who.projectId, event);
-            });
+        auto result = p->childDir.empty() ? renderEdit (*p->snapshot, ctx, req)
+                                          : renderInChild (p->childDir, projects_.host().dataDir(), ctx, req, [this, who, &jc] (const json& info)
+                                            {
+                                                json event = info;
+                                                event["type"] = "plugin.crashed";
+                                                event["project_id"] = who.projectId;
+                                                event["job_id"] = jc.id();
+                                                projects_.hub().publish (who.tenant, who.projectId, event);
+                                            });
 
-        return renderEdit (*p->snapshot, ctx, req);
+        if (result.ok() && ! preflightOnly && ! p->cap.ephemeral)
+            uploadRenders (projects_.storage(), who.tenant, who.projectId, result.value());
+
+        return result;
     });
 }
 

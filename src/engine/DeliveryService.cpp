@@ -126,6 +126,10 @@ Result<fs::path> DeliveryService::resolveSource (const DeliverySendArgs& a, cons
             return makeError (errc::invalidParams, "source.file is a path inside the project, such as renders/mix.mp3", json { { "path", "/source/file" } });
 
         file = project.dir / rel;
+
+        if (auto* storage = projects_.storage(); storage != nullptr && rel.begin() != rel.end() && *rel.begin() == "renders")
+            if (std::error_code probe; ! fs::exists (file, probe))
+                storage->fetchRender (a.tenant, a.projectId, rel.filename().string(), file);
     }
     else
     {
