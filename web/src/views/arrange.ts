@@ -73,6 +73,7 @@ export class ArrangeView {
   private readonly rulerBox = h('div', { class: 'ruler' });
   private readonly headLabel = h('span', { class: 'label', text: 'TRACKS' });
   private readonly empty = h('div', { class: 'empty-state' });
+  private pickerOnline = false;
   private pickerShown = false;
   private readonly tip = h('div', { class: 'tip', style: { display: 'none' } });
   private readonly tcpRows = new Map<string, TcpRow>();
@@ -180,11 +181,14 @@ export class ArrangeView {
   }
 
   private showProjectPicker(): void {
+    // a picker built before the socket opened has an empty list: rebuild it once connected
+    if (this.pickerShown && !this.pickerOnline && this.app.status === 'open') this.pickerShown = false;
     if (this.pickerShown) {
       this.empty.style.display = 'flex';
       return;
     }
     this.pickerShown = true;
+    this.pickerOnline = this.app.status === 'open';
     clear(this.empty);
     const picker = projectPicker(this.app);
     this.empty.append(h('div', { class: 'card' }, h('div', { text: 'Немає відкритих проектів. Створіть проект кнопкою + або відкрийте існуючий:' }), picker.el));
