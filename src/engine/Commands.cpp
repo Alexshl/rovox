@@ -6,6 +6,7 @@
 #include "Ids.h"
 #include "PluginHost.h"
 #include "ProjectManager.h"
+#include "StockPlugins.h"
 
 #include <cmath>
 
@@ -383,6 +384,11 @@ std::string builtinPluginType (const std::string& name)
     if (name == "delay")        return te::DelayPlugin::xmlTypeName;
     if (name == "chorus")       return te::ChorusPlugin::xmlTypeName;
     if (name == "fouroscillator") return te::FourOscPlugin::xmlTypeName;
+
+    if (name.rfind ("rovox_", 0) == 0)
+        if (auto* stock = findStockPlugin (name.substr (6)))
+            return stock->xmlType;
+
     return {};
 }
 
@@ -392,7 +398,8 @@ void registerFxCommands (CommandRegistry& r)
 
     r.add (makeProjectCommand ("fx.add",
         obj ({ { "track_id", strMin (1) },
-               { "builtin", { { "type", "string" }, { "enum", { "equaliser", "compressor", "reverb", "delay", "chorus", "phaser", "lowpass", "fouroscillator" } } } },
+               { "builtin", { { "type", "string" }, { "enum", { "equaliser", "compressor", "reverb", "delay", "chorus", "phaser", "lowpass", "fouroscillator",
+                                                                                      "rovox_eq", "rovox_comp", "rovox_gate", "rovox_limit", "rovox_delay", "rovox_verb" } } } },
                { "plugin", pluginDesc }, { "index", { { "type", "integer" }, { "minimum", 0 } } } }, { "track_id" }),
         obj ({ { "plugin_id", str() } }), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
@@ -427,16 +434,33 @@ void registerFxCommands (CommandRegistry& r)
             }
             else
             {
-                if (! params["plugin"].contains ("plugin_uid") && ! params["plugin"].contains ("uid"))
-                    return makeError (errc::invalidParams, "plugin needs plugin_uid (from plugin.catalog) or format + uid", json { { "path", "/plugin" } });
+                if (! params["plugin"].contains ("plugin_uid") && ! params["plugin"].contains ("uid") && ! params["plugin"].contains ("name"))
+                    return makeError (errc::invalidParams, "plugin needs plugin_uid (from plugin.catalog, for example rovox:eq) or format + uid", json { { "path", "/plugin" } });
 
-                // catalog entries are probed in a child process first: a plugin that crashes on load never reaches this process
-                auto created = createExternalPlugin (p, params["plugin"], &probeInfo);
+                // Rovox stock effects (plugin_uid "rovox:eq" or the name "Rovox EQ") are built in: no probe, no child process
+                const StockInfo* stock = nullptr;
 
-                if (! created.ok())
-                    return created.error();
+                for (const char* field : { "plugin_uid", "name", "uid" })
+                    if (stock == nullptr && params["plugin"].contains (field) && params["plugin"][field].is_string())
+                        stock = findStockPlugin (params["plugin"][field].get<std::string>());
 
-                plugin = created.value();
+                if (stock != nullptr)
+                {
+                    plugin = p.edit().getPluginCache().createNewPlugin (toJuce (stock->xmlType), {});
+                }
+                else
+                {
+                    // catalog entries are probed in a child process first: a plugin that crashes on load never reaches this process
+                    if (! params["plugin"].contains ("plugin_uid") && ! params["plugin"].contains ("uid"))
+                        return makeError (errc::notFound, "no plugin named " + params["plugin"].value ("name", "") + " (plugin.catalog lists what is installed; Rovox stock effects: rovox:eq, rovox:comp, rovox:gate, rovox:limit, rovox:delay, rovox:verb)");
+
+                    auto created = createExternalPlugin (p, params["plugin"], &probeInfo);
+
+                    if (! created.ok())
+                        return created.error();
+
+                    plugin = created.value();
+                }
             }
 
             if (plugin == nullptr)

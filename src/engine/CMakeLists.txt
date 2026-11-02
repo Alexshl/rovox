@@ -32,6 +32,7 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/Render.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RenderJobs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RppImport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/StockPlugins.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Templates.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TimePos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transport.cpp

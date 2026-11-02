@@ -4,6 +4,7 @@
 #include "EngineHost.h"
 
 #include "PluginCatalog.h"
+#include "StockPlugins.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -141,6 +142,7 @@ EngineHost::EngineHost (const EngineConfig& c) : config_ (c), budget_ (rovox::cp
     engine_ = std::make_unique<te::Engine> (std::make_unique<DataDirPropertyStorage> (config_.dataDir),
                                             std::make_unique<te::UIBehaviour>(),
                                             std::make_unique<RovoxEngineBehaviour> (config_, budget_));
+    registerStockPlugins (*engine_);
 
     if (config_.audio == AudioMode::Device)
         setAudioMode (AudioMode::Device);

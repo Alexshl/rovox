@@ -5,6 +5,8 @@
 // fx.params / fx.update. Same rules as every command: ids not indexes, explicit units, one call = one undo step.
 #include "Command.h"
 
+#include "ParamsAction.h"
+#include "StockPlugins.h"
 #include "TimePos.h"
 
 #include <cmath>
@@ -80,6 +82,16 @@ json pluginInfo (te::Plugin& p, bool withParams)
 
         if (ext->getAudioPluginInstance() == nullptr)
             j["load_error"] = toStd (ext->getLoadError());
+    }
+
+    if (auto extras = stockPluginExtras (p); extras.is_object())
+    {
+        j["stock"] = true;
+        j["units"] = extras["units"];
+        j["latency_samples"] = extras["latency_samples"];
+
+        if (withParams)
+            j["meters"] = extras["meters"];
     }
 
     if (withParams)
@@ -603,6 +615,8 @@ void registerFxExtraCommands (CommandRegistry& r)
 
             if (params.contains ("params"))
             {
+                std::map<std::string, float> before, after;
+
                 for (auto it = params["params"].begin(); it != params["params"].end(); ++it)
                 {
                     te::AutomatableParameter* found = nullptr;
@@ -634,8 +648,13 @@ void registerFxExtraCommands (CommandRegistry& r)
                         return makeError (errc::invalidParams, it.key() + " must be within " + std::to_string (range.getStart()) + " .. " + std::to_string (range.getEnd()),
                                           json { { "path", "/params/" + it.key() }, { "min", range.getStart() }, { "max", range.getEnd() } });
 
-                    found->setParameter (value, juce::sendNotification);
+                    before[toStd (found->paramID)] = found->getCurrentExplicitValue();
+                    after[toStd (found->paramID)] = value;
                 }
+
+                // one undo step for the whole call; nothing changes if any value was rejected above
+                if (! after.empty())
+                    p.edit().getUndoManager().perform (new SetParamsAction (plugin, std::move (before), std::move (after)));
             }
 
             if (params.contains ("enabled"))

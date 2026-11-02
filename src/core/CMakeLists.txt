@@ -15,6 +15,7 @@ add_library(rovox_core STATIC
     JsonSchema.cpp
     Limiter.cpp
     Loudness.cpp
+    StockFx.cpp
     RppParser.cpp
     Spectrum.cpp
     JobManager.cpp

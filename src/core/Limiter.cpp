@@ -86,6 +86,25 @@ std::vector<float> detectPeaks (const std::vector<std::vector<float>>& x, size_t
 
     return peak;
 }
+
+/** Peak over the four points n, n + 1/4, n + 2/4, n + 3/4 of one channel whose samples x[n - 7 .. n + 8] are at ring[(c - 7 .. c + 8) mod size]. */
+double peakAround (const std::vector<float>& ring, std::uint64_t c, size_t size)
+{
+    static const auto h = makeInterpolator();
+    double best = std::abs ((double) ring[c % size]);
+
+    for (int p = 0; p < oversample - 1; ++p)
+    {
+        double acc = 0.0;
+
+        for (int k = 0; k < tapsTotal; ++k)
+            acc += h[(size_t) p][(size_t) k] * (double) ring[(c + size - (size_t) tapsBefore + (size_t) k) % size];
+
+        best = std::max (best, std::abs (acc));
+    }
+
+    return best;
+}
 } // namespace
 
 LimiterResult limitTruePeak (std::vector<std::vector<float>>& planar, double sampleRate, double preGainDb, const LimiterSettings& settings)
@@ -180,6 +199,124 @@ LimiterResult limitTruePeak (std::vector<std::vector<float>>& planar, double sam
     result.maxGainReductionDb = minGain < 1.0 ? -20.0 * std::log10 (minGain) : 0.0;
     result.limitedOverOneDbPercent = 100.0 * (double) over / (double) frames;
     return result;
+}
+
+//==============================================================================
+void StreamingLimiter::prepare (double sampleRate, int numChannels, double lookaheadMs)
+{
+    sampleRate_ = sampleRate;
+    channels_ = std::max (1, numChannels);
+    look_ = std::max<size_t> (1, (size_t) std::llround (lookaheadMs * 0.001 * sampleRate));
+    ringSize_ = look_ + 8 + 40;
+    window_ = look_ + 2;
+    ring_.assign ((size_t) channels_, std::vector<float> (ringSize_, 0.0f));
+    need_.assign (window_, 1.0);
+    smooth_.assign (window_, 1.0);
+    dq_.assign (window_, 0);
+    setParams (0.0, -1.0, 80.0);
+    reset();
+}
+
+void StreamingLimiter::reset()
+{
+    for (auto& r : ring_)
+        std::fill (r.begin(), r.end(), 0.0f);
+
+    std::fill (need_.begin(), need_.end(), 1.0);
+    std::fill (smooth_.begin(), smooth_.end(), 1.0);
+    count_ = 0;
+    s_ = 1.0;
+    running_ = 0.0;
+    prevPeak_ = 0.0;
+    dqHead_ = dqCount_ = 0;
+    lastReductionDb_ = 0.0;
+}
+
+void StreamingLimiter::setParams (double preGainDb, double ceilingDbtp, double releaseMs, double marginDb)
+{
+    pre_ = std::pow (10.0, preGainDb / 20.0);
+    ceiling_ = std::pow (10.0, (ceilingDbtp - marginDb) / 20.0);
+    relCoef_ = std::exp (-1.0 / (std::max (1.0, releaseMs * 0.001 * sampleRate_)));
+}
+
+void StreamingLimiter::process (float* const* io, int numChannels, int numSamples)
+{
+    const int nch = std::min (numChannels, channels_);
+    double minEnv = 1.0;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const size_t pos = (size_t) (count_ % ringSize_);
+
+        for (int c = 0; c < nch; ++c)
+            ring_[(size_t) c][pos] = io[c][i];
+
+        double out = 0.0;
+        bool have = false;
+        double env = 1.0;
+
+        if (count_ >= 8)
+        {
+            const std::uint64_t k = count_ - 8;
+            double peak = 0.0;
+
+            for (int c = 0; c < nch; ++c)
+                peak = std::max (peak, peakAround (ring_[(size_t) c], k, ringSize_));
+
+            const double g = peak * pre_ > ceiling_ ? ceiling_ / (peak * pre_) : 1.0;
+            double need = g;
+
+            if (k > 0)
+                need = std::min (need, prevPeak_ * pre_ > ceiling_ ? ceiling_ / (prevPeak_ * pre_) : 1.0);
+
+            prevPeak_ = peak;
+            need_[k % window_] = need;
+
+            // sliding minimum of need[k - look .. k] (monotonic deque of indices)
+            while (dqCount_ > 0 && need_[dq_[(dqHead_ + dqCount_ - 1) % window_] % window_] >= need)
+                --dqCount_;
+
+            dq_[(dqHead_ + dqCount_) % window_] = k;
+            ++dqCount_;
+
+            while (dq_[dqHead_] + look_ < k)
+            {
+                dqHead_ = (dqHead_ + 1) % window_;
+                --dqCount_;
+            }
+
+            const double m = need_[dq_[dqHead_] % window_];
+            s_ = m < s_ ? m : relCoef_ * s_ + (1.0 - relCoef_) * m;
+            smooth_[k % window_] = s_;
+            running_ += s_;
+
+            if (k > look_)
+                running_ -= smooth_[(k - look_ - 1) % window_];
+
+            const size_t haveCount = (size_t) std::min<std::uint64_t> (k, look_) + 1;
+            env = (running_ + (double) (look_ + 1 - haveCount)) / (double) (look_ + 1);
+            minEnv = std::min (minEnv, env);
+
+            if (k >= look_)
+            {
+                have = true;
+                out = pre_ * env;
+            }
+        }
+
+        for (int c = 0; c < nch; ++c)
+        {
+            const size_t src = (size_t) ((count_ + ringSize_ - (look_ + 8)) % ringSize_);
+            {
+                const double v = have ? (double) ring_[(size_t) c][src] * out : 0.0;
+                io[c][i] = std::abs (v) < 1.0e-30 ? 0.0f : (float) v;
+            }
+        }
+
+        ++count_;
+    }
+
+    lastReductionDb_ = minEnv < 1.0 ? -20.0 * std::log10 (minEnv) : 0.0;
 }
 
 } // namespace rovox

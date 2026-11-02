@@ -51,6 +51,12 @@ const char* const syntheticRpp = R"RPP(<REAPER_PROJECT 0.1 "7.0/macOS-arm64" 170
         AAAAAAAA
         AAAAAA
       >
+      <VST "VST: ReaEQ (Cockos)" reaeq.vst.dylib 0 "" 1919247729
+        AAAAAAAA
+      >
+      <JS loudness_meter ""
+        0 0
+      >
     >
     <ITEM
       POSITION 1
@@ -166,9 +172,16 @@ ROVOX_TEST (rpp, synthetic_project_maps_to_tracks_items_markers_tempo_and_sends)
     CHECK (rep["imported"]["regions"] == 1);
     CHECK (rep["imported"]["sends"] == 1);
 
-    // FX are not translated: listed, raw chunk kept on the track
+    // REAPER stock FX are mapped to the Rovox stock effects with default settings, anything else is listed as unsupported; the raw chunk stays on the track
+    REQUIRE (rep["mapped"].size() == 2);
+    CHECK (rep["mapped"][0]["name"] == "VST3: ReaComp (Cockos)");
+    CHECK (rep["mapped"][0]["mapped_to"] == "Rovox Comp");
+    CHECK (rep["mapped"][1]["name"] == "VST: ReaEQ (Cockos)");
+    CHECK (rep["mapped"][1]["mapped_to"] == "Rovox EQ");
+    CHECK (rep["mapped"][0]["status"] == "mapped (default params, original settings not translated)");
+    CHECK (! rep["mapped"][0]["track_id"].get<std::string>().empty());
     REQUIRE (rep["unsupported"].size() == 1);
-    CHECK (rep["unsupported"][0]["name"] == "VST3: ReaComp (Cockos)");
+    CHECK (rep["unsupported"][0]["name"] == "loudness_meter");
     CHECK (! rep["unsupported"][0]["track_id"].get<std::string>().empty());
 
     // the absolute macOS path is not found; the guitar.wav ones are (relative to the RPP, via RECORD_PATH, by basename)
@@ -182,6 +195,19 @@ ROVOX_TEST (rpp, synthetic_project_maps_to_tracks_items_markers_tempo_and_sends)
     CHECK_NEAR (audio[0]->getVolumePlugin()->getVolumeDb(), -2.0, 0.01);
     CHECK_NEAR (audio[0]->getVolumePlugin()->getPan(), -0.5, 1e-4);
     CHECK (audio[0]->state.hasProperty ("rovox:unsupported_fx"));
+    CHECK (toStd (audio[0]->state["rovox:unsupported_fx"].toString()).find ("reacomp.vst3") != std::string::npos);
+
+    // the Rovox effects sit in the chain before the fader and keep their original chunk
+    {
+        auto fx = env.ok (id, "fx.list", { { "target", Project::idOf (audio[0]->state) } })["fx"];
+        REQUIRE (fx.size() >= 3);
+        CHECK (fx[0]["name"] == "Rovox Comp");
+        CHECK (fx[1]["name"] == "Rovox EQ");
+        CHECK (fx[2]["is_fader"] == true);
+        auto* mapped = p.findPlugin (rep["mapped"][1]["plugin_id"].get<std::string>());
+        REQUIRE (mapped != nullptr);
+        CHECK (toStd (mapped->state["rovox:reaper_fx"].toString()).find ("reaeq.vst.dylib") != std::string::npos);
+    }
 
     // folder nesting: Guitar and Drums are children of the folder, Missing is not
     CHECK (audio[0]->state.getParent().hasType (te::IDs::FOLDERTRACK));

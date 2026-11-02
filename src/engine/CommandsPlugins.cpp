@@ -5,6 +5,7 @@
 #include "Command.h"
 
 #include "PluginCatalog.h"
+#include "ParamsAction.h"
 #include "PluginHost.h"
 #include "ProjectManager.h"
 #include "Sha1.h"
@@ -53,25 +54,6 @@ te::ExternalPlugin* externalPlugin (Project& p, const std::string& id, Error& er
 
     return error.message.empty() ? ext : nullptr;
 }
-
-/** Parameter values are not part of the undoable tree for external plugins, so a preset's control values get an undo action of their own. */
-struct SetParamsAction : juce::UndoableAction
-{
-    SetParamsAction (te::Plugin::Ptr p, std::map<std::string, float> b, std::map<std::string, float> a) : plugin (std::move (p)), before (std::move (b)), after (std::move (a)) {}
-
-    bool perform() override     { apply (after); return true; }
-    bool undo() override        { apply (before); return true; }
-
-    void apply (const std::map<std::string, float>& values)
-    {
-        for (auto* ap : plugin->getAutomatableParameters())
-            if (auto v = values.find (toStd (ap->paramID)); v != values.end())
-                ap->setParameter (v->second, juce::sendNotification);
-    }
-
-    te::Plugin::Ptr plugin;
-    std::map<std::string, float> before, after;
-};
 
 fs::path userPresetFile (EngineHost& host, const std::string& uid, const std::string& name)
 {

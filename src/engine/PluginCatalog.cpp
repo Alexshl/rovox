@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Rovox contributors
 
 #include "PluginCatalog.h"
+#include "StockPlugins.h"
 
 #include "PluginHost.h"
 #include "ProjectFormat.h"
@@ -348,6 +349,9 @@ fs::path PluginCatalog::userPresetDir (const std::string& uid) const
 
 std::optional<json> PluginCatalog::find (const std::string& key) const
 {
+    if (auto* stock = findStockPlugin (key))
+        return stockCatalogRecord (*stock);
+
     std::lock_guard<std::mutex> lock (mutex_);
 
     if (plugins_.contains (key))
@@ -383,6 +387,9 @@ Result<json> PluginCatalog::ensureProbed (const std::string& uid)
         return makeError (errc::notFound, "no plugin " + uid + " in the catalog (plugin.catalog lists what is installed)");
 
     const auto realUid = rec->value ("plugin_uid", uid);
+
+    if (rec->value ("builtin", false))
+        return json { { "builtin", true }, { "name", rec->value ("name", "") }, { "latency_samples", nullptr } };
 
     if (auto why = blacklistReason (realUid))
         return makeError (errc::pluginBlacklisted, "plugin '" + rec->value ("name", realUid) + "' is blacklisted: " + *why, json { { "plugin_uid", realUid } });
@@ -519,7 +526,11 @@ json PluginCatalog::summary (const json& rec, bool withPresets)
         j["probed"] = probe_.contains (uid);
     }
 
-    if (withPresets)
+    if (withPresets && rec.value ("builtin", false))
+    {
+        j["presets"] = json::array();
+    }
+    else if (withPresets)
     {
         auto presets = presetsOf (uid);
 
@@ -538,8 +549,12 @@ json PluginCatalog::query (const CatalogQuery& q)
     {
         std::lock_guard<std::mutex> lock (mutex_);
         const auto needle = lowerCase (q.query);
+        json source = plugins_;
 
-        for (auto& [uid, rec] : plugins_.items())
+        for (auto& stock : stockPlugins())
+            source[stock.uid] = stockCatalogRecord (stock);
+
+        for (auto& [uid, rec] : source.items())
         {
             if (! q.kind.empty() && rec.value ("kind", "") != q.kind)           continue;
             if (! q.format.empty() && lowerCase (rec.value ("format", "")) != lowerCase (q.format))  continue;

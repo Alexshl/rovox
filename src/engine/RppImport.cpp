@@ -8,6 +8,7 @@
 #include "Import.h"
 #include "RppParser.h"
 #include "Sha256.h"
+#include "StockPlugins.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,7 @@ json RppImportReport::toJson() const
 {
     return { { "imported", { { "tracks", tracks }, { "folders", folders }, { "items", items }, { "midi_items", midiItems },
                              { "markers", markers }, { "regions", regions }, { "sends", sends } } },
-             { "unsupported", unsupported }, { "missing_media", missingMedia }, { "warnings", warnings } };
+             { "unsupported", unsupported }, { "mapped", mapped }, { "missing_media", missingMedia }, { "warnings", warnings } };
 }
 
 namespace
@@ -406,6 +407,45 @@ struct Importer
         ++report.items;
     }
 
+    static std::string fxDisplayName (const RppNode& fx)
+    {
+        return fx.args.empty() ? fx.name : fx.args[0];
+    }
+
+    /** A REAPER stock FX becomes the Rovox stock effect with default parameters; the original chunk is kept on the plugin. false if the FX is not one. */
+    bool mapStockFx (const RppNode& fx, te::PluginList& list, const std::string& trackId)
+    {
+        if (fx.name == "JS")
+            return false;
+
+        const auto* stock = stockForReaperName (fxDisplayName (fx));
+
+        if (stock == nullptr)
+            return false;
+
+        auto plugin = project.edit().getPluginCache().createNewPlugin (toJuce (stock->xmlType), {});
+
+        if (plugin == nullptr)
+            return false;
+
+        int index = list.size();
+
+        for (auto* existing : list.getPlugins())
+            if (dynamic_cast<te::VolumeAndPanPlugin*> (existing) != nullptr)
+            {
+                index = list.indexOf (existing);        // before the fader
+                break;
+            }
+
+        list.insertPlugin (plugin, index, nullptr);
+        plugin->initialiseFully();
+        ChangeCollector::assignMissingIds (plugin->state);
+        plugin->state.setProperty ("rovox:reaper_fx", toJuce (fx.toText()), nullptr);
+        report.mapped.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId }, { "mapped_to", stock->name },
+                                   { "plugin_id", Project::idOf (plugin->state) }, { "status", "mapped (default params, original settings not translated)" } });
+        return true;
+    }
+
     Result<void> run()
     {
         std::ifstream in (rppFile, std::ios::binary);
@@ -500,7 +540,11 @@ struct Importer
                     if (e.isBlock())
                     {
                         const auto& fx = e.children[0];
-                        report.unsupported.push_back ({ { "kind", "fx" }, { "name", fx.args.empty() ? fx.name : fx.args[0] }, { "format", fx.name }, { "track_id", trackId } });
+
+                        if (auto* at = dynamic_cast<te::AudioTrack*> (track); at != nullptr && mapStockFx (fx, at->pluginList, trackId))
+                            continue;
+
+                        report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId } });
                     }
 
                 track->state.setProperty ("rovox:unsupported_fx", toJuce (chain->toText()), nullptr);
@@ -570,8 +614,8 @@ struct Importer
 
         if (auto* mfx = root.block ("MASTERFXLIST"))
             for (auto& e : mfx->entries)
-                if (e.isBlock())
-                    report.unsupported.push_back ({ { "kind", "fx" }, { "name", e.children[0].args.empty() ? e.children[0].name : e.children[0].args[0] }, { "track_id", "master" } });
+                if (e.isBlock() && ! mapStockFx (e.children[0], edit.getMasterPluginList(), "master"))
+                    report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (e.children[0]) }, { "track_id", "master" } });
 
         return {};
     }
