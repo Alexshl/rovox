@@ -474,8 +474,10 @@ struct Importer
                 return;
         }
 
-        std::ifstream in (file);
-        auto doc = in ? json::parse (in, nullptr, false) : json (json::value_t::discarded);
+        // REAPER hands out Latin-1 text from some JS effects: repair it instead of refusing the whole file
+        std::ifstream in (file, std::ios::binary);
+        std::string bytes ((std::istreambuf_iterator<char> (in)), std::istreambuf_iterator<char>());
+        auto doc = in.is_open() ? json::parse (repairUtf8 (bytes), nullptr, false) : json (json::value_t::discarded);
 
         if (doc.is_discarded() || ! doc.is_object())
         {
@@ -625,7 +627,7 @@ struct Importer
 
                 json item { { "param", t.from }, { "formatted", t.formatted }, { "to", t.to }, { "value", *set } };
 
-                if (std::abs (*set - t.value) > 1.0e-9)
+                if (std::abs (*set - t.value) > 1.0e-4 * std::max (1.0, std::abs (t.value)))      // float32 storage is not a clamp
                     item["clamped_from"] = t.value;
 
                 if (! t.note.empty())
@@ -637,7 +639,7 @@ struct Importer
             for (auto& u : result.untranslated)
                 untranslated.push_back ({ { "param", u.from }, { "formatted", u.formatted }, { "reason", u.reason } });
 
-            enabled = enabled && parsed.enabled;
+            enabled = enabled && parsed.enabled && ! result.bypassed;
             entry["status"] = "mapped (params translated)";
             entry["translated"] = translated;
             entry["untranslated"] = untranslated;

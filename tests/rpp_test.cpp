@@ -364,34 +364,72 @@ json p (int index, const char* name, double normalized, const char* formatted)
     return { { "index", index }, { "name", name }, { "normalized", normalized }, { "formatted", formatted } };
 }
 
-/** What tools/reaper/rovox_export_fx.lua writes, with synthetic values. The limiter's GUID differs from the RPP's (found by track index + order). */
+/** The generic block every REAPER FX ends with: Bypass ("normal" / "bypassed"), Wet (percent) and Delta. Its "Wet" is not the effect's own "Wet". */
+json withGeneric (json params, int firstIndex, const char* bypass = "normal", const char* wetPercent = "100")
+{
+    params.push_back (p (firstIndex, "Bypass", std::string (bypass) == "normal" ? 0.0 : 1.0, bypass));
+    params.push_back (p (firstIndex + 1, "Wet", std::atof (wetPercent) / 100.0, wetPercent));
+    params.push_back (p (firstIndex + 2, "Delta", 0.0, "normal"));
+    return params;
+}
+
+json fxJson (int index, const char* name, const char* guid, bool enabled, json params, json config = json::object())
+{
+    const int count = (int) params.size();
+    return { { "index", index }, { "name", name }, { "guid", guid }, { "enabled", enabled }, { "config", config }, { "params", withGeneric (params, count) } };
+}
+
+/** What tools/reaper/rovox_export_fx.lua writes, in the shape of a real REAPER 7 export (unit-less formatted values, the trailing
+    Bypass / Wet / Delta block, ReaEQ band config) with synthetic values. The limiter's GUID differs from the RPP's (found by track index + order). */
 json fxSidecar()
 {
-    json eq { { "index", 0 }, { "name", "VST: ReaEQ (Cockos)" }, { "guid", "{11111111-1111-1111-1111-111111111111}" }, { "enabled", true },
-              { "config", { { "BANDTYPE0", "0" }, { "BANDTYPE1", "2" }, { "BANDTYPE2", "1" }, { "BANDENABLED0", "1" }, { "BANDENABLED1", "1" }, { "BANDENABLED2", "0" } } },
-              { "params", json::array ({ p (0, "Freq-Low shelf", 0.1, "100.0 Hz"), p (1, "Gain-Low shelf", 0.6, "3.0 dB"), p (2, "BW-Low shelf", 0.3, "2.00 oct"),
-                                         p (3, "Freq-Band 2", 0.5, "2.50 kHz"), p (4, "Gain-Band 2", 0.4, "-4.5 dB"), p (5, "Q-Band 2", 0.2, "2.00"),
-                                         p (6, "Freq-High shelf", 0.8, "9000 Hz"), p (7, "Gain-High shelf", 0.5, "1.5 dB"), p (8, "BW-High shelf", 0.2, "1.00 oct") }) } };
-    json comp { { "index", 1 }, { "name", "VST: ReaComp (Cockos)" }, { "guid", "{22222222-2222-2222-2222-222222222222}" }, { "enabled", true },
-                { "params", json::array ({ p (0, "Thresh", 0.4, "-24.5 dB"), p (1, "Ratio", 0.1, "3.0:1"), p (2, "Attack", 0.1, "15.0 ms"), p (3, "Release", 0.2, "0.25 s"),
-                                           p (4, "Pre-comp", 0.0, "2.0 ms"), p (5, "Knee size", 0.2, "4.0 dB"), p (6, "RMS size", 0.1, "10.0 ms"),
-                                           p (7, "Auto-release", 0.0, "Off"), p (8, "Wet", 1.0, "-3.0 dB"), p (9, "Dry", 0.0, "-inf dB"), p (10, "Feedback detector", 0.0, "Off") }) } };
-    json verb { { "index", 2 }, { "name", "VST: ReaVerbate (Cockos)" }, { "guid", "{33333333-3333-3333-3333-333333333333}" }, { "enabled", false },
-                { "params", json::array ({ p (0, "Wet", 0.5, "-9.0 dB"), p (1, "Dry", 0.0, "-inf dB"), p (2, "Room size", 0.8, "80.0 %"), p (3, "Dampening", 0.3, "30.0 %"),
-                                           p (4, "Stereo width", 0.75, "75.0 %"), p (5, "Initial delay", 0.1, "15.0 ms"), p (6, "Lowpass", 0.9, "9.50 kHz"), p (7, "Highpass", 0.1, "120 Hz") }) } };
-    json limit { { "index", 3 }, { "name", "VST: ReaLimit (Cockos)" }, { "guid", "{99999999-9999-9999-9999-999999999999}" }, { "enabled", true },
-                 { "params", json::array ({ p (0, "Threshold", 0.5, "-6.0 dB"), p (1, "Ceiling", 0.99, "-0.3 dB"), p (2, "Release", 0.3, "120 ms") }) } };
-    json gate { { "index", 4 }, { "name", "VST: ReaGate (Cockos)" }, { "guid", "{55555555-5555-5555-5555-555555555555}" }, { "enabled", true },
-                { "params", json::array ({ p (0, "Threshold", 0.5, "-35.0 dB"), p (1, "Attack", 0.1, "2.0 ms"), p (2, "Release", 0.2, "150 ms"), p (3, "Hold", 0.1, "40 ms"),
-                                           p (4, "Hysteresis", 0.1, "4.0 dB"), p (5, "Dry", 0.2, "-24.0 dB"), p (6, "Pre-open", 0.0, "0.0 ms") }) } };
-    json delay { { "index", 5 }, { "name", "VST: ReaDelay (Cockos)" }, { "guid", "{66666666-6666-6666-6666-666666666666}" }, { "enabled", true },
-                 { "params", json::array ({ p (0, "Wet", 0.5, "-6.0 dB"), p (1, "Dry", 0.5, "0.0 dB"),
-                                            p (2, "Tap 1 enabled", 1.0, "On"), p (3, "Length 1 (time)", 0.1, "375 ms"), p (4, "Feedback 1", 0.5, "-6.0 dB"),
-                                            p (5, "Lowpass 1", 0.5, "5.00 kHz"), p (6, "Volume 1", 0.5, "-2.0 dB"), p (7, "Pan 1", 0.4, "20% L"),
-                                            p (8, "Tap 2 enabled", 1.0, "On"), p (9, "Length 2 (musical)", 0.1, "1/8"), p (10, "Volume 2", 0.5, "-3.0 dB") }) } };
+    auto eq = fxJson (0, "VST: ReaEQ (Cockos)", "{11111111-1111-1111-1111-111111111111}", true,
+                      { p (0, "Freq-Low Shelf", 0.4, "250.0"), p (1, "Gain-Low Shelf", 0.0, "-inf"), p (2, "BW-Low Shelf", 0.1, "0.80"),
+                        p (3, "Freq-Band 2", 0.5, "580.9"), p (4, "Gain-Band 2", 0.4, "-1.1"), p (5, "BW-Band 2", 0.3, "2.00"),
+                        p (6, "Freq-Band 3", 0.5, "1000.0"), p (7, "Gain-Band 3", 0.6, "2.5"), p (8, "BW-Band 3", 0.3, "1.50"),
+                        p (9, "Freq-High Shelf 4", 0.8, "9000.0"), p (10, "Gain-High Shelf 4", 0.5, "1.5"), p (11, "BW-High Shelf 4", 0.1, "0.80"),
+                        p (12, "Freq-High Pass 5", 0.2, "100.0"), p (13, "Gain-High Pass 5", 0.5, "0.0"), p (14, "BW-High Pass 5", 0.3, "2.00"),
+                        p (15, "Global Gain", 0.5, "0.5") },
+                      { { "BANDENABLED0", "1" }, { "BANDENABLED1", "1" }, { "BANDENABLED2", "1" }, { "BANDENABLED3", "1" }, { "BANDENABLED4", "0" },
+                        { "BANDTYPE0", "0" }, { "BANDTYPE1", "8" }, { "BANDTYPE2", "8" }, { "BANDTYPE3", "1" }, { "BANDTYPE4", "4" } });
+    auto comp = fxJson (1, "VST: ReaComp (Cockos)", "{22222222-2222-2222-2222-222222222222}", true,
+                        { p (0, "Threshold", 0.4, "-24.5"), p (1, "Ratio", 0.1, "3.00"), p (2, "Attack", 0.1, "15.0"), p (3, "Release", 0.2, "250"),
+                          p (4, "Pre-comp", 0.0, "2.00"), p (5, "resvd", 0.0, "0"), p (6, "Lowpass", 1.0, "20000"), p (7, "Hipass", 0.0, "0"),
+                          p (8, "SignIn", 0.0, "0"), p (9, "AudIn", 0.0, "0"), p (10, "Dry", 0.0, "-inf"), p (11, "Wet", 0.5, "-3.0"),
+                          p (12, "Filter Preview", 0.0, "0"), p (13, "RMS size", 0.1, "10.0"), p (14, "Knee", 0.2, "4.0"), p (15, "Auto Make Up Gain", 0.0, "0"),
+                          p (16, "Auto Release", 1.0, "1"), p (17, "Legacy Attack/Knee Options", 0.25, "0.25"), p (18, "Deprecated Broken Anti-Alias", 0.0, "0"),
+                          p (19, "Multichannel Mode", 0.0, "0"), p (20, "Metering Index", 0.0, "0") });
+    auto verb = fxJson (2, "VST: ReaVerbate (Cockos)", "{33333333-3333-3333-3333-333333333333}", false,
+                        { p (0, "Wet", 0.5, "-9.0"), p (1, "Dry", 0.0, "-inf"), p (2, "Room size", 0.29, "80"), p (3, "Dampening", 0.3, "30"),
+                          p (4, "Width", 0.75, "0.75"), p (5, "Delay", 0.1, "15"), p (6, "Lowpass", 0.9, "9500"), p (7, "Hipass", 0.1, "120") });
+    auto limit = fxJson (3, "VST: ReaLimit (Cockos)", "{99999999-9999-9999-9999-999999999999}", true,
+                         { p (0, "Threshold", 0.5, "-6.0"), p (1, "Ceiling", 0.99, "-0.3"), p (2, "Release", 0.3, "120") });
+    auto gate = fxJson (4, "VST: ReaGate (Cockos)", "{55555555-5555-5555-5555-555555555555}", true,
+                        { p (0, "Threshold", 0.5, "-35.0"), p (1, "Attack", 0.1, "2"), p (2, "Release", 0.2, "150"), p (3, "Pre-open", 0.0, "0"),
+                          p (4, "Hold", 0.1, "40"), p (5, "Lowpass", 1.0, "20000"), p (6, "Hipass", 0.0, "0"), p (7, "SignIn", 0.0, "0"), p (8, "AudIn", 0.0, "0"),
+                          p (9, "Dry", 0.2, "-24.0"), p (10, "Wet", 1.0, "+0.0"), p (11, "Noise level", 0.0, "-inf"), p (12, "Hysteresis", 0.1, "4.0"),
+                          p (13, "Preview Filter", 0.0, "0"), p (14, "RMS size", 0.0, "0"), p (15, "Send MIDI", 0.0, "0"), p (16, "Midi Note", 0.5, "69"),
+                          p (17, "Midi Channel", 0.0, "1"), p (18, "Invert Wet", 0.0, "disabled"), p (19, "Multichannel Mode", 0.0, "0"), p (20, "Metering Index", 0.0, "0") });
+    auto delay = fxJson (5, "VST: ReaDelay (Cockos)", "{66666666-6666-6666-6666-666666666666}", true,
+                         { p (0, "Wet", 0.5, "-6.0 dB"), p (1, "Dry", 0.5, "0.0 dB"),
+                           p (2, "Tap 1 enabled", 1.0, "On"), p (3, "Length 1 (time)", 0.1, "375 ms"), p (4, "Feedback 1", 0.5, "-6.0 dB"),
+                           p (5, "Lowpass 1", 0.5, "5.00 kHz"), p (6, "Volume 1", 0.5, "-2.0 dB"), p (7, "Pan 1", 0.4, "20% L"),
+                           p (8, "Tap 2 enabled", 1.0, "On"), p (9, "Length 2 (musical)", 0.1, "1/8"), p (10, "Volume 2", 0.5, "-3.0 dB") });
+    // a JS effect (no Rovox counterpart); its text holds a Latin-1 byte, written below as a raw 0xE9
+    auto jsfx = fxJson (6, "JS: De-esser", "{88888888-8888-8888-8888-888888888888}", true, json::array ({ p (0, "Time Constants", 0.5, "A: 3 LATIN1s - R: 50 ms") }));
     return { { "version", 1 }, { "tracks", json::array ({ { { "index", 0 }, { "name", "Vox" }, { "guid", "{AAAAAAAA-0000-0000-0000-0000000000F1}" },
-                                                             { "fx", json::array ({ eq, comp, verb, limit, gate, delay }) } } }) },
+                                                             { "fx", json::array ({ eq, comp, verb, limit, gate, delay, jsfx }) } } }) },
              { "master", { { "name", "MASTER" }, { "fx", json::array() } } } };
+}
+
+/** The sidecar as the exporter writes it before its UTF-8 fix: with a raw Latin-1 byte (0xE9) in a text. */
+std::string fxSidecarText (int indent = -1)
+{
+    auto text = fxSidecar().dump (indent);
+    const auto at = text.find ("LATIN1");
+    REQUIRE (at != std::string::npos);
+    text.replace (at, 6, "\xe9");
+    return text;
 }
 
 json findParamIn (const json& fxInfo, const std::string& ident)
@@ -449,7 +487,7 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     test::Env env;
     const auto dir = test::makeTempDir ("rpp-fx");
     std::ofstream (dir / "fxsong.RPP") << fxRpp;
-    std::ofstream (dir / "fxsong.rovoxfx.json") << fxSidecar().dump (1);          // next to the RPP, named like the project
+    std::ofstream (dir / "fxsong.rovoxfx.json", std::ios::binary) << fxSidecarText (1);          // next to the RPP, named like the project
 
     const auto id = env.newProject ("fx sidecar");
     auto r = env.run (id, "import.rpp", { { "path", (dir / "fxsong.RPP").string() } });
@@ -461,6 +499,7 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     const auto& mapped = r.data["mapped"];
     REQUIRE (mapped.size() == 7);
     CHECK (r.data["unsupported"].empty());
+    CHECK (r.data["warnings"].empty());          // the Latin-1 byte in the sidecar is repaired, not a reason to drop the file
 
     const auto& eq = mapped[0];
     const auto& comp = mapped[1];
@@ -482,24 +521,37 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK (! plain.contains ("translated"));
     CHECK_NEAR (valueOf (env, id, plain, "threshold"), -18.0, 1e-3);
 
-    // ReaEQ: low shelf, peak (Q 2 turned into octaves), high shelf (disabled by BANDENABLED2), the other slots off
+    // ReaEQ: types from the band names (cross-checked with BANDTYPE), band 5 (high pass) off by BANDENABLED4, the other slots off
     CHECK_NEAR (valueOf (env, id, eq, "b1_type"), 0.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, eq, "b1_freq"), 100.0, 1e-2);
-    CHECK_NEAR (valueOf (env, id, eq, "b1_gain"), 3.0, 1e-3);
-    CHECK_NEAR (valueOf (env, id, eq, "b1_bw"), 2.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b1_freq"), 250.0, 1e-2);
+    CHECK_NEAR (valueOf (env, id, eq, "b1_gain"), -30.0, 1e-3);          // -inf: the Rovox minimum
+    CHECK_NEAR (valueOf (env, id, eq, "b1_bw"), 0.8, 1e-3);
     CHECK_NEAR (valueOf (env, id, eq, "b1_on"), 1.0, 1e-6);
     CHECK_NEAR (valueOf (env, id, eq, "b2_type"), 2.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, eq, "b2_freq"), 2500.0, 1e-1);
-    CHECK_NEAR (valueOf (env, id, eq, "b2_gain"), -4.5, 1e-3);
-    CHECK_NEAR (valueOf (env, id, eq, "b2_bw"), bandwidthOctForQ (2.0), 2e-3);
-    CHECK_NEAR (valueOf (env, id, eq, "b3_type"), 1.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, eq, "b3_freq"), 9000.0, 1.0);
-    CHECK_NEAR (valueOf (env, id, eq, "b3_on"), 0.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, eq, "b4_on"), 0.0, 1e-6);          // the Rovox default has band 4 on; ReaEQ has three bands
+    CHECK_NEAR (valueOf (env, id, eq, "b2_freq"), 580.9, 1e-1);
+    CHECK_NEAR (valueOf (env, id, eq, "b2_gain"), -1.1, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b2_bw"), 2.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b3_type"), 2.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b3_gain"), 2.5, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b3_bw"), 1.5, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b4_type"), 1.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b4_freq"), 9000.0, 1.0);
+    CHECK_NEAR (valueOf (env, id, eq, "b4_gain"), 1.5, 1e-3);
+    CHECK_NEAR (valueOf (env, id, eq, "b4_on"), 1.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b5_type"), 4.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b5_on"), 0.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, eq, "b6_on"), 0.0, 1e-6);
     CHECK_NEAR (valueOf (env, id, eq, "b8_on"), 0.0, 1e-6);
-    CHECK (translatedHas (eq, "b2_bw", bandwidthOctForQ (2.0), 2e-3));
+    CHECK_NEAR (valueOf (env, id, eq, "out_gain"), 0.5, 1e-3);
+    CHECK (eq["untranslated"].empty());
+    bool clamped = false;
 
-    // ReaComp: ratio "3.0:1", release "0.25 s" in ms, pre-comp, wet -3 dB / dry -inf = makeup -3 dB at 100 % wet; Auto-release is listed as untranslated
+    for (auto& t : eq["translated"])
+        clamped = clamped || (t["param"] == "Gain-Low Shelf" && t.contains ("clamped_from") && t["clamped_from"].get<double>() < -30.0);
+
+    CHECK (clamped);
+
+    // ReaComp: unit-less ratio 3.00, release 250 (ms), pre-comp, wet -3 dB / dry -inf = makeup -3 dB at 100 % wet; Auto Release is listed as untranslated
     CHECK_NEAR (valueOf (env, id, comp, "threshold"), -24.5, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "ratio"), 3.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "attack"), 15.0, 1e-3);
@@ -509,12 +561,9 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK_NEAR (valueOf (env, id, comp, "rms"), 10.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "makeup"), -3.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "mix"), 100.0, 1e-3);
-    bool autoRelease = false;
-
-    for (auto& u : comp["untranslated"])
-        autoRelease = autoRelease || u["param"] == "Auto-release";
-
-    CHECK (autoRelease);
+    CHECK_NEAR (valueOf (env, id, comp, "auto_makeup"), 0.0, 1e-6);
+    REQUIRE (comp["untranslated"].size() == 1);          // only the auto release: open filters, off flags and reserved slots are no settings
+    CHECK (comp["untranslated"][0]["param"] == "Auto Release");
 
     // ReaLimit (matched by track index and order, the GUID differs): input gain = ceiling - threshold
     CHECK_NEAR (valueOf (env, id, limit, "input_gain"), 5.7, 1e-3);
@@ -528,6 +577,7 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK_NEAR (valueOf (env, id, gate, "release"), 150.0, 1e-2);
     CHECK_NEAR (valueOf (env, id, gate, "hysteresis"), 4.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, gate, "range"), -24.0, 1e-3);
+    CHECK (gate["untranslated"].empty());
 
     // ReaVerbate (also bypassed in the RPP)
     CHECK_NEAR (valueOf (env, id, verb, "wet"), -9.0, 1e-3);
@@ -538,6 +588,7 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK_NEAR (valueOf (env, id, verb, "pre_delay"), 15.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, verb, "high_cut"), 9500.0, 1e-1);
     CHECK_NEAR (valueOf (env, id, verb, "low_cut"), 120.0, 1e-2);
+    CHECK (verb["untranslated"].empty());
 
     // ReaDelay: tap 1 in ms with feedback (-6 dB = 50.1 %), tap 2 musical (1/8 = 0.5 beats, synced), taps 3 and 4 off
     CHECK_NEAR (valueOf (env, id, delay, "t1_time"), 375.0, 1e-2);
@@ -560,6 +611,52 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK (env.ok (id, "fx.params", { { "plugin_id", verb["plugin_id"] } })["fx"]["enabled"] == false);
     CHECK (env.ok (id, "fx.params", { { "plugin_id", eq["plugin_id"] } })["fx"]["enabled"] == true);
     CHECK (env.ok (id, "fx.params", { { "plugin_id", plain["plugin_id"] } })["fx"]["enabled"] == true);
+}
+
+ROVOX_TEST (rpp, generic_block_and_units_of_the_real_reaper_shape)
+{
+    // the trailing Bypass / Wet / Delta block is told apart from the effect's own Wet by position
+    auto entry = [] (json params, int first, const char* bypass, const char* wet)
+    {
+        return parseReaperFxEntry ({ { "name", "x" }, { "params", withGeneric (params, first, bypass, wet) } });
+    };
+
+    // ReaComp: dry -inf / wet +0 dB / FX wet 50 % -> mix 50 %; the own Wet is the dB one
+    auto r = translateReaperFx ("comp", entry ({ p (0, "Threshold", 0, "-20.0"), p (1, "Dry", 0, "-inf"), p (2, "Wet", 0, "+0.0") }, 3, "bypassed", "50"));
+    CHECK (r.bypassed);
+    CHECK (r.untranslated.empty());
+    double mix = -1.0, makeup = -1.0;
+
+    for (auto& t : r.translated)
+    {
+        if (t.to == "mix")      mix = t.value;
+        if (t.to == "makeup")   makeup = t.value;
+    }
+
+    CHECK_NEAR (mix, 50.0, 1e-6);
+    CHECK_NEAR (makeup, 0.0, 1e-6);
+
+    // an effect without a mix parameter lists an FX wet other than 100 % as untranslated; a delta solo too
+    auto g = translateReaperFx ("gate", entry ({ p (0, "Threshold", 0, "-30.0") }, 1, "normal", "40"));
+    CHECK (! g.bypassed);
+    REQUIRE (g.untranslated.size() == 1);
+    CHECK (g.untranslated[0].from == "Wet");
+
+    // ReaEQ: the band name decides the type, BANDTYPE is only cross-checked
+    auto eqEntry = parseReaperFxEntry ({ { "name", "ReaEQ" }, { "config", { { "BANDTYPE0", "1" }, { "BANDENABLED0", "1" } } },
+                                         { "params", json::array ({ p (0, "Freq-Low Shelf", 0, "200.0"), p (1, "Gain-Low Shelf", 0, "3.0"), p (2, "BW-Low Shelf", 0, "0.80") }) } });
+    auto e = translateReaperFx ("eq", eqEntry);
+    bool typeOk = false;
+
+    for (auto& t : e.translated)
+        typeOk = typeOk || (t.to == "b1_type" && t.value == 0.0 && t.note.find ("disagrees") != std::string::npos);
+
+    CHECK (typeOk);
+
+    // text that is not UTF-8 is repaired as Latin-1; valid UTF-8 is left alone
+    CHECK (repairUtf8 ("A: 3 \xe9s") == "A: 3 \xc3\xa9s");
+    CHECK (repairUtf8 ("caf\xc3\xa9") == "caf\xc3\xa9");
+    CHECK (repairUtf8 ("\xc3") == "\xc3\x83");
 }
 
 ROVOX_TEST (rpp, bypass_carries_over_without_a_sidecar_and_an_explicit_sidecar_path_is_accepted)
@@ -585,7 +682,7 @@ ROVOX_TEST (rpp, bypass_carries_over_without_a_sidecar_and_an_explicit_sidecar_p
     CHECK_NEAR (valueOf (env, id, r.data["mapped"][0], "b2_freq"), 400.0, 1e-3);
 
     // explicit fx_sidecar, a name that is not looked up beside the RPP
-    std::ofstream (dir / "elsewhere.json") << fxSidecar().dump();
+    std::ofstream (dir / "elsewhere.json", std::ios::binary) << fxSidecarText();
     const auto id2 = env.newProject ("fx explicit");
     auto r2 = env.run (id2, "import.rpp", { { "path", (dir / "song.RPP").string() }, { "fx_sidecar", (dir / "elsewhere.json").string() } });
 

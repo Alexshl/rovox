@@ -2,9 +2,10 @@
 // Copyright (C) 2026 Rovox contributors
 
 // Translation of REAPER stock FX settings into Rovox stock effect parameters. The input is what the ReaScript exporter
-// (tools/reaper/rovox_export_fx.lua) writes: per FX the parameter list with the normalized value and the text REAPER shows for it
-// ("-12.0 dB", "1.50 kHz", "3.0:1", "-inf dB"). Only the formatted text is interpreted (units are part of it); the normalized value is the
-// fallback for unit-less fractions. Pure functions, no engine dependency.
+// (tools/reaper/rovox_export_fx.lua) writes: per FX the parameter list with the normalized value and the text REAPER shows for it.
+// REAPER's text carries no unit ("-6.0", "768.3", "4.00", "-inf"); the unit comes from what each named parameter of each effect is (a text
+// that does carry one, "1.50 kHz", is understood too). The last three parameters of an FX are the generic Bypass / Wet (percent) / Delta
+// block, not the effect's own. Pure functions, no engine dependency.
 #pragma once
 
 #include <nlohmann/json.hpp>
@@ -55,10 +56,14 @@ struct FxTranslation
 {
     std::vector<TranslatedParam> translated;
     std::vector<UntranslatedParam> untranslated;
+    bool bypassed = false;              // the generic "Bypass" parameter of the FX is on
 };
 
 /** `stockShortId` is "eq", "comp", "gate", "limit", "delay" or "verb" (StockInfo::shortId). Values are not clamped to the Rovox ranges. */
 FxTranslation translateReaperFx (const std::string& stockShortId, const ReaperFxEntry&);
+
+/** Valid UTF-8 from text that may not be: every byte that is not part of a valid sequence is taken as Latin-1. */
+std::string repairUtf8 (const std::string&);
 
 /** A number with its unit from the text REAPER shows. */
 struct ParsedValue

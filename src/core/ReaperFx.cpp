@@ -142,6 +142,8 @@ double linToDb (double lin)     { return lin <= 1.0e-7 ? -100.0 : 20.0 * std::lo
 struct Sink
 {
     FxTranslation out;
+    double overallWet = 1.0;            // the FX-wide Wet (0..1) of the trailing Bypass / Wet / Delta block
+    bool overallWetApplied = false;     // the translator folded it into its own mix parameter
 
     void set (const ReaperFxParam& p, const std::string& to, double value, const std::string& note = {})
     {
@@ -354,35 +356,49 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
         const auto n = "b" + std::to_string (i + 1) + "_";
         const auto idx = std::to_string (i);
 
-        // band type: from the exporter's BANDTYPE<n> (ReaEQ named config), else from the band's name
-        int type = 2;
+        // band type: the band's name wins ("Low Shelf", "Band 2", "High Pass 5"); BANDTYPE<n> serves as the fallback and as a cross-check.
+        // ReaEQ's BANDTYPE: 0 low shelf, 1 high shelf, 2 band, 3 low pass, 4 high pass, 5 all pass, 6 notch, 7 band pass, 8 and 9 band
+        int type = -1, cfgType = -1;
         std::string typeNote;
+        const auto has = [&] (const char* x) { return b.key.find (x) != std::string::npos; };
 
-        if (auto it = fx.config.find ("BANDTYPE" + idx); it != fx.config.end())
+        if (has ("low shelf") || has ("lowshelf"))              type = 0;
+        else if (has ("high shelf") || has ("highshelf"))       type = 1;
+        else if (has ("low pass") || has ("lowpass"))           type = 3;
+        else if (has ("high pass") || has ("highpass"))         type = 4;
+        else if (has ("notch"))                                 type = 5;
+        else if (has ("band pass") || has ("bandpass"))         type = 6;
+        else if (has ("all pass") || has ("allpass"))           { type = 2; typeNote = "; all-pass has no Rovox equivalent, the band is a flat peak"; }
+        else if (has ("band") || has ("peak"))                  type = 2;
+
+        const auto cfgKey = "BANDTYPE" + idx;
+
+        if (auto it = fx.config.find (cfgKey); it != fx.config.end())
         {
+            static const int map[] = { 0, 1, 2, 3, 4, 2, 5, 6, 2, 2 };
             const int reaType = std::atoi (it->second.c_str());
-            static const int map[] = { 0, 1, 2, 3, 4, 2, 5, 6, 2 };
 
-            if (reaType >= 0 && reaType < 9)
-                type = map[reaType];
+            if (reaType >= 0 && reaType < 10)
+                cfgType = map[reaType];
 
-            if (reaType == 5)
-                typeNote = "; all-pass has no Rovox equivalent, the band is a flat peak";
+            if (type < 0 && cfgType >= 0)
+            {
+                type = cfgType;
+
+                if (reaType == 5)
+                    typeNote = "; all-pass has no Rovox equivalent, the band is a flat peak";
+            }
+            else if (type >= 0 && cfgType >= 0 && type != cfgType)
+            {
+                typeNote += "; " + cfgKey + "=" + it->second + " disagrees with the band name, the name is used";
+            }
         }
-        else
-        {
-            const auto has = [&] (const char* x) { return b.key.find (x) != std::string::npos; };
 
-            if (has ("low shelf") || has ("lowshelf"))              type = 0;
-            else if (has ("high shelf") || has ("highshelf"))       type = 1;
-            else if (has ("low pass") || has ("lowpass"))           type = 3;
-            else if (has ("high pass") || has ("highpass"))         type = 4;
-            else if (has ("notch"))                                 type = 5;
-            else if (has ("band pass") || has ("bandpass"))         type = 6;
-        }
+        if (type < 0)
+            type = 2;
 
         static const char* const typeNames[] = { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass" };
-        s.out.translated.push_back ({ "band type (" + b.key + ")", fx.config.count ("BANDTYPE" + idx) ? "BANDTYPE" + idx + "=" + fx.config.at ("BANDTYPE" + idx) : "from the band name",
+        s.out.translated.push_back ({ "band type (" + b.key + ")", fx.config.count (cfgKey) ? cfgKey + "=" + fx.config.at (cfgKey) : "from the band name",
                                       n + "type", (double) type, std::string (typeNames[type]) + typeNote });
 
         bool enabled = true;
@@ -446,23 +462,52 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
 }
 
 //------------------------------------------------------------------------------ ReaComp
+/** A parameter without a Rovox counterpart: listed unless it is at its neutral value (detector filters open, flags off). */
+void leave (Sink& s, const ReaperFxParam& p, const std::string& reason, bool neutral)
+{
+    if (! neutral)
+        s.skip (p, reason);
+}
+
+bool zeroish (const ReaperFxParam& p)
+{
+    const auto v = parseReaperValue (p.formatted);
+
+    if (v.ok && ! v.infinite)
+        return std::abs (v.value) < 1.0e-9;
+
+    const auto t = lowerOf (trim (p.formatted));
+    return t == "off" || t == "disabled" || t == "normal" || t == "none";
+}
+
+bool filterOpen (const ReaperFxParam& p, bool lowpass)
+{
+    const auto hz = asHz (parseReaperValue (p.formatted));
+    return hz && (lowpass ? *hz >= 20000.0 : *hz <= 20.0);
+}
+
+bool isMinusInf (const ReaperFxParam& p)
+{
+    const auto v = parseReaperValue (p.formatted);
+    return v.ok && v.infinite && v.value < 0;
+}
+
 void translateComp (const ReaperFxEntry& fx, Sink& s)
 {
     const ReaperFxParam *wet = nullptr, *dry = nullptr;
 
+    // units of the plain numbers ReaComp shows: threshold / knee / dry / wet in dB, attack / release / pre-comp / RMS size in ms, ratio as N:1
     for (auto& p : fx.params)
     {
-        const auto w = words (p.name);
+        const auto k = joinWords (words (p.name));
         const auto v = parseReaperValue (p.formatted);
-        const auto text = joinWords (w);
-        const bool lim = hasPrefixWord (w, "lim");
 
-        if (hasPrefixWord (w, "thresh") && ! lim)
+        if (k == "threshold" || k == "thresh")
         {
             if (auto db = asDb (v))     s.set (p, "threshold", *db);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "ratio"))
+        else if (k == "ratio")
         {
             if (v.ok && v.infinite)
                 s.set (p, "ratio", 100.0, "infinite ratio");
@@ -471,51 +516,59 @@ void translateComp (const ReaperFxEntry& fx, Sink& s)
             else
                 s.unparsed (p);
         }
-        else if (hasWord (w, "attack") && ! hasWord (w, "auto"))
+        else if (k == "attack")
         {
             if (auto ms = asMs (v))     s.set (p, "attack", *ms);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "release") && ! hasWord (w, "auto") && ! lim)
+        else if (k == "release")
         {
             if (auto ms = asMs (v))     s.set (p, "release", *ms);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "knee"))
+        else if (k == "knee" || k == "knee size")
         {
             if (auto db = asDb (v))     s.set (p, "knee", *db);
             else                        s.unparsed (p);
         }
-        else if (text.find ("pre comp") != std::string::npos || text.find ("precomp") != std::string::npos || hasWord (w, "lookahead"))
+        else if (k == "pre comp" || k == "precomp")
         {
             if (auto ms = asMs (v))     s.set (p, "lookahead", *ms, "pre-comp");
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "rms"))
+        else if (k == "rms size")
         {
             if (auto ms = asMs (v))     s.set (p, "rms", *ms);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "auto") && (hasWord (w, "makeup") || (hasWord (w, "make") && hasWord (w, "up"))))
+        else if (k == "auto make up gain")
         {
             s.set (p, "auto_makeup", asFlag (p) ? 1.0 : 0.0);
         }
-        else if (w.size() == 1 && w[0] == "wet")
+        else if (k == "wet")
         {
             wet = &p;
         }
-        else if (w.size() == 1 && w[0] == "dry")
+        else if (k == "dry")
         {
             dry = &p;
         }
+        else if (k == "lowpass")                    leave (s, p, "the detector low-pass has no equivalent in the Rovox Comp", filterOpen (p, true));
+        else if (k == "hipass")                     leave (s, p, "the detector high-pass has no equivalent in the Rovox Comp", filterOpen (p, false));
+        else if (k == "auto release")               leave (s, p, "auto release has no equivalent in the Rovox Comp", zeroish (p));
+        else if (k == "signin" || k == "audin")     leave (s, p, "the external side-chain input has no equivalent in the Rovox Comp", zeroish (p));
+        else if (k == "filter preview")             leave (s, p, "the detector filter preview has no equivalent in the Rovox Comp", zeroish (p));
+        else if (k == "multichannel mode")          leave (s, p, "multichannel mode has no equivalent in the Rovox Comp", zeroish (p));
+        else if (k == "deprecated broken anti alias")   leave (s, p, "legacy anti-alias mode has no equivalent in the Rovox Comp", zeroish (p));
+        else if (k == "resvd" || k == "legacy attack knee options" || k == "metering index")
+            continue;       // reserved / compatibility / metering slots, no setting
         else
-        {
             s.skip (p, "no equivalent in the Rovox Comp");
-        }
     }
 
-    // ReaComp output = dry * x + wet * compressed; Rovox output = mix * makeup * compressed + (1 - mix) * x
-    if (wet != nullptr || dry != nullptr)
+    // ReaComp output = dry * x + wet * compressed; Rovox output = mix * makeup * compressed + (1 - mix) * x.
+    // The FX-wide Wet (w) blends the whole effect: (1 - w) * x + w * output, so mix = w * (1 - dry) and makeup = wet / (1 - dry).
+    if (wet != nullptr || dry != nullptr || s.overallWet < 1.0)
     {
         const auto wv = wet != nullptr ? asDb (parseReaperValue (wet->formatted)) : std::optional<double> (0.0);
         const auto dv = dry != nullptr ? asDb (parseReaperValue (dry->formatted)) : std::optional<double> (minusInfDb);
@@ -528,17 +581,24 @@ void translateComp (const ReaperFxEntry& fx, Sink& s)
         else
         {
             const double w = dbToLin (*wv), d = dbToLin (*dv);
-            const double mix = std::clamp (1.0 - d, 0.0, 1.0);
-            const double makeupDb = mix > 0.0 && w > 0.0 ? linToDb (w / mix) : 0.0;
-            const auto note = "wet " + std::to_string (*wv) + " dB / dry " + std::to_string (*dv) + " dB";
+            const double base = std::clamp (1.0 - d, 0.0, 1.0);
+            const double mix = base * s.overallWet;
+            const double makeupDb = base > 0.0 && w > 0.0 ? linToDb (w / base) : 0.0;
+            auto note = "wet " + std::to_string (*wv) + " dB / dry " + std::to_string (*dv) + " dB";
+
+            if (s.overallWet < 1.0)
+                note += ", FX wet " + std::to_string (s.overallWet * 100.0) + " %";
 
             if (wet != nullptr)     s.set (*wet, "makeup", makeupDb, note);
             if (dry != nullptr)     s.set (*dry, "mix", mix * 100.0, note);
+            else                    s.out.translated.push_back ({ "(mix)", "", "mix", mix * 100.0, note });
 
             if (d >= 1.0)
                 s.out.untranslated.push_back ({ "Dry", dry != nullptr ? dry->formatted : "", "dry level at or above 0 dB cannot be reproduced; the mix is 0 %" });
         }
     }
+
+    s.overallWetApplied = true;
 }
 
 //------------------------------------------------------------------------------ ReaLimit
@@ -580,98 +640,121 @@ void translateLimit (const ReaperFxEntry& fx, Sink& s)
 //------------------------------------------------------------------------------ ReaGate
 void translateGate (const ReaperFxEntry& fx, Sink& s)
 {
+    bool sendMidi = false;
+
+    for (auto& p : fx.params)
+        if (joinWords (words (p.name)) == "send midi")
+            sendMidi = ! zeroish (p);
+
+    // plain numbers: threshold / hysteresis / dry / wet in dB, attack / release / hold in ms
     for (auto& p : fx.params)
     {
-        const auto w = words (p.name);
+        const auto k = joinWords (words (p.name));
         const auto v = parseReaperValue (p.formatted);
 
-        if (hasPrefixWord (w, "thresh"))
+        if (k == "threshold" || k == "thresh")
         {
             if (auto db = asDb (v))     s.set (p, "threshold", *db);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "attack"))
+        else if (k == "attack")
         {
             if (auto ms = asMs (v))     s.set (p, "attack", *ms);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "hold"))
+        else if (k == "hold")
         {
             if (auto ms = asMs (v))     s.set (p, "hold", *ms);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "release"))
+        else if (k == "release")
         {
             if (auto ms = asMs (v))     s.set (p, "release", *ms);
             else                        s.unparsed (p);
         }
-        else if (hasPrefixWord (w, "hyster"))
+        else if (k == "hysteresis")
         {
             if (auto db = asDb (v))     s.set (p, "hysteresis", *db);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "range") || hasWord (w, "floor") || (w.size() == 1 && w[0] == "dry"))
+        else if (k == "dry")
         {
             // ReaGate's dry level is what passes while the gate is closed
-            if (auto db = asDb (v))     s.set (p, "range", std::max (*db, -100.0), w[0] == "dry" ? "dry level = attenuation while closed" : "");
+            if (auto db = asDb (v))     s.set (p, "range", std::max (*db, -100.0), "dry level = attenuation while closed");
             else                        s.unparsed (p);
         }
-        else if (w.size() == 1 && w[0] == "wet")
+        else if (k == "wet")
         {
-            if (auto db = asDb (v); db && std::abs (*db) < 0.05)
-                continue;       // 0 dB is the Rovox behaviour
-
-            s.skip (p, "wet level other than 0 dB has no equivalent in the Rovox Gate");
+            const auto db = asDb (v);
+            leave (s, p, "wet level other than 0 dB has no equivalent in the Rovox Gate", db && std::abs (*db) < 0.05);
         }
+        else if (k == "pre open")                   leave (s, p, "pre-open has no equivalent in the Rovox Gate", zeroish (p));
+        else if (k == "lowpass")                    leave (s, p, "the detector low-pass has no equivalent in the Rovox Gate", filterOpen (p, true));
+        else if (k == "hipass")                     leave (s, p, "the detector high-pass has no equivalent in the Rovox Gate", filterOpen (p, false));
+        else if (k == "signin" || k == "audin")     leave (s, p, "the external side-chain input has no equivalent in the Rovox Gate", zeroish (p));
+        else if (k == "noise level")                leave (s, p, "the noise level has no equivalent in the Rovox Gate", isMinusInf (p));
+        else if (k == "preview filter")             leave (s, p, "the detector filter preview has no equivalent in the Rovox Gate", zeroish (p));
+        else if (k == "rms size")                   leave (s, p, "RMS detection has no equivalent in the Rovox Gate", zeroish (p));
+        else if (k == "send midi")                  leave (s, p, "MIDI output has no equivalent in the Rovox Gate", zeroish (p));
+        else if (k == "midi note" || k == "midi channel")   leave (s, p, "MIDI output has no equivalent in the Rovox Gate", ! sendMidi);
+        else if (k == "invert wet")                 leave (s, p, "inverted wet has no equivalent in the Rovox Gate", ! asFlag (p));
+        else if (k == "multichannel mode")          leave (s, p, "multichannel mode has no equivalent in the Rovox Gate", zeroish (p));
+        else if (k == "metering index")             continue;
         else
-        {
             s.skip (p, "no equivalent in the Rovox Gate");
-        }
     }
 }
 
 //------------------------------------------------------------------------------ ReaVerbate
+/** Room size / dampening show 0..100 without a unit, width 0..1 ("1.00"); "%" in the text always means percent. */
+double verbFraction (const ParsedValue& v, double normalized, bool percentWhenPlain)
+{
+    if (! v.ok || v.infinite)
+        return std::clamp (normalized, 0.0, 1.0);
+
+    return std::clamp (v.unit == "%" || (v.unit.empty() && percentWhenPlain) ? v.value / 100.0 : v.value, 0.0, 1.0);
+}
+
 void translateVerb (const ReaperFxEntry& fx, Sink& s)
 {
     for (auto& p : fx.params)
     {
-        const auto w = words (p.name);
-        const auto text = joinWords (w);
+        const auto k = joinWords (words (p.name));
         const auto v = parseReaperValue (p.formatted);
 
-        if (w.size() == 1 && w[0] == "wet")
+        if (k == "wet")
         {
             if (auto db = asDb (v))     s.set (p, "wet", *db);
             else                        s.unparsed (p);
         }
-        else if (w.size() == 1 && w[0] == "dry")
+        else if (k == "dry")
         {
             if (auto db = asDb (v))     s.set (p, "dry", *db);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "room") && (hasWord (w, "size") || w.size() == 1))
+        else if (k == "room size" || k == "room")
         {
-            s.set (p, "room_size", asFraction (v, p.normalized));
+            s.set (p, "room_size", verbFraction (v, p.normalized, true));
         }
-        else if (hasPrefixWord (w, "damp"))
+        else if (k == "dampening" || k == "damping")
         {
-            s.set (p, "damping", asFraction (v, p.normalized));
+            s.set (p, "damping", verbFraction (v, p.normalized, true));
         }
-        else if (hasWord (w, "width") || hasWord (w, "stereo"))
+        else if (k == "width" || k == "stereo width")
         {
-            s.set (p, "width", asFraction (v, p.normalized));
+            s.set (p, "width", verbFraction (v, p.normalized, false));
         }
-        else if (text.find ("initial delay") != std::string::npos || text.find ("pre delay") != std::string::npos || text.find ("predelay") != std::string::npos)
+        else if (k == "delay" || k == "initial delay" || k == "pre delay" || k == "predelay")
         {
             if (auto ms = asMs (v))     s.set (p, "pre_delay", *ms);
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "lowpass") || (hasWord (w, "low") && hasWord (w, "pass")))
+        else if (k == "lowpass")
         {
             if (auto hz = asHz (v))     s.set (p, "high_cut", *hz, "REAPER lowpass = Rovox high cut");
             else                        s.unparsed (p);
         }
-        else if (hasWord (w, "highpass") || (hasWord (w, "high") && hasWord (w, "pass")))
+        else if (k == "hipass" || k == "highpass")
         {
             if (auto hz = asHz (v))     s.set (p, "low_cut", *hz, "REAPER highpass = Rovox low cut");
             else                        s.unparsed (p);
@@ -865,9 +948,42 @@ void translateDelay (const ReaperFxEntry& fx, Sink& s)
 }
 } // namespace
 
-FxTranslation translateReaperFx (const std::string& id, const ReaperFxEntry& fx)
+FxTranslation translateReaperFx (const std::string& id, const ReaperFxEntry& entry)
 {
     Sink s;
+    auto fx = entry;
+
+    // every REAPER FX ends with the generic Bypass / Wet / Delta parameters; their "Wet" is not the effect's own "Wet" (dB)
+    const ReaperFxParam* bypass = nullptr;
+    const ReaperFxParam* genericWet = nullptr;
+    const ReaperFxParam* delta = nullptr;
+    std::vector<ReaperFxParam> generic;
+
+    if (fx.params.size() >= 3)
+    {
+        const auto n = fx.params.size();
+
+        if (lowerOf (trim (fx.params[n - 3].name)) == "bypass" && lowerOf (trim (fx.params[n - 2].name)) == "wet" && lowerOf (trim (fx.params[n - 1].name)) == "delta")
+        {
+            generic.assign (fx.params.end() - 3, fx.params.end());
+            fx.params.resize (n - 3);
+            bypass = &generic[0];
+            genericWet = &generic[1];
+            delta = &generic[2];
+        }
+    }
+
+    if (bypass != nullptr)
+    {
+        const auto t = lowerOf (trim (bypass->formatted));
+        s.out.bypassed = t == "bypassed" || t == "bypass" || (t != "normal" && bypass->normalized >= 0.5);
+    }
+
+    if (genericWet != nullptr)
+    {
+        const auto v = parseReaperValue (genericWet->formatted);
+        s.overallWet = std::clamp (v.ok && ! v.infinite ? v.value / 100.0 : genericWet->normalized, 0.0, 1.0);
+    }
 
     if (id == "eq")             translateEq (fx, s);
     else if (id == "comp")      translateComp (fx, s);
@@ -876,7 +992,53 @@ FxTranslation translateReaperFx (const std::string& id, const ReaperFxEntry& fx)
     else if (id == "verb")      translateVerb (fx, s);
     else if (id == "delay")     translateDelay (fx, s);
 
+    if (genericWet != nullptr && s.overallWet < 1.0 - 1.0e-6 && ! s.overallWetApplied)
+        s.skip (*genericWet, "the FX-wide wet mix other than 100 % has no equivalent in this Rovox effect");
+
+    if (delta != nullptr && lowerOf (trim (delta->formatted)) != "normal" && delta->normalized >= 0.5)
+        s.skip (*delta, "delta (difference) monitoring has no equivalent in Rovox");
+
     return s.out;
+}
+
+std::string repairUtf8 (const std::string& in)
+{
+    std::string out;
+    out.reserve (in.size());
+    const auto n = in.size();
+
+    for (size_t i = 0; i < n;)
+    {
+        const auto c = (unsigned char) in[i];
+        size_t len = c < 0x80 ? 1 : (c >= 0xC2 && c <= 0xDF) ? 2 : (c >= 0xE0 && c <= 0xEF) ? 3 : (c >= 0xF0 && c <= 0xF4) ? 4 : 0;
+        bool ok = len > 0 && i + len <= n;
+
+        for (size_t k = 1; ok && k < len; ++k)
+            ok = ((unsigned char) in[i + k] & 0xC0) == 0x80;
+
+        if (ok && len > 1)
+        {
+            const auto c2 = (unsigned char) in[i + 1];
+
+            if ((c == 0xE0 && c2 < 0xA0) || (c == 0xED && c2 > 0x9F) || (c == 0xF0 && c2 < 0x90) || (c == 0xF4 && c2 > 0x8F))
+                ok = false;
+        }
+
+        if (ok)
+        {
+            out.append (in, i, len);
+            i += len;
+        }
+        else
+        {
+            // not UTF-8: the byte is Latin-1 (REAPER hands out such text from some JS effects)
+            out += (char) (0xC0 | (c >> 6));
+            out += (char) (0x80 | (c & 0x3F));
+            ++i;
+        }
+    }
+
+    return out;
 }
 
 } // namespace rovox
