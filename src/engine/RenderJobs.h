@@ -32,7 +32,7 @@ public:
     JobService (ProjectManager&, JobManager&, MessageThreadExecutor&);
 
     /** args: name, scope, track_ids, stems_through_master, range {start,end} (TimePos), format {container, bit_depth, bitrate_kbps, sample_rate, channels},
-        tail_s, target_lufs, normalize, tolerance_lu, true_peak_ceiling_dbtp, check, fail_on, warn_on, seed, client_request_id, stall_timeout_s. */
+        tail_s, target_lufs, normalize, tolerance_lu, true_peak_ceiling_dbtp, ceiling_dbtp, limiter, check, fail_on, warn_on, seed, client_request_id, stall_timeout_s. */
     Result<StartedJob> startRender (const JobContextInfo&, const json& args, bool preflightOnly);
 
     /** args: range {start,end}, track_ids, format (mp3 | wav | flac), analysis [loudness, spectrum_bands, per_bar, tracks_presence], embed_audio, client_request_id. */

@@ -261,7 +261,8 @@ json requestToJson (const RenderRequest& r)
                           { "start_bar", r.range.startBar ? json (*r.range.startBar) : json (nullptr) }, { "end_bar", r.range.endBar ? json (*r.range.endBar) : json (nullptr) } } },
              { "tail_s", r.tailS },
              { "format", { { "container", r.format.container }, { "bit_depth", r.format.bitDepth }, { "bitrate_kbps", r.format.bitrateKbps }, { "sample_rate", r.format.sampleRate }, { "channels", r.format.channels } } },
-             { "loudness", { { "mode", r.loudness.mode }, { "target_lufs", r.loudness.targetLufs }, { "tolerance_lu", r.loudness.toleranceLu }, { "true_peak_ceiling_db", r.loudness.truePeakCeilingDb } } },
+             { "loudness", { { "mode", r.loudness.mode }, { "target_lufs", r.loudness.targetLufs }, { "tolerance_lu", r.loudness.toleranceLu }, { "true_peak_ceiling_db", r.loudness.truePeakCeilingDb },
+                            { "limiter", r.loudness.limiter ? json (*r.loudness.limiter) : json (nullptr) } } },
              { "fail_on", r.failOn }, { "warn_on", r.warnOn }, { "clip_tolerance", r.clipTolerance }, { "seed", r.seed ? json (*r.seed) : json (nullptr) },
              { "preflight_only", r.preflightOnly }, { "stall_timeout_s", r.stallTimeoutS } };
 }
@@ -289,6 +290,8 @@ RenderRequest requestFromJson (const json& j)
     r.format = { f.value ("container", "wav"), f.value ("bit_depth", 24), f.value ("bitrate_kbps", 320), f.value ("sample_rate", 0.0), f.value ("channels", 2) };
     const auto& l = j["loudness"];
     r.loudness = { l.value ("mode", "none"), l.value ("target_lufs", -14.0), l.value ("tolerance_lu", 1.0), l.value ("true_peak_ceiling_db", -1.0) };
+    if (l.contains ("limiter") && l["limiter"].is_boolean())
+        r.loudness.limiter = l["limiter"].get<bool>();
     r.failOn = j.value ("fail_on", r.failOn);
     r.warnOn = j.value ("warn_on", r.warnOn);
     r.clipTolerance = j.value ("clip_tolerance", (std::int64_t) 0);

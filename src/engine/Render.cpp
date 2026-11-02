@@ -4,6 +4,7 @@
 #include "Render.h"
 
 #include "AudioSink.h"
+#include "Limiter.h"
 #include "Loudness.h"
 #include "Sha256.h"
 #include "Version.h"
@@ -572,11 +573,115 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
 
     const auto statsBefore = before.finish();
 
+    SinkSpec spec;
+    spec.container = req.format.container;
+    spec.bitDepth = req.format.bitDepth;
+    spec.bitrateKbps = req.format.bitrateKbps;
+    spec.sampleRate = sr;
+    spec.channels = req.format.channels;
+
     // gain for loudness normalisation
     double gainDb = 0.0;
     bool limitedByPeak = false;
 
-    if (req.loudness.mode == "normalize" && statsBefore.integratedLufs > -70.0)
+    // master limiter: the whole mix is held in memory (channel layout of the output), gain + limiter iterate until the target is met
+    const bool useLimiter = req.loudness.mode != "check" && req.loudness.limiter.value_or (req.loudness.mode == "normalize");
+    std::vector<std::vector<float>> limited;
+    LimiterResult limiterResult;
+    int limiterPasses = 0;
+
+    if (useLimiter)
+    {
+        const int srcCh = (int) reader.value()->channels();
+        std::vector<std::vector<float>> mixedAll ((size_t) spec.channels);
+
+        for (auto& c : mixedAll)
+            c.reserve ((size_t) frameLimit);
+
+        for (std::int64_t pos = 0; pos < frameLimit;)
+        {
+            if (cancelRequested())
+                return makeError (errc::cancelled, "the render was cancelled");
+
+            const int n = (int) std::min<std::int64_t> (65536, frameLimit - pos);
+            const auto* planar = reader.value()->read (pos, n);
+
+            if (planar == nullptr)
+                return makeError (errc::io, "cannot read the rendered file back");
+
+            for (int c = 0; c < spec.channels; ++c)
+                for (int i = 0; i < n; ++i)
+                    mixedAll[(size_t) c].push_back (spec.channels == 1 && srcCh > 1 ? 0.5f * (planar[0][i] + planar[1][i]) : planar[std::min (c, srcCh - 1)][i]);
+
+            pos += n;
+        }
+
+        const bool normalizing = req.loudness.mode == "normalize" && statsBefore.integratedLufs > -70.0;
+        const double target = req.loudness.targetLufs;
+        const double ceiling = req.loudness.truePeakCeilingDb;
+        double bestErr = 1.0e9, lastGain = 0.0, prevGain = 0.0, prevLufs = 0.0;
+        bool havePrev = false;
+
+        if (normalizing)
+            gainDb = target - analyse (mixedAll, sr).integratedLufs;
+
+        for (int pass = 0; pass < (normalizing ? 4 : 1); ++pass)
+        {
+            if (cancelRequested())
+                return makeError (errc::cancelled, "the render was cancelled");
+
+            auto trial = mixedAll;
+            LimiterSettings ls;
+            ls.ceilingDbtp = ceiling;
+            LimiterResult lr;
+            AudioStats st;
+
+            for (int attempt = 0; attempt < 4; ++attempt)
+            {
+                if (attempt > 0)
+                    trial = mixedAll;
+
+                lr = limitTruePeak (trial, sr, gainDb, ls);
+                st = analyse (trial, sr);
+
+                if (st.truePeakDbtp <= ceiling + 0.01)
+                    break;
+
+                ls.ceilingDbtp -= st.truePeakDbtp - ceiling + 0.02;     // the detector missed an inter-sample peak: tighten and redo
+            }
+
+            ++limiterPasses;
+            const double err = normalizing ? std::abs (st.integratedLufs - target) : 0.0;
+
+            if (err < bestErr)
+            {
+                bestErr = err;
+                limited = std::move (trial);
+                limiterResult = lr;
+                lastGain = gainDb;
+            }
+
+            progressAt (0.7 + 0.15 * (double) (pass + 1) / 4.0, "limiting");
+
+            if (! normalizing || err <= 0.1 || st.integratedLufs < -70.0)
+                break;
+
+            // next gain: secant on the (limited) loudness response, which is flatter than 1 dB/dB once the limiter works
+            double slope = 1.0;
+
+            if (havePrev && std::abs (gainDb - prevGain) > 1.0e-6)
+                slope = std::clamp ((st.integratedLufs - prevLufs) / (gainDb - prevGain), 0.15, 1.0);
+
+            havePrev = true;
+            prevGain = gainDb;
+            prevLufs = st.integratedLufs;
+            gainDb += std::clamp ((target - st.integratedLufs) / slope, -20.0, 20.0);
+        }
+
+        gainDb = lastGain;
+        limitedByPeak = normalizing && bestErr > 0.1 && limiterResult.maxGainReductionDb > 0.05;
+    }
+    else if (req.loudness.mode == "normalize" && statsBefore.integratedLufs > -70.0)
     {
         gainDb = req.loudness.targetLufs - statsBefore.integratedLufs;
         const double predictedPeak = statsBefore.truePeakDbtp + gainDb;
@@ -588,16 +693,9 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
         }
     }
 
-    const float gain = (float) std::pow (10.0, gainDb / 20.0);
+    const float gain = useLimiter ? 1.0f : (float) std::pow (10.0, gainDb / 20.0);
 
     // pass 2: gain, channel layout, dither, encode, measure what is written
-    SinkSpec spec;
-    spec.container = req.format.container;
-    spec.bitDepth = req.format.bitDepth;
-    spec.bitrateKbps = req.format.bitrateKbps;
-    spec.sampleRate = sr;
-    spec.channels = req.format.channels;
-
     auto sink = createSink (spec, partPath);
 
     if (! sink.ok())
@@ -618,7 +716,7 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
         if (planar == nullptr)
             return makeError (errc::io, "cannot read the rendered file back");
 
-        for (int c = 0; c < spec.channels; ++c)
+        for (int c = 0; c < spec.channels && ! useLimiter; ++c)
         {
             auto& dst = mixed[(size_t) c];
             dst.resize ((size_t) n);
@@ -634,8 +732,8 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
 
         std::vector<const float*> ptrs;
 
-        for (auto& c : mixed)
-            ptrs.push_back (c.data());
+        for (int c = 0; c < spec.channels; ++c)
+            ptrs.push_back (useLimiter ? limited[(size_t) c].data() + pos : mixed[(size_t) c].data());
 
         after.add (ptrs.data(), n);
 
@@ -708,6 +806,11 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
             loudness["true_peak_ceiling_dbtp"] = req.loudness.truePeakCeilingDb;
         }
 
+        if (useLimiter)
+            loudness["limiter"] = { { "enabled", true }, { "ceiling_dbtp", req.loudness.truePeakCeilingDb }, { "passes", limiterPasses },
+                                    { "max_gain_reduction_db", std::round (limiterResult.maxGainReductionDb * 100.0) / 100.0 },
+                                    { "limited_over_1db_percent", std::round (limiterResult.limitedOverOneDbPercent * 100.0) / 100.0 } };
+
         const bool onTarget = std::abs (statsAfter.integratedLufs - req.loudness.targetLufs) <= req.loudness.toleranceLu;
         loudness["on_target"] = onTarget;
 
@@ -721,6 +824,17 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
                         + fmt (req.loudness.toleranceLu) + " LU" + (limitedByPeak ? " (held back by the true-peak ceiling of " + fmt (req.loudness.truePeakCeilingDb) + " dBTP)" : std::string());
             res.postFindings.push_back (std::move (f));
         }
+    }
+
+    if (useLimiter && limiterResult.maxGainReductionDb > 6.0)
+    {
+        Finding f;
+        f.check = "heavy_limiting";
+        f.severity = "warn";
+        f.name = out.trackName;
+        f.message = "heavy limiting: gain reduction up to " + fmt (limiterResult.maxGainReductionDb, 1) + " dB ("
+                    + fmt (limiterResult.limitedOverOneDbPercent, 1) + " % of the time over 1 dB)";
+        res.postFindings.push_back (std::move (f));
     }
 
     res.failed = std::any_of (res.postFindings.begin(), res.postFindings.end(), [] (const Finding& f) { return f.severity == "fail"; });

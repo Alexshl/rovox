@@ -402,6 +402,8 @@ void McpServer::buildTools()
             { "target_lufs", number ("Loudness target in LUFS. With normalize (default true) a gain is applied, never past true_peak_ceiling_dbtp; the result reports before/after.") },
             { "normalize", boolean ("Apply gain to reach target_lufs (default true). false + check=true only verifies.") },
             { "tolerance_lu", number() }, { "true_peak_ceiling_dbtp", number() },
+            { "limiter", boolean ("Master true-peak brickwall limiter (lookahead, 4x oversampled) on the rendered mix. Default true when target_lufs is set, otherwise false. With normalize, gain and limiter iterate to reach target_lufs; the report gives the max gain reduction and a heavy-limiting warning above 6 dB.") },
+            { "ceiling_dbtp", number ("True-peak ceiling of the limiter in dBTP (default -1.0); same as true_peak_ceiling_dbtp.") },
             { "check", boolean ("true: preflight and post-render findings (offline media, unloaded plugin, silent instrument or output, clipping) FAIL the render and no file is written. false (default): they are reported as warnings.") },
             { "fail_on", strings() }, { "warn_on", strings() }, { "seed", str() }, { "stall_timeout_s", number() },
             { "client_request_id", str ("Idempotency: the same value returns the same job.") },

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
+#include "Limiter.h"
 #include "Loudness.h"
 #include "Render.h"
 #include "Sha256.h"
@@ -530,4 +531,107 @@ ROVOX_TEST (render, exactly_sixty_seconds_renders_with_the_workaround_and_is_sam
     CHECK (data[0].size() == 60 * 44100);
     CHECK (needsSixtySecondWorkaround (60.0));
     CHECK (! needsSixtySecondWorkaround (59.0));
+}
+
+//==============================================================================
+// Master limiter (true-peak brickwall) and the normalize + limiter flow
+namespace
+{
+/** Sustained sine at -24 dBFS plus short decaying bursts (transients) every 0.4 s at -2 dBFS. */
+std::vector<float> peakySignal (double seconds, double sr, double burstPhase)
+{
+    auto x = test::sine (220.0, -24.0, seconds, sr);
+    const auto period = (size_t) (0.4 * sr);
+
+    for (size_t start = (size_t) (0.1 * sr); start < x.size(); start += period)
+        for (size_t i = 0; i < (size_t) (0.006 * sr) && start + i < x.size(); ++i)
+            x[start + i] += (float) (0.79 * std::exp (-(double) i / (0.0015 * sr)) * std::sin (2.0 * 3.14159265358979 * 3100.0 * (double) i / sr + burstPhase));
+
+    return x;
+}
+} // namespace
+
+ROVOX_TEST (render, limiter_brings_peaky_mix_to_target_with_true_peak_under_ceiling)
+{
+    test::Env env;
+    const auto id = env.newProject ("render");
+    const auto dir = test::makeTempDir ("peaky");
+    test::writeWav (dir / "peaky.wav", { peakySignal (12.0, 44100.0, 0.0), peakySignal (12.0, 44100.0, 0.7) }, 44100.0, 24);
+    auto plan = env.ok (id, "import.plan", { { "paths", { (dir / "peaky.wav").string() } } });
+    env.ok (id, "import.apply", { { "plan_id", plan["plan_id"] } });
+
+    for (const char* container : { "wav", "flac", "mp3" })
+    {
+        auto req = plainRequest();
+        req.format.container = container;
+        req.loudness.mode = "normalize";
+        req.loudness.targetLufs = -14.0;
+        req.loudness.toleranceLu = 0.3;
+        auto result = renderProject (env.project (id), req);
+        REQUIRE (result.ok());
+        const auto& l = result.value()["loudness"];
+        CHECK_NEAR (l["after_lufs"].get<double>(), -14.0, 0.3);
+        CHECK (result.value()["stats"]["true_peak_dbtp"].get<double>() <= -1.0 + 0.05);
+        REQUIRE (l.contains ("limiter"));
+        CHECK (l["limiter"]["max_gain_reduction_db"].get<double>() > 1.0);
+        CHECK (l["limiter"]["passes"].get<int>() <= 4);
+    }
+
+    // limiter off: the old behaviour, gain only and held back by the ceiling
+    auto off = plainRequest();
+    off.loudness.mode = "normalize";
+    off.loudness.targetLufs = -14.0;
+    off.loudness.toleranceLu = 100.0;
+    off.loudness.limiter = false;
+    auto result = renderProject (env.project (id), off);
+    REQUIRE (result.ok());
+    const auto& l = result.value()["loudness"];
+    CHECK (! l.contains ("limiter"));
+    CHECK (l["limited_by_true_peak"] == true);
+    CHECK (l["after_lufs"].get<double>() < -14.5);
+    CHECK (result.value()["stats"]["true_peak_dbtp"].get<double>() <= -0.9);
+}
+
+ROVOX_TEST (render, limiter_unit_silence_stays_silence_and_stereo_is_linked)
+{
+    const double sr = 48000.0;
+    std::vector<std::vector<float>> silent (2, std::vector<float> (48000, 0.0f));
+    auto r = limitTruePeak (silent, sr, 12.0);
+    CHECK (r.maxGainReductionDb == 0.0);
+
+    for (auto& c : silent)
+        for (float v : c)
+            CHECK (v == 0.0f);
+
+    // left carries transients, right a steady quiet sine: both get the same gain
+    std::vector<std::vector<float>> in { peakySignal (2.0, sr, 0.0), test::sine (440.0, -30.0, 2.0, sr) };
+    auto out = in;
+    const auto lr = limitTruePeak (out, sr, 6.0, { -1.0, 1.5, 80.0 });
+    CHECK (lr.maxGainReductionDb > 1.0);
+    const auto stats = analyse (out, sr);
+    CHECK (stats.truePeakDbtp <= -1.0 + 0.05);
+    size_t checked = 0;
+
+    for (size_t i = 0; i < in[0].size(); ++i)
+    {
+        if (std::abs (in[0][i]) > 0.05f && std::abs (in[1][i]) > 0.01f)
+        {
+            const double gl = out[0][i] / in[0][i], gr = out[1][i] / in[1][i];
+            CHECK_NEAR (gl, gr, 1.0e-4);
+            ++checked;
+        }
+    }
+
+    CHECK (checked > 1000);
+    CHECK (out[1].size() == in[1].size());
+}
+
+ROVOX_TEST (render, limiter_unit_quiet_signal_below_ceiling_only_gets_the_gain)
+{
+    const double sr = 44100.0;
+    std::vector<std::vector<float>> x { test::sine (1000.0, -30.0, 1.0, sr) };
+    auto y = x;
+    const auto r = limitTruePeak (y, sr, 6.0);
+    CHECK (r.maxGainReductionDb == 0.0);
+    CHECK_NEAR (y[0][1000] / x[0][1000], std::pow (10.0, 6.0 / 20.0), 1.0e-4);
 }

@@ -34,7 +34,8 @@ struct LoudnessOptions
     std::string mode = "none";          // none | check | normalize
     double targetLufs = -14.0;
     double toleranceLu = 1.0;
-    double truePeakCeilingDb = -1.0;    // normalize never lets the true peak pass this; the target is then reported as not reached
+    double truePeakCeilingDb = -1.0;    // normalize never lets the true peak pass this; the target is then reported as not reached (= ceiling_dbtp of the limiter)
+    std::optional<bool> limiter;        // master true-peak limiter; absent = on for normalize, off otherwise. normalize then iterates gain + limiter to the target
 };
 
 /** Optional hooks used by jobs: cancellation, progress and a tap on the final (post-gain) audio of each output, for analysis. */

@@ -183,6 +183,12 @@ int runRender (const Options& o)
         req.loudness.mode = o.normalize ? "normalize" : (o.check ? "check" : "none");
     }
 
+    if (o.limiter || o.noLimiter)
+    {
+        req.loudness.limiter = o.limiter && ! o.noLimiter;
+        req.loudness.truePeakCeilingDb = o.truePeakCeiling;
+    }
+
     if (! o.check)
     {
         // without --check the findings are reported but never stop the render
@@ -275,6 +281,10 @@ int runRender (const Options& o)
         std::cout << "  loudness " << l["mode"].get<std::string>() << ": target " << fmtDb (l["target_lufs"]) << " LUFS, before " << fmtDb (l["before_lufs"])
                   << ", after " << fmtDb (l["after_lufs"]) << " (gain " << fmtDb (l["gain_db"]) << " dB)"
                   << (l.value ("limited_by_true_peak", false) ? ", held back by the true-peak ceiling" : "") << "\n";
+
+        if (l.contains ("limiter"))
+            std::cout << "  limiter: ceiling " << fmtDb (l["limiter"]["ceiling_dbtp"]) << " dBTP, max gain reduction " << fmtDb (l["limiter"]["max_gain_reduction_db"])
+                      << " dB, >1 dB for " << fmtDb (l["limiter"]["limited_over_1db_percent"]) << " % of the time, " << l["limiter"]["passes"] << " pass(es)\n";
     }
 
     for (auto& t : report["tracks"])

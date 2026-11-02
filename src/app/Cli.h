@@ -28,6 +28,7 @@ struct Options
     std::string target, out, renderName, range, format, scope = "master", seed;
     double startS = -1, endS = -1, sampleRate = 0, tailS = 2.0, targetLufs = 0, toleranceLu = 1.0, truePeakCeiling = -1.0;
     int bitDepth = 24, bitrate = 320, channels = 2;
+    bool limiter = false, noLimiter = false;
     bool normalize = false, check = false, json = false, preflightOnly = false;
     std::vector<std::string> trackIds;
 

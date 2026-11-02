@@ -151,8 +151,12 @@ Result<void> parseRenderArgs (Project& p, const json& args, RenderRequest& req)
         req.loudness.targetLufs = args["target_lufs"].get<double>();
         req.loudness.toleranceLu = args.value ("tolerance_lu", req.loudness.toleranceLu);
         req.loudness.truePeakCeilingDb = args.value ("true_peak_ceiling_dbtp", req.loudness.truePeakCeilingDb);
+        req.loudness.truePeakCeilingDb = args.value ("ceiling_dbtp", req.loudness.truePeakCeilingDb);
         req.loudness.mode = args.value ("normalize", true) ? "normalize" : (check ? "check" : "none");
     }
+
+    if (args.contains ("limiter") && args["limiter"].is_boolean())
+        req.loudness.limiter = args["limiter"].get<bool>();
 
     if (args.contains ("fail_on"))
         req.failOn = toSet (args["fail_on"]);

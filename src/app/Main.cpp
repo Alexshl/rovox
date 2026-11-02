@@ -66,6 +66,9 @@ int main (int argc, char** argv)
     render->add_option ("--tolerance-lu", o.toleranceLu, "Accepted deviation from the target")->capture_default_str();
     render->add_flag ("--normalize", o.normalize, "Apply gain to reach --target-lufs (never past the true-peak ceiling)");
     render->add_option ("--true-peak-ceiling", o.truePeakCeiling, "True-peak ceiling in dBTP for --normalize")->capture_default_str();
+    render->add_flag ("--limiter", o.limiter, "Master true-peak limiter (default: on with --target-lufs, else off)");
+    render->add_flag ("--no-limiter", o.noLimiter, "Turn the limiter off");
+    render->add_option ("--ceiling-dbtp", o.truePeakCeiling, "Same as --true-peak-ceiling");
     render->add_flag ("--check", o.check, "Fail (exit 2) on offline media, unloaded plugins, silent instruments or output, clipping");
     render->add_flag ("--json", o.json, "Print the full result as JSON");
     render->add_option ("--scope", o.scope, "master | tracks | stems")->capture_default_str();

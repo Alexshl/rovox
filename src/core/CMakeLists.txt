@@ -13,6 +13,7 @@ add_library(rovox_core STATIC
     Subprocess.cpp
     UploadStore.cpp
     JsonSchema.cpp
+    Limiter.cpp
     Loudness.cpp
     RppParser.cpp
     Spectrum.cpp
