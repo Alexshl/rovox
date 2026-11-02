@@ -190,12 +190,19 @@ Result<std::string> ProjectManager::open (const std::string& target, const OpenO
 
     auto loaded = opts.preferAutosave ? Result<LoadedProject> (makeError (errc::notFound, "no autosave")) : readProject (dir);
 
+    // an autosave newer than the main files means the server stopped with unsaved work (shutdown autosaves, it does not save):
+    // recover it instead of silently opening the older state
     if (opts.preferAutosave)
     {
         const auto autosaves = listAutosaves (dir);
 
         if (! autosaves.empty())
             loaded = readAutosave (dir, autosaves.back());
+    }
+    else if (loaded.ok() && loaded.value().newerAutosave)
+    {
+        if (auto a = readAutosave (dir, *loaded.value().newerAutosave); a.ok())
+            loaded = std::move (a);
     }
 
     if (! loaded.ok())

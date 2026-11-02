@@ -3,6 +3,8 @@
 
 #include "JsfxPlugin.h"
 
+#include "ReaperFx.h"
+
 #include <ysfx.h>
 
 #include <algorithm>
@@ -173,7 +175,7 @@ std::optional<std::string> descOf (const fs::path& file)
             line = line.substr (5);
             const auto a = line.find_first_not_of (" \t");
             const auto b = line.find_last_not_of (" \t\r");
-            return a == std::string::npos ? std::string() : line.substr (a, b - a + 1);
+            return a == std::string::npos ? std::string() : repairUtf8 (line.substr (a, b - a + 1));
         }
     }
 
@@ -484,7 +486,7 @@ private:
             SliderDef d;
             d.index = i;
             d.id = "s" + std::to_string (i + 1);
-            d.name = ysfx_slider_get_name (fx_.get(), i) != nullptr ? ysfx_slider_get_name (fx_.get(), i) : d.id;
+            d.name = ysfx_slider_get_name (fx_.get(), i) != nullptr ? repairUtf8 (ysfx_slider_get_name (fx_.get(), i)) : d.id;  // JSFX text is often Latin-1
             d.min = (float) range.min;
             d.max = (float) range.max;
             d.def = (float) range.def;
@@ -498,7 +500,7 @@ private:
                 const auto size = ysfx_slider_get_enum_names (fx_.get(), i, nullptr, 0);
 
                 for (uint32_t k = 0; k < size; ++k)
-                    d.labels.emplace_back (ysfx_slider_get_enum_name (fx_.get(), i, k) != nullptr ? ysfx_slider_get_enum_name (fx_.get(), i, k) : "");
+                    d.labels.emplace_back (ysfx_slider_get_enum_name (fx_.get(), i, k) != nullptr ? repairUtf8 (ysfx_slider_get_enum_name (fx_.get(), i, k)) : "");
             }
             else
             {

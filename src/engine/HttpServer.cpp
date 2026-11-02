@@ -37,7 +37,7 @@ int statusFor (const std::string& code)
 void reply (httplib::Response& res, int status, const json& body)
 {
     res.status = status;
-    res.set_content (body.dump(), "application/json");
+    res.set_content (body.dump (-1, ' ', false, json::error_handler_t::replace), "application/json");
 }
 
 void replyError (httplib::Response& res, const Error& e)

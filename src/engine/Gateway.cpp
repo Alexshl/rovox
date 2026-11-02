@@ -221,7 +221,7 @@ void Gateway::handleUpgrade (int fd, WsRequest req)
         }
         catch (const std::exception& e)
         {
-            client->conn->sendText (json { { "t", "error" }, { "message", e.what() } }.dump());
+            client->conn->sendText (json { { "t", "error" }, { "message", e.what() } }.dump (-1, ' ', false, json::error_handler_t::replace));
         }
     });
 
@@ -240,7 +240,7 @@ void Gateway::onMessage (const std::shared_ptr<Client>& c, const std::string& te
 
     if (! msg.is_object() || ! msg.contains ("t") || ! msg["t"].is_string())
     {
-        c->conn->sendText (json { { "t", "error" }, { "message", "frames must be JSON objects with a \"t\" field" } }.dump());
+        c->conn->sendText (json { { "t", "error" }, { "message", "frames must be JSON objects with a \"t\" field" } }.dump (-1, ' ', false, json::error_handler_t::replace));
         return;
     }
 
@@ -254,7 +254,7 @@ void Gateway::onMessage (const std::shared_ptr<Client>& c, const std::string& te
             audioInfo.update ({ { "sample_rate", BrowserStream::sampleRate }, { "frame_samples", BrowserStream::frameSize } });
 
         c->conn->sendText (json { { "t", "welcome" }, { "session", c->session }, { "server_version", rovoxVersion() }, { "audio", audioInfo },
-                                  { "source_url", options_.sourceUrl } }.dump());
+                                  { "source_url", options_.sourceUrl } }.dump (-1, ' ', false, json::error_handler_t::replace));
     }
     else if (t == "sub")
     {
@@ -276,7 +276,7 @@ void Gateway::onMessage (const std::shared_ptr<Client>& c, const std::string& te
     }
     else if (t == "ping")
     {
-        c->conn->sendText (json { { "t", "pong" }, { "n", msg.contains ("n") && msg["n"].is_number_integer() ? msg["n"].get<int>() : 0 } }.dump());
+        c->conn->sendText (json { { "t", "pong" }, { "n", msg.contains ("n") && msg["n"].is_number_integer() ? msg["n"].get<int>() : 0 } }.dump (-1, ' ', false, json::error_handler_t::replace));
     }
     else if (t == "stats")
     {
@@ -285,11 +285,11 @@ void Gateway::onMessage (const std::shared_ptr<Client>& c, const std::string& te
         if (host_.stream() != nullptr)
             s["stream"] = host_.stream()->stats();
 
-        c->conn->sendText (s.dump());
+        c->conn->sendText (s.dump (-1, ' ', false, json::error_handler_t::replace));
     }
     else
     {
-        c->conn->sendText (json { { "t", "error" }, { "message", "unknown frame type " + t } }.dump());
+        c->conn->sendText (json { { "t", "error" }, { "message", "unknown frame type " + t } }.dump (-1, ' ', false, json::error_handler_t::replace));
     }
 }
 
@@ -299,7 +299,7 @@ void Gateway::handleSub (const std::shared_ptr<Client>& c, const json& msg)
 
     if (projectId.empty())
     {
-        c->conn->sendText (json { { "t", "error" }, { "message", "project_id is required" } }.dump());
+        c->conn->sendText (json { { "t", "error" }, { "message", "project_id is required" } }.dump (-1, ' ', false, json::error_handler_t::replace));
         return;
     }
 
@@ -325,9 +325,9 @@ void Gateway::handleSub (const std::shared_ptr<Client>& c, const json& msg)
     auto snapshot = executor_.run ([this, projectId, pidx = sub.pidx] { return buildSnapshot (projectId, pidx); });
 
     if (snapshot.wait_for (std::chrono::seconds (30)) != std::future_status::ready)
-        return c->conn->sendText (json { { "t", "error" }, { "message", "snapshot timed out" }, { "project_id", projectId } }.dump());
+        return c->conn->sendText (json { { "t", "error" }, { "message", "snapshot timed out" }, { "project_id", projectId } }.dump (-1, ' ', false, json::error_handler_t::replace));
 
-    c->conn->sendText (snapshot.get().dump());
+    c->conn->sendText (snapshot.get().dump (-1, ' ', false, json::error_handler_t::replace));
 }
 
 json Gateway::buildSnapshot (const std::string& projectId, int pidx)
@@ -357,7 +357,7 @@ void Gateway::handleCmd (const std::shared_ptr<Client>& c, const json& msg)
     {
         body["t"] = "result";
         body["id"] = id;
-        c->conn->sendText (body.dump());
+        c->conn->sendText (body.dump (-1, ' ', false, json::error_handler_t::replace));
     };
 
     // several operations as one atomic undo step: {"ops":[{"name":..,"params":{..}}, ...]}
@@ -449,7 +449,7 @@ void Gateway::onHubEvent (const Event& e)
             continue;
 
         if (text.empty())
-            text = out.dump();
+            text = out.dump (-1, ' ', false, json::error_handler_t::replace);
 
         c->conn->sendText (text);
     }
