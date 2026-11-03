@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
-// REAPER parity of the item fades, the ReaEQ band types and ReaDelay. The expectations are computed in this file from the formulas of the
+// REAPER parity of the item fades, the ReaEQ band types, ReaDelay, ReaGate, ReaComp and ReaLimit. The expectations are computed in this file from the formulas of the
 // behaviour specification (fade curve warp and shapes, RBJ-style biquads with the ReaEQ bandwidth and shelf-slope rules, the ReaDelay tap
 // loop); a handful of numbers from the measurements are kept as literals.
 #include "Fades.h"
@@ -720,4 +720,779 @@ ROVOX_TEST (parity, generic_wet_is_a_linear_crossfade_and_delta_is_processed_min
     CHECK (diff > 0.05);
     CHECK (worstWet < 2.0e-6);
     CHECK (worstDelta < 2.0e-6);
+}
+
+//==============================================================================
+// ReaGate, ReaComp, ReaLimit
+//==============================================================================
+namespace
+{
+struct Seg { double db; double seconds; };
+
+std::vector<float> dcSegments (const std::vector<Seg>& segs, double fs, std::vector<size_t>* starts = nullptr)
+{
+    std::vector<float> x;
+
+    for (auto& s : segs)
+    {
+        if (starts != nullptr)
+            starts->push_back (x.size());
+
+        x.insert (x.end(), (size_t) std::lround (s.seconds * fs), (float) std::pow (10.0, s.db / 20.0));
+    }
+
+    return x;
+}
+
+/** Runs a mono signal through a processor in 512-sample blocks; the output is shifted back by the latency (the host compensates it). */
+template <class Fx>
+std::vector<float> runMono (Fx& fxp, std::vector<float> in, int latency)
+{
+    const size_t n = in.size();
+    in.insert (in.end(), (size_t) latency, 0.0f);
+
+    for (size_t at = 0; at < in.size(); at += 512)
+    {
+        float* io[1] = { in.data() + at };
+        fxp.process (io, 1, (int) std::min<size_t> (512, in.size() - at));
+    }
+
+    return std::vector<float> (in.begin() + latency, in.begin() + latency + (long) n);
+}
+
+double dbOf (double v)      { return 20.0 * std::log10 (std::max (std::abs (v), 1.0e-12)); }
+
+//------------------------------------------------------------------------------ ReaGate
+const std::vector<Seg> gateSegments { { -40, 0.3 }, { -10, 0.5 }, { -40, 0.5 }, { -23, 0.3 }, { -17, 0.3 }, { -23, 0.3 }, { -40, 0.5 } };
+
+fx::ReaGateParams gateParams (double attackMs, double releaseMs)
+{
+    fx::ReaGateParams p;
+    p.thresholdDb = -20.05;
+    p.attackMs = attackMs;
+    p.releaseMs = releaseMs;
+    return p;
+}
+
+struct GateRun
+{
+    std::vector<float> in, out;
+    std::vector<size_t> starts;
+    double gain (size_t segment, long offset) const
+    {
+        const size_t i = (size_t) ((long) starts[segment] + offset);
+        return (double) out[i] / (double) in[i];
+    }
+};
+
+GateRun runGate (const fx::ReaGateParams& p, const std::vector<Seg>& segs = gateSegments)
+{
+    GateRun r;
+    r.in = dcSegments (segs, 48000.0, &r.starts);
+    fx::ReaGate g;
+    g.prepare (48000.0);
+    g.setParams (p);
+    r.out = runMono (g, r.in, g.latencySamples());
+    return r;
+}
+} // namespace
+
+ROVOX_TEST (parity, reagate_closed_gain_is_zero_attack_and_release_are_linear_ramps_of_the_offset_length)
+{
+    // attack 1 ms: Na = 48 - 24 samples, g[n] = (n + 1) / Na; hold = Na - 1 samples; release 50 ms: Nr = 2400 - 24, g falls by 1 / Nr per sample
+    const auto r = runGate (gateParams (1.0, 50.0));
+    const double Na = 24.0, Nr = 2376.0;
+    CHECK (r.gain (0, 100) == 0.0);
+
+    for (long n : { 0L, 1L, 2L, 10L, 23L, 100L })
+        CHECK_NEAR (r.gain (1, n), std::min (1.0, (double) (n + 1) / Na), 1e-6);
+
+    CHECK_NEAR (r.gain (1, 0), 0.041667, 1e-6);                     // measured
+    CHECK_NEAR (r.gain (1, 10), 0.458333, 1e-6);
+
+    for (long n : { 0L, 10L, 22L })
+        CHECK_NEAR (r.gain (2, n), 1.0, 1e-6);
+
+    for (long n : { 23L, 24L, 47L, 455L, 1000L, 2376L, 2397L })
+        CHECK_NEAR (r.gain (2, n), std::max (0.0, 1.0 - (double) (n - 22) / Nr), 2e-6);
+
+    CHECK_NEAR (r.gain (2, 24), 0.999158, 1e-6);                    // measured
+    CHECK_NEAR (r.gain (2, 455), 0.817761, 1e-6);
+    CHECK_NEAR (r.gain (2, 2376), 0.009259, 1e-6);
+    CHECK (r.gain (2, 4776) == 0.0);
+    CHECK (r.gain (3, 0) == 0.0);                                   // -23 dB is below the threshold of the closed gate
+}
+
+ROVOX_TEST (parity, reagate_hold_is_the_longer_of_hold_and_attack_less_the_offset)
+{
+    const auto a10 = runGate (gateParams (10.0, 100.0));
+    CHECK_NEAR (a10.gain (1, 0), 0.002193, 1e-6);                   // 1 / 456
+    CHECK_NEAR (a10.gain (1, 100), 0.221491, 1e-6);
+    CHECK_NEAR (a10.gain (1, 455), 1.0, 1e-6);
+    CHECK_NEAR (a10.gain (2, 454), 1.0, 1e-9);                      // hold 480 - 24 - 1 samples
+    CHECK_NEAR (a10.gain (2, 455), 0.999791, 1e-6);
+    CHECK_NEAR (a10.gain (2, 4776), 0.095059, 1e-6);                // release ramp 1 / 4776
+
+    auto p = gateParams (0.0, 0.0);
+    p.holdMs = 50.0;
+    const auto h = runGate (p);
+    CHECK_NEAR (h.gain (2, 2375), 1.0, 1e-9);
+    CHECK (h.gain (2, 2376) == 0.0);                                // closes at sample 2376 (measured)
+    p.releaseMs = 100.0;
+    const auto hr = runGate (p);
+    CHECK_NEAR (hr.gain (2, 2376), 0.999791, 1e-6);
+    CHECK_NEAR (hr.gain (2, 4776), 0.497278, 1e-6);
+    CHECK_NEAR (hr.gain (2, 5000), 0.450377, 1e-6);
+
+    const auto instant = runGate (gateParams (0.0, 0.0));
+    CHECK_NEAR (instant.gain (1, 0), 1.0, 1e-9);
+    CHECK (instant.gain (2, 0) == 0.0);
+}
+
+ROVOX_TEST (parity, reagate_closes_at_threshold_plus_hysteresis)
+{
+    auto p = gateParams (0.0, 0.0);
+    const auto plain = runGate (p);
+    CHECK_NEAR (plain.gain (4, 0), 1.0, 1e-9);                      // -17 opens
+    CHECK (plain.gain (5, 0) == 0.0);                               // -23 closes
+
+    p.hysteresisDb = -6.0;
+    const auto neg = runGate (p);
+    CHECK (neg.gain (3, 0) == 0.0);                                 // still closed: opening needs the threshold itself
+    CHECK_NEAR (neg.gain (5, 0), 1.0, 1e-9);                        // stays open down to threshold - 6 dB
+    CHECK_NEAR (neg.gain (5, 5000), 1.0, 1e-9);
+    CHECK (neg.gain (6, 0) == 0.0);
+
+    p.hysteresisDb = 3.0;
+    const auto pos = runGate (p);
+    CHECK_NEAR (pos.gain (4, 0), 1.0, 1e-9);
+    CHECK (pos.gain (5, 0) == 0.0);
+}
+
+ROVOX_TEST (parity, reagate_pre_open_moves_the_opening_ahead_and_leaves_the_closing_on_the_audio)
+{
+    auto p = gateParams (0.0, 0.0);
+    p.preOpenMs = 10.0;
+    fx::ReaGate g;
+    g.prepare (48000.0);
+    g.setParams (p);
+    CHECK (g.latencySamples() == 456);                              // 10 ms - 24 samples
+    const auto r = runGate (p);
+    CHECK_NEAR (r.gain (1, -456), 1.0, 1e-9);
+    CHECK (r.gain (1, -457) == 0.0);
+    CHECK_NEAR (r.gain (1, 0), 1.0, 1e-9);
+    CHECK_NEAR (r.gain (2, -1), 1.0, 1e-9);
+    CHECK (r.gain (2, 0) == 0.0);                                   // closing is not advanced
+    CHECK (r.gain (3, 0) == 0.0);
+    CHECK_NEAR (r.gain (4, -456), 1.0, 1e-9);
+}
+
+ROVOX_TEST (parity, reagate_rms_detector_uses_a_boxcar_window_of_the_size_less_the_offset)
+{
+    auto p = gateParams (0.0, 0.0);
+    p.rmsMs = 10.0;
+    const auto r = runGate (p);
+    CHECK (r.gain (1, 24) == 0.0);                                  // measured
+    CHECK_NEAR (r.gain (1, 47), 1.0, 1e-9);
+
+    // window 456 samples: opens when the mean square of the window reaches the threshold (-40 dB DC before the step, -10 dB after)
+    const double T2 = std::pow (10.0, -20.05 / 10.0), hi = 0.1, lo = 1.0e-4;
+    long open = -1;
+
+    for (long n = 0; n < 456 && open < 0; ++n)
+        if (((double) (n + 1) * hi + (456.0 - (double) (n + 1)) * lo) / 456.0 >= T2)
+            open = n;
+
+    for (long n = 0; n < 100; ++n)
+        CHECK_NEAR (r.gain (1, n), n >= open ? 1.0 : 0.0, 1e-9);
+
+    CHECK (open >= 43 && open <= 45);                               // measured 43 after the step
+    CHECK_NEAR (r.gain (2, 24), 1.0, 1e-9);
+    CHECK (r.gain (2, 455) == 0.0);
+}
+
+ROVOX_TEST (parity, reagate_invert_wet_dry_and_detector_filters)
+{
+    auto p = gateParams (0.0, 0.0);
+    p.invertWet = true;
+    const auto inv = runGate (p);
+    CHECK_NEAR (inv.gain (0, 100), 1.0, 1e-9);
+    CHECK (inv.gain (1, 100) == 0.0);
+    CHECK_NEAR (inv.gain (3, 0), 1.0, 1e-9);
+    CHECK (inv.gain (4, 0) == 0.0);
+
+    p = gateParams (0.0, 0.0);
+    p.dry = 0.49831;                                                // -6.05 dB
+    const auto dry = runGate (p);
+    CHECK_NEAR (dry.gain (0, 100), 0.49831, 1e-6);
+    CHECK_NEAR (dry.gain (1, 100), 1.49831, 1e-6);
+
+    // the detector high-pass (12 dB/oct, 2 kHz) keeps a DC step below the threshold once it has settled; the audio is not filtered
+    p = gateParams (0.0, 0.0);
+    p.highPassHz = 2000.0;
+    const auto hp = runGate (p);
+    CHECK (hp.gain (1, 20000) == 0.0);
+    CHECK_NEAR (hp.out[hp.starts[1] + 100], hp.in[hp.starts[1] + 100] * hp.gain (1, 100), 1e-9);
+}
+
+//------------------------------------------------------------------------------ ReaComp
+namespace
+{
+fx::ReaCompParams compParams (double thresholdDb, double attackMs, double releaseMs)
+{
+    fx::ReaCompParams p;
+    p.thresholdDb = thresholdDb;
+    p.ratio = 100.0;            // infinite
+    p.attackMs = attackMs;
+    p.releaseMs = releaseMs;
+    p.rmsMs = 0.0;
+    p.dry = 0.0;
+    p.wet = 1.0;
+    return p;
+}
+
+/** The step signal of the dynamics vectors: -40 dBFS 0.5 s, -6 dBFS 1 s, -40 dBFS 1 s. Gain in dB at an offset from the step up (0) or the drop. */
+struct CompRun
+{
+    std::vector<float> in, out;
+    double up (long n) const    { return dbOf ((double) out[(size_t) (24000 + n)] / (double) in[(size_t) (24000 + n)]); }
+    double down (long n) const  { return dbOf ((double) out[(size_t) (72000 + n)] / (double) in[(size_t) (72000 + n)]); }
+};
+
+CompRun runComp (const fx::ReaCompParams& p)
+{
+    CompRun r;
+    r.in = dcSegments ({ { -40, 0.5 }, { -6, 1.0 }, { -40, 1.0 } }, 48000.0);
+    fx::ReaComp c;
+    c.prepare (48000.0);
+    c.setParams (p);
+    r.out = runMono (c, r.in, c.latencySamples());
+    return r;
+}
+} // namespace
+
+ROVOX_TEST (parity, reacomp_hard_knee_static_curve_has_slope_one_over_ratio)
+{
+    // measured gains (dB) of a DC staircase; the threshold is -20.05 dB
+    struct Pt { double ratio, level, gain; };
+    const Pt pts[] = { { 2, -18, -1.024 }, { 2, -10, -5.022 }, { 2, 0, -10.02 }, { 4, -20, -0.037 }, { 4, -10, -7.534 }, { 4, 0, -15.031 },
+                       { 100, -10, -10.049 }, { 100, -6, -14.049 }, { 100, 0, -20.048 }, { 4, -30, 0.0 }, { 2, -22, 0.0 } };
+
+    for (auto& pt : pts)
+    {
+        auto p = compParams (-20.05, 1.0, 20.0);
+        p.ratio = pt.ratio;
+        CHECK_NEAR (fx::ReaComp::staticGainDb (p, pt.level), pt.gain, 0.012);
+    }
+
+    auto p = compParams (-20.05, 1.0, 20.0);
+    p.ratio = 4.0;
+    CHECK_NEAR (fx::ReaComp::staticGainDb (p, -10.05), -7.5, 1e-9);      // exactly (1 - 1/R) * over
+}
+
+ROVOX_TEST (parity, reacomp_soft_knee_reproduces_the_measured_tables_and_is_smooth_and_monotone)
+{
+    struct Pt { double w; bool legacy; double over, gr; };
+    const Pt pts[] = { { 3, false, -2, 0.4078 }, { 3, false, 0, 1.3502 }, { 3, false, 2, 2.4076 },
+                       { 6, false, -5, 0.3301 }, { 6, false, -3, 1.1039 }, { 6, false, 0, 2.4749 }, { 6, false, 3, 4.1036 }, { 6, false, 5, 5.3296 },
+                       { 12, false, -11, 0.2001 }, { 12, false, -6, 1.572 }, { 12, false, 0, 4.0637 }, { 12, false, 6, 7.5714 }, { 12, false, 11, 11.199 },
+                       { 24, false, -23, 0.0597 }, { 24, false, -12, 1.4119 }, { 24, false, 0, 5.4856 }, { 24, false, 12, 13.4107 },
+                       { 12, true, -11, 0.0942 }, { 12, true, -6, 0.8015 }, { 12, true, 0, 2.4099 }, { 12, true, 6, 5.6192 }, { 12, true, 11, 10.6265 } };
+
+    for (auto& pt : pts)
+    {
+        fx::ReaCompParams p;
+        p.thresholdDb = 0.0;
+        p.ratio = 100.0;
+        p.kneeDb = pt.w;
+        p.legacyKnee = pt.legacy;
+        CHECK_NEAR (fx::ReaComp::staticGainDb (p, pt.over), -pt.gr, 0.05);      // within 0.1 dB of the measurements, in practice 0.01
+    }
+
+    // the knee spans threshold -+ W, reduction ratio dependence, and the centre value of the default knee for W between the tables
+    // (spec: the gain at the threshold is the mean of the linear gains at the ends of the knee)
+    for (double w : { 1.5, 4.5, 9.0, 18.0 })
+    {
+        fx::ReaCompParams p;
+        p.ratio = 100.0;
+        p.kneeDb = w;
+        const double centre = -fx::ReaComp::staticGainDb (p, 0.0), want = -20.0 * std::log10 (0.5 * (1.0 + std::pow (10.0, -w / 20.0)));
+        CHECK_NEAR (centre, want, 0.06);
+        CHECK (fx::ReaComp::staticGainDb (p, -w - 0.01) == 0.0);
+        CHECK_NEAR (fx::ReaComp::staticGainDb (p, w), -w, 1e-9);
+        CHECK_NEAR (fx::ReaComp::staticGainDb (p, w + 5.0), -(w + 5.0), 1e-9);
+
+        double last = 0.0, lastSlope = 0.0;
+
+        for (int k = -(int) (w * 40) - 4; k <= (int) (w * 40) + 4; ++k)
+        {
+            const double x = k / 20.0, gr = -fx::ReaComp::staticGainDb (p, x);
+            CHECK (gr >= last - 1e-12);                             // never falls
+            const double slope = (gr - last) * 20.0;
+
+            if (x > -w + 0.5 && x < w - 0.5)
+                CHECK (std::abs (slope - lastSlope) < 0.25);        // no kinks
+            last = gr;
+            lastSlope = slope;
+        }
+    }
+
+    // gain reduction in proportion to 1 - 1/R inside the knee (R = 4, W = 12)
+    fx::ReaCompParams q;
+    q.thresholdDb = -20.05;
+    q.ratio = 4.0;
+    q.kneeDb = 12.0;
+    CHECK_NEAR (fx::ReaComp::staticGainDb (q, -30.0), -0.331, 0.02);
+    CHECK_NEAR (fx::ReaComp::staticGainDb (q, -20.0), -3.066, 0.02);
+    CHECK_NEAR (fx::ReaComp::staticGainDb (q, -14.0), -5.702, 0.02);
+}
+
+ROVOX_TEST (parity, reacomp_envelope_attacks_from_the_threshold_and_releases_toward_the_input)
+{
+    // threshold -30.05, ratio inf, attack 1 ms, release 50 ms; the measured gains (dB) after the step up and after the drop
+    const auto r = runComp (compParams (-30.05, 1.0, 50.0));
+    const struct { long n; double db; } up[] = { { 0, -2.3526 }, { 1, -4.1671 }, { 2, -5.6385 }, { 5, -8.8556 }, { 10, -12.2276 }, { 24, -17.0381 }, { 48, -20.5145 },
+                                                { 96, -22.9204 }, { 240, -23.9964 }, { 480, -24.0473 }, { 4800, -24.0476 } };
+    const struct { long n; double db; } down[] = { { 0, -24.044 }, { 24, -23.958 }, { 240, -23.1851 }, { 960, -20.6208 }, { 2400, -15.5688 }, { 4800, -7.5641 }, { 9600, 0.0 } };
+
+    for (auto& u : up)
+        CHECK_NEAR (r.up (u.n), u.db, 0.1);
+
+    for (auto& d : down)
+        CHECK_NEAR (r.down (d.n), d.db, 0.2);
+
+    // the spec formulas themselves: e starts at the threshold level on attack, v + a (e - v)
+    const double a = std::exp (-1.0 / 48.0), T = std::pow (10.0, -30.05 / 20.0), v = std::pow (10.0, -6.0 / 20.0);
+    const double e0 = v + a * (T - v);
+    CHECK_NEAR (r.up (0), -(20.0 * std::log10 (e0) + 30.05), 1e-3);
+}
+
+ROVOX_TEST (parity, reacomp_rms_detector_pre_comp_make_up_and_mix)
+{
+    // boxcar RMS of 50 ms (2400 samples): the first gain reduction after the step is at sample 8 (measured), 10 ms: at sample 1
+    {
+        auto p = compParams (-30.05, 0.0, 0.0);
+        p.rmsMs = 50.0;
+        const auto r = runComp (p);
+        CHECK_NEAR (r.up (7), 0.0, 1e-3);
+        CHECK (r.up (8) < -0.01);
+        CHECK_NEAR (r.up (10), -1.0269, 0.05);
+        CHECK_NEAR (r.up (96), -10.1608, 0.1);
+        p.rmsMs = 10.0;
+        const auto s = runComp (p);
+        CHECK_NEAR (s.up (0), 0.0, 1e-3);
+        CHECK (s.up (1) < -0.01);
+    }
+
+    // pre-comp 10 ms: latency-compensated lookahead, the reduction is complete before the loud part (measured 477 samples early)
+    {
+        auto p = compParams (-30.05, 0.0, 0.0);
+        p.preCompMs = 10.0;
+        fx::ReaComp c;
+        c.prepare (48000.0);
+        c.setParams (p);
+        CHECK (c.latencySamples() == 480);
+        const auto r = runComp (p);
+        CHECK_NEAR (r.up (-470), -24.0476, 0.05);
+        CHECK_NEAR (r.up (-483), 0.0, 1e-3);
+        CHECK_NEAR (r.down (-100), -24.0476, 0.05);                 // the drop is not anticipated: the audio is still loud
+        p.attackMs = 10.0;
+        p.releaseMs = 50.0;
+        const auto s = runComp (p);
+        CHECK_NEAR (s.up (0), -20.3793, 0.1);                       // measured
+        CHECK_NEAR (s.up (480), -22.8769, 0.1);
+    }
+
+    // auto make-up gain -T (1 - 1/R) / 2
+    {
+        fx::ReaCompParams p;
+        p.autoMakeup = true;
+        p.thresholdDb = -20.05;
+        p.ratio = 4.0;
+        CHECK_NEAR (fx::ReaComp::makeupDb (p), 7.516, 0.01);
+        p.thresholdDb = -10.05;
+        p.ratio = 2.0;
+        CHECK_NEAR (fx::ReaComp::makeupDb (p), 2.511, 0.01);
+        p.thresholdDb = -30.05;
+        p.ratio = 100.0;
+        CHECK_NEAR (fx::ReaComp::makeupDb (p), 15.02, 0.01);
+        auto q = compParams (-30.05, 1.0, 50.0);
+        q.autoMakeup = true;
+        const auto r = runComp (q);
+        CHECK_NEAR (r.up (4800), -9.0241, 0.01);
+        CHECK_NEAR (r.down (9600), 15.0235, 0.01);
+    }
+
+    // dry and wet gains sum linearly (dry -6.05 dB: 0.49831)
+    {
+        auto p = compParams (-30.05, 1.0, 50.0);
+        p.dry = 0.49831;
+        const auto r = runComp (p);
+        CHECK_NEAR (r.up (4800), -5.0198, 0.01);
+        CHECK_NEAR (r.down (9600), 3.512, 0.01);
+        p.dry = 0.0;
+        p.wet = 0.49831;
+        const auto w = runComp (p);
+        CHECK_NEAR (w.up (4800), -24.0476 - 6.0, 0.1);
+    }
+}
+
+ROVOX_TEST (parity, reacomp_detector_filters_are_12_db_per_octave_and_only_feed_the_detector)
+{
+    // LP 1 kHz: 0.0 dB at 1 kHz, +0.91 at 500 Hz, -11.2 at 2 kHz, -24.2 at 4 kHz
+    const struct { double hz, db, tol; } lp[] = { { 1000, 0.0, 0.1 }, { 500, 0.91, 0.1 }, { 2000, -11.2, 0.15 }, { 4000, -24.2, 0.6 } };
+
+    for (auto& pt : lp)
+    {
+        fx::DetectorFilter f;
+        f.set (48000.0, 1000.0, 0.0);
+        double peak = 0.0;
+
+        for (int i = 0; i < 48000; ++i)
+        {
+            const double y = f.run (std::sin (2.0 * pi * pt.hz * i / 48000.0));
+
+            if (i > 24000)
+                peak = std::max (peak, std::abs (y));
+        }
+
+        CHECK_NEAR (dbOf (peak), pt.db, pt.tol);
+    }
+
+    // a detector high-pass of 5 kHz keeps a 100 Hz tone from compressing, the tone itself passes unchanged
+    fx::ReaCompParams p;
+    p.thresholdDb = -30.0;
+    p.ratio = 100.0;
+    p.attackMs = 0.0;
+    p.releaseMs = 0.0;
+    p.rmsMs = 0.0;
+    p.highPassHz = 5000.0;
+    fx::ReaComp c;
+    c.prepare (48000.0);
+    c.setParams (p);
+    std::vector<float> tone (24000);
+
+    for (size_t i = 0; i < tone.size(); ++i)
+        tone[i] = (float) (0.5 * std::sin (2.0 * pi * 100.0 * (double) i / 48000.0));
+
+    const auto out = runMono (c, tone, 0);
+    double worst = 0.0;
+
+    for (size_t i = 12000; i < tone.size(); ++i)
+        worst = std::max (worst, std::abs ((double) out[i] - tone[i]));
+
+    CHECK (worst < 2.0e-3);
+}
+
+//------------------------------------------------------------------------------ ReaLimit
+namespace
+{
+/** -30 dBFS 0.5 s, -3 dBFS 0.5 s, -30 dBFS 1 s (the step signal of the limiter vectors). Gain relative to the boosted input, as the vectors state it. */
+struct LimitRun
+{
+    std::vector<float> in, out;
+    double boost = 1.0;
+    double gain (size_t i) const    { return (double) out[i] / ((double) in[i] * boost); }
+};
+
+LimitRun runLimit (const fx::ReaLimitParams& p, std::vector<float> in)
+{
+    LimitRun r;
+    r.in = std::move (in);
+    r.boost = std::pow (10.0, -p.thresholdDb / 20.0) * std::pow (10.0, p.ceilingDb / 20.0);
+    fx::ReaLimit l;
+    l.prepare (48000.0);
+    l.setParams (p);
+    r.out = runMono (l, r.in, l.latencySamples());
+    return r;
+}
+
+std::vector<float> limiterStep()
+{
+    return dcSegments ({ { -30, 0.5 }, { -3, 0.5 }, { -30, 1.0 } }, 48000.0);
+}
+
+/** A -60 dBFS floor with a unit impulse at 2.5 s. */
+std::vector<float> limiterImpulse()
+{
+    std::vector<float> x (48000 * 3, 0.001f);
+    x[120000] = 1.0f;
+    return x;
+}
+} // namespace
+
+ROVOX_TEST (parity, realimit_threshold_boosts_the_ceiling_scales_and_peaks_stay_just_below_the_ceiling)
+{
+    fx::ReaLimitParams p;
+    p.thresholdDb = -10.0;
+    p.ceilingDb = -6.0;
+    p.releaseDbPerSec = 6.0;
+    const auto r = runLimit (p, limiterStep());
+    CHECK_NEAR (dbOf (r.out[10000] / (double) r.in[10000]), 10.0 - 6.0, 1e-3);          // -30 dBFS comes out at -26 dBFS
+    CHECK_NEAR (dbOf (r.out[36000]), -6.014, 0.01);                                       // a -3 dBFS DC would be +7: -6.01 dBFS (measured)
+    double peak = 0.0;
+
+    for (float v : r.out)
+        peak = std::max (peak, (double) std::abs (v));
+
+    CHECK (dbOf (peak) < -6.0);
+    CHECK (dbOf (peak) > -6.1);
+
+    // below 0 dBFS nothing happens, a boosted peak settles 0.014 dB below the ceiling (measured -0.014 dBFS)
+    p.thresholdDb = 0.0;
+    p.ceilingDb = 0.0;
+    const auto q = runLimit (p, limiterStep());
+    CHECK_NEAR (q.out[10000], q.in[10000], 1e-7);
+    CHECK_NEAR (q.out[36000], q.in[36000], 1e-7);
+    p.thresholdDb = -10.0;
+    const auto t = runLimit (p, limiterStep());
+    CHECK_NEAR (dbOf (t.out[36000]), -0.014, 0.005);
+}
+
+ROVOX_TEST (parity, realimit_gain_ramps_linearly_over_two_ms_ending_on_the_peak)
+{
+    fx::ReaLimitParams p;
+    p.thresholdDb = -10.0;
+    p.releaseDbPerSec = 6.0;
+    const auto r = runLimit (p, limiterStep());
+    const size_t step = 24000;
+    const double end = 0.44598;                                                            // 0.99839 / (10^(7/20))
+
+    for (long k = -100; k <= 0; k += 4)
+    {
+        const double want = k <= -96 ? 1.0 : 1.0 - (1.0 - end) * (double) (k + 96) / 96.0;
+        CHECK_NEAR (r.gain ((size_t) ((long) step + k)), want, 2e-4);
+    }
+
+    CHECK_NEAR (r.gain (step - 92), 0.976916, 2e-4);                                       // measured
+    CHECK_NEAR (r.gain (step - 48), 0.72299, 2e-4);
+    CHECK_NEAR (r.gain (step), 0.44598, 2e-4);
+
+    // -20 dB threshold: slope 0.9 / 96
+    p.thresholdDb = -20.0;
+    const auto s = runLimit (p, limiterStep());
+    CHECK_NEAR (s.gain (step - 48), 0.570515, 2e-4);
+}
+
+ROVOX_TEST (parity, realimit_release_has_a_fast_linear_stage_and_a_slow_stage_in_db_per_second)
+{
+    const struct { double rate; double gr[8][2]; } cases[] = {
+        { 6.0, { { 0, -7.0136 }, { 48, -7.0076 }, { 480, -6.9536 }, { 2400, -6.7136 }, { 9600, -5.8136 }, { 24000, -4.0136 }, { 43200, -1.6137 }, { 0, 0 } } },
+        { 25.95, { { 0, -7.0132 }, { 48, -6.9872 }, { 480, -6.7537 }, { 2400, -5.7157 }, { 4800, -4.4183 }, { 9600, -1.8235 }, { 14400, 0.0 }, { 0, 0 } } },
+        { 11.95, { { 0, -7.0134 }, { 480, -6.894 }, { 2400, -6.416 }, { 9600, -4.6235 }, { 19200, -2.2336 }, { 24000, -1.0386 }, { 43200, 0.0 }, { 0, 0 } } } };
+
+    for (auto& c : cases)
+    {
+        fx::ReaLimitParams p;
+        p.thresholdDb = -10.0;
+        p.releaseDbPerSec = c.rate;
+        const auto r = runLimit (p, limiterStep());
+
+        for (auto& pt : c.gr)
+            if (pt[0] > 0 || pt[1] != 0)
+                CHECK_NEAR (dbOf (r.gain (48000 + (size_t) pt[0])), pt[1], 0.02);
+    }
+
+    // the fast stage after an isolated peak: back to 1 over 480 samples (10 ms), the slow stage then holds a fraction of a dB
+    fx::ReaLimitParams p;
+    p.thresholdDb = -10.0;
+    p.releaseDbPerSec = 6.0;
+    const auto r = runLimit (p, limiterImpulse());
+    const size_t at = 120000;
+    const struct { long k; double g; } pts[] = { { -100, 1.0 }, { -80, 0.885902 }, { -40, 0.600658 }, { 0, 0.315414 }, { 20, 0.343938 }, { 200, 0.600658 },
+                                                 { 440, 0.942951 }, { 460, 0.968637 }, { 480, 0.968916 } };
+
+    for (auto& pt : pts)
+        CHECK_NEAR (r.gain ((size_t) ((long) at + pt.k)) , pt.g, 1.5e-3);
+
+    p.releaseDbPerSec = 25.95;
+    const auto r26 = runLimit (p, limiterImpulse());
+    CHECK_NEAR (r26.gain (at + 400), 0.884328, 1.5e-3);
+    CHECK_NEAR (r26.gain (at + 480), 0.888742, 1.5e-3);
+    p.thresholdDb = -20.0;
+    p.releaseDbPerSec = 15.0;
+    const auto r20 = runLimit (p, limiterImpulse());
+    CHECK_NEAR (r20.gain (at), 0.099743, 1.5e-3);
+    CHECK_NEAR (r20.gain (at + 460), 0.926396, 1.5e-3);
+}
+
+ROVOX_TEST (parity, realimit_slow_stage_charges_with_the_length_of_a_burst)
+{
+    // measured residual gain reduction 10 ms after a burst that needs 7 dB (T = -10, 6 dB/s): the charge law is a fit (low confidence)
+    const struct { double ms, gr; } bursts[] = { { 1, 0.29 }, { 5, 0.38 }, { 20, 0.72 }, { 100, 2.55 }, { 300, 6.95 } };
+
+    for (auto& b : bursts)
+    {
+        auto x = dcSegments ({ { -30, 0.1 }, { -30, 0.9 } }, 48000.0);
+        const size_t a = 4800, len = (size_t) std::lround (b.ms * 48.0);
+
+        for (size_t i = a; i < a + len; ++i)
+            x[i] = (float) std::pow (10.0, -3.0 / 20.0);
+
+        fx::ReaLimitParams p;
+        p.thresholdDb = -10.0;
+        p.releaseDbPerSec = 6.0;
+        const auto r = runLimit (p, x);
+        CHECK_NEAR (-dbOf (r.gain (a + len + 480)), b.gr, 0.04);
+    }
+
+    // a release of "inf" has no slow stage: the gain is back after the fast stage
+    fx::ReaLimitParams p;
+    p.thresholdDb = -10.0;
+    p.releaseDbPerSec = fx::ReaLimitParams::infiniteRelease;
+    const auto r = runLimit (p, limiterStep());
+    CHECK_NEAR (r.gain (48000 + 480), 1.0, 1e-6);
+}
+
+//------------------------------------------------------------------------------ translation
+ROVOX_TEST (parity, reacomp_translation_reads_the_knobs_exactly_and_selects_the_reaper_mode)
+{
+    const json entry = { { "name", "ReaComp" },
+                         { "params", json::array ({ prm (0, "Threshold", 0.249155231, "-6.0"), prm (1, "Ratio", 0.0303030312, "4.00"), prm (2, "Attack", 0.00599999987, "3.0"),
+                                                    prm (3, "Release", 0.0199999996, "100"), prm (4, "Pre-comp", 0.0399999991, "10.0"), prm (5, "resvd", 0.0, "0"),
+                                                    prm (6, "Lowpass", 0.0499749985, "1000"), prm (7, "Hipass", 1.0, "20000"), prm (8, "SignIn", 0.0, "0"), prm (9, "AudIn", 0.0, "0"),
+                                                    prm (10, "Dry", 0.249155231, "-6.0"), prm (11, "Wet", 0.0, "-inf"), prm (12, "Filter Preview", 0.0, "0"),
+                                                    prm (13, "RMS size", 0.00999499997, "10.0"), prm (14, "Knee", 0.5, "12.0"), prm (15, "Auto Make Up Gain", 1.0, "1"),
+                                                    prm (16, "Auto Release", 0.0, "0"), prm (17, "Legacy Attack/Knee Options", 0.0, "0.00"),
+                                                    prm (18, "Deprecated Broken Anti-Alias", 0.0, "0"), prm (19, "Multichannel Mode", 0.0, "0"), prm (20, "Metering Index", 0.0, "0"),
+                                                    prm (21, "Bypass", 0.0, "normal"), prm (22, "Wet", 0.25, "25"), prm (23, "Delta", 1.0, "enabled") }) } };
+    const auto t = translateReaperFx ("comp", parseReaperFxEntry (entry));
+    CHECK_NEAR (translatedValue (t, "threshold"), 20.0 * std::log10 (2 * 0.249155231), 1e-9);
+    CHECK_NEAR (translatedValue (t, "ratio"), 1.0 + 99.0 * 0.0303030312, 1e-9);
+    CHECK_NEAR (translatedValue (t, "attack"), 500.0 * 0.00599999987, 1e-9);
+    CHECK_NEAR (translatedValue (t, "release"), 100.0, 1e-3);
+    CHECK_NEAR (translatedValue (t, "lookahead"), 250.0 * 0.0399999991, 1e-9);
+    CHECK_NEAR (translatedValue (t, "lowpass"), 20000.0 * 0.0499749985, 1e-9);
+    CHECK_NEAR (translatedValue (t, "hipass"), 20000.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "dry"), 20.0 * std::log10 (2 * 0.249155231), 1e-9);
+    CHECK_NEAR (translatedValue (t, "wet"), -150.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "rms"), 1000.0 * 0.00999499997, 1e-9);
+    CHECK_NEAR (translatedValue (t, "knee"), 12.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "auto_makeup"), 1.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "legacy_knee"), 0.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "reaper_compat"), 1.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "fx_wet"), 25.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "fx_delta"), 1.0, 1e-9);
+    CHECK (t.untranslated.empty());
+
+    const json inf = { { "name", "ReaComp" }, { "params", json::array ({ prm (1, "Ratio", 1.0, "inf") }) } };
+    CHECK_NEAR (translatedValue (translateReaperFx ("comp", parseReaperFxEntry (inf)), "ratio"), 100.0, 1e-9);
+}
+
+ROVOX_TEST (parity, reagate_and_realimit_translation_read_the_knobs_exactly)
+{
+    const json gate = { { "name", "ReaGate" },
+                        { "params", json::array ({ prm (0, "Threshold", 0.249155231, "-6.0"), prm (1, "Attack", 0.00200000009, "1"), prm (2, "Release", 0.0199999996, "100"),
+                                                   prm (3, "Pre-open", 0.0399999991, "10"), prm (4, "Hold", 0.0500000007, "50"), prm (5, "Lowpass", 1.0, "20000"),
+                                                   prm (6, "Hipass", 0.0, "0"), prm (7, "SignIn", 0.0, "0"), prm (8, "AudIn", 0.0, "0"), prm (9, "Dry", 0.249155231, "-6.0"),
+                                                   prm (10, "Wet", 0.5, "+0.0"), prm (11, "Noise level", 0.0, "-inf"), prm (12, "Hysteresis", 0.249155231, "-6.0"),
+                                                   prm (13, "Preview Filter", 0.0, "0"), prm (14, "RMS size", 0.0, "0"), prm (15, "Send MIDI", 0.0, "0"),
+                                                   prm (16, "Midi Note", 0.5, "64"), prm (17, "Midi Channel", 0.0, "1"), prm (18, "Invert Wet", 1.0, "enabled"),
+                                                   prm (19, "Multichannel Mode", 0.0, "0"), prm (20, "Metering Index", 0.0, "0"),
+                                                   prm (21, "Bypass", 0.0, "normal"), prm (22, "Wet", 1.0, "100"), prm (23, "Delta", 0.0, "normal") }) } };
+    const auto g = translateReaperFx ("gate", parseReaperFxEntry (gate));
+    CHECK_NEAR (translatedValue (g, "threshold"), 20.0 * std::log10 (2 * 0.249155231), 1e-9);
+    CHECK_NEAR (translatedValue (g, "attack"), 1.0, 1e-9);                // ReaGate acts on the whole-ms text, not the knob position
+    CHECK_NEAR (translatedValue (g, "release"), 100.0, 1e-3);
+    CHECK_NEAR (translatedValue (g, "pre_open"), 10.0, 1e-9);
+    CHECK_NEAR (translatedValue (g, "hold"), 50.0, 1e-3);
+    CHECK_NEAR (translatedValue (g, "dry"), 20.0 * std::log10 (2 * 0.249155231), 1e-9);
+    CHECK_NEAR (translatedValue (g, "wet"), 0.0, 1e-9);
+    CHECK_NEAR (translatedValue (g, "rea_hysteresis"), 20.0 * std::log10 (2 * 0.249155231), 1e-9);
+    CHECK_NEAR (translatedValue (g, "invert_wet"), 1.0, 1e-9);
+    CHECK_NEAR (translatedValue (g, "reaper_compat"), 1.0, 1e-9);
+    CHECK (g.untranslated.empty());
+
+    const json lim = { { "name", "ReaLimit" },
+                       { "params", json::array ({ prm (0, "Threshold", 0.5, "-24.00"), prm (1, "Ceiling", 0.99, "-0.24"), prm (2, "Release", 0.5, "12.0"),
+                                                  prm (3, "Bypass", 0.0, "normal"), prm (4, "Wet", 1.0, "100"), prm (5, "Delta", 0.0, "normal") }) } };
+    const auto l = translateReaperFx ("limit", parseReaperFxEntry (lim));
+    CHECK_NEAR (translatedValue (l, "threshold"), -60.0 + 72.0 * 0.5, 1e-9);
+    CHECK_NEAR (translatedValue (l, "ceiling"), -24.0 + 24.0 * 0.99, 1e-9);
+    CHECK_NEAR (translatedValue (l, "release_rate"), 6.0 - 20.0 * std::log10 (0.5), 1e-9);
+    CHECK_NEAR (translatedValue (l, "reaper_compat"), 1.0, 1e-9);
+    CHECK (l.untranslated.empty());
+
+    const json infinite = { { "name", "ReaLimit" }, { "params", json::array ({ prm (2, "Release", 0.0, "inf") }) } };
+    CHECK_NEAR (translatedValue (translateReaperFx ("limit", parseReaperFxEntry (infinite)), "release_rate"), 1000.0, 1e-9);
+}
+
+//------------------------------------------------------------------------------ the hidden fade stage
+ROVOX_TEST (parity, the_fade_stage_is_hidden_from_fx_lists_and_indices_but_still_applies_its_fade)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("parityhide");
+    test::writeWav (dir / "item.wav", { std::vector<float> (48000, 0.5f) }, 48000, 24);
+    std::ofstream (dir / "t.RPP") << fadeRpp ("      FADEIN 4 0.25 0 4 0 1 1 1 0 0 1 0 0\n      FADEOUT 0 0.25 0 0 0 0 0 1 0 0 1 0 0");
+    const auto id = env.newProject ("hide");
+    REQUIRE (env.run (id, "import.rpp", { { "path", (dir / "t.RPP").string() } }).ok);
+    const auto track = env.ok (id, "track.list")["tracks"][0]["track_id"].get<std::string>();
+
+    const auto typesOf = [&]
+    {
+        std::vector<std::string> types;
+        const auto list = env.ok (id, "fx.list", { { "target", track } });
+
+        for (auto& f : list["fx"])
+        {
+            CHECK (f["index"].get<size_t>() == types.size());       // indices count only what users see
+            types.push_back (f["type"].get<std::string>());
+        }
+
+        return types;
+    };
+
+    auto types = typesOf();
+    const size_t before = types.size();
+    CHECK (std::find (types.begin(), types.end(), "rovoxfades") == types.end());
+
+    const auto eq = env.ok (id, "fx.add", { { "track_id", track }, { "plugin", { { "plugin_uid", "rovox:eq" } } }, { "index", 0 } })["plugin_id"].get<std::string>();
+    const auto comp = env.ok (id, "fx.add", { { "track_id", track }, { "plugin", { { "plugin_uid", "rovox:comp" } } }, { "index", 0 } })["plugin_id"].get<std::string>();
+    types = typesOf();
+
+    if (types.size() != before + 2)
+    {
+        std::cerr << "    chain before " << before << ", after:";
+
+        for (auto& t : types)
+            std::cerr << " " << t;
+
+        std::cerr << "\n";
+    }
+
+    REQUIRE (types.size() == before + 2);
+    CHECK (types[0] == "rovoxcomp");                // index 0 is the first FX the user sees
+    CHECK (types[1] == "rovoxeq");
+    const auto listed = env.ok (id, "fx.list", { { "target", track } });
+    CHECK (listed["fx"][0]["plugin_id"] == comp);
+    CHECK (listed["fx"][1]["plugin_id"] == eq);
+    env.ok (id, "fx.move", { { "plugin_id", comp }, { "to_index", 1 } });
+    types = typesOf();
+    CHECK (types[0] == "rovoxeq");
+    CHECK (types[1] == "rovoxcomp");
+
+    const auto tracks = env.ok (id, "track.list");
+
+    for (auto& t : tracks["tracks"])
+        for (auto& pl : t["plugins"])
+            CHECK (pl["type"] != "rovoxfades");
+
+    const auto project = env.ok (id, "project.get", { { "include", { "fx" } } });
+
+    for (auto& pl : project["fx"][track])
+        CHECK (pl["type"] != "rovoxfades");
+
+    // the stage is still there, first in the chain: the fade-in renders (the EQ is flat at its defaults, the compressor is switched off)
+    env.ok (id, "fx.update", { { "plugin_id", comp }, { "enabled", false } });
+    RenderRequest rq;
+    rq.tailS = 0.0;
+    auto rr = renderProject (env.project (id), rq);
+    REQUIRE (rr.ok());
+    std::vector<std::vector<float>> ch;
+    double rate = 0.0;
+    REQUIRE (test::readWav (env.project (id).dir() / rr.value()["file"]["path"].get<std::string>(), ch, rate));
+    REQUIRE (! ch.empty());
+    CHECK (std::abs (ch[0][0]) < 1.0e-6f);
+    CHECK_NEAR (ch[0][(size_t) (0.75 * 0.25 * rate)], 0.5 * std::pow (0.75, 4.0), 5.0e-3);       // shape 4 (curve -1): t^4 at three quarters of the 0.25 s fade
+    CHECK_NEAR (ch[0][30000], 0.5, 1.0e-2);
 }

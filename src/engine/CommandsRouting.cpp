@@ -4,6 +4,7 @@
 // M4 commands (task 210 reserved names): routing.list / send_create / send_update / send_delete (aux sends to a return track, for reverb or
 // parallel buses) and track.duplicate. A send is a plugin on the source track (id `snd_...`), the return is a plugin on the bus track.
 #include "Command.h"
+#include "FadeStage.h"
 
 #include "ProjectManager.h"
 
@@ -323,7 +324,8 @@ void registerRoutingCommands (CommandRegistry& r)
             json plugins = json::array();
 
             for (auto* pl : track->pluginList.getPlugins())
-                plugins.push_back ({ { "plugin_id", Project::idOf (pl->state) }, { "name", toStd (pl->getName()) }, { "type", toStd (pl->getPluginType()) } });
+                if (! isFadeStage (*pl))
+                    plugins.push_back ({ { "plugin_id", Project::idOf (pl->state) }, { "name", toStd (pl->getName()) }, { "type", toStd (pl->getPluginType()) } });
 
             json items = json::array();
 

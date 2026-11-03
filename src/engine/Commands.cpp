@@ -3,6 +3,7 @@
 
 #include "Command.h"
 
+#include "FadeStage.h"
 #include "Ids.h"
 #include "PanStage.h"
 #include "PluginHost.h"
@@ -85,7 +86,8 @@ json trackJson (Project& project, te::Track& t)
                                { "start_s", c->getPosition().getStart().inSeconds() }, { "length_s", c->getPosition().getLength().inSeconds() } });
 
     for (auto* p : t.pluginList.getPlugins())
-        plugins.push_back (pluginJson (*p));
+        if (! isFadeStage (*p))
+            plugins.push_back (pluginJson (*p));
 
     j["items"] = items;
     j["plugins"] = plugins;
@@ -491,7 +493,9 @@ void registerFxCommands (CommandRegistry& r)
 
             int index = params.value ("index", -1);
 
-            if (index < 0)
+            if (index >= 0)
+                index = chainIndexOfVisible (*list, index);     // the index users see does not count the hidden fade stage
+            else if (index < 0)
             {
                 index = list->size();
 

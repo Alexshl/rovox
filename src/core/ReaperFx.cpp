@@ -136,9 +136,6 @@ bool asFlag (const ReaperFxParam& p)
     return p.normalized >= 0.5;
 }
 
-double dbToLin (double db)      { return db <= minusInfDb + 1.0 ? 0.0 : std::pow (10.0, db / 20.0); }
-double linToDb (double lin)     { return lin <= 1.0e-7 ? -100.0 : 20.0 * std::log10 (lin); }
-
 struct Sink
 {
     FxTranslation out;
@@ -476,6 +473,18 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
 }
 
 //------------------------------------------------------------------------------ ReaComp
+/** ReaComp / ReaGate / ReaDelay amplitude knobs (Dry, Wet, Threshold, Hysteresis, ...): amplitude = 2 n, in dB (-inf at 0). */
+double ampKnobDb (double n)
+{
+    return n <= 1.0e-7 ? minusInfDb : 20.0 * std::log10 (2.0 * n);
+}
+
+/** A knob that is linear in n over 0 .. `range`: the exact value when it agrees with the displayed text (3 significant digits), else the text. */
+double linearKnob (double fromText, double normalized, double range)
+{
+    return exactOrText (fromText, range * normalized, std::max (0.06, 0.006 * std::abs (fromText)));
+}
+
 /** A parameter without a Rovox counterpart: listed unless it is at its neutral value (detector filters open, flags off). */
 void leave (Sink& s, const ReaperFxParam& p, const std::string& reason, bool neutral)
 {
@@ -508,17 +517,17 @@ bool isMinusInf (const ReaperFxParam& p)
 
 void translateComp (const ReaperFxEntry& fx, Sink& s)
 {
-    const ReaperFxParam *wet = nullptr, *dry = nullptr;
-
-    // units of the plain numbers ReaComp shows: threshold / knee / dry / wet in dB, attack / release / pre-comp / RMS size in ms, ratio as N:1
+    // units of the plain numbers ReaComp shows: threshold / knee / dry / wet in dB, attack / release / pre-comp / RMS size in ms, ratio as N:1,
+    // detector filters in Hz; the exact values follow from the normalized knob positions (spec-common.md)
     for (auto& p : fx.params)
     {
         const auto k = joinWords (words (p.name));
         const auto v = parseReaperValue (p.formatted);
+        const double n = p.normalized;
 
         if (k == "threshold" || k == "thresh")
         {
-            if (auto db = asDb (v))     s.set (p, "threshold", *db);
+            if (auto db = asDb (v))     s.set (p, "threshold", exactOrText (*db, ampKnobDb (n), 0.12), "amplitude 2 n");
             else                        s.unparsed (p);
         }
         else if (k == "ratio")
@@ -526,110 +535,97 @@ void translateComp (const ReaperFxEntry& fx, Sink& s)
             if (v.ok && v.infinite)
                 s.set (p, "ratio", 100.0, "infinite ratio");
             else if (v.ok && v.value >= 1.0 && (v.unit == ":1" || v.unit.empty()))
-                s.set (p, "ratio", v.value);
+                s.set (p, "ratio", exactOrText (v.value, 1.0 + 99.0 * n, 0.01 * v.value));
             else
                 s.unparsed (p);
         }
         else if (k == "attack")
         {
-            if (auto ms = asMs (v))     s.set (p, "attack", *ms);
+            if (auto ms = asMs (v))     s.set (p, "attack", linearKnob (*ms, n, 500.0));
             else                        s.unparsed (p);
         }
         else if (k == "release")
         {
-            if (auto ms = asMs (v))     s.set (p, "release", *ms);
+            if (auto ms = asMs (v))     s.set (p, "release", linearKnob (*ms, n, 5000.0));
             else                        s.unparsed (p);
         }
         else if (k == "knee" || k == "knee size")
         {
-            if (auto db = asDb (v))     s.set (p, "knee", *db);
+            if (auto db = asDb (v))     s.set (p, "knee", linearKnob (*db, n, 24.0));
             else                        s.unparsed (p);
         }
         else if (k == "pre comp" || k == "precomp")
         {
-            if (auto ms = asMs (v))     s.set (p, "lookahead", *ms, "pre-comp");
+            if (auto ms = asMs (v))     s.set (p, "lookahead", linearKnob (*ms, n, 250.0), "pre-comp");
             else                        s.unparsed (p);
         }
         else if (k == "rms size")
         {
-            if (auto ms = asMs (v))     s.set (p, "rms", *ms);
+            if (auto ms = asMs (v))     s.set (p, "rms", linearKnob (*ms, n, 1000.0));
             else                        s.unparsed (p);
         }
         else if (k == "auto make up gain")
         {
             s.set (p, "auto_makeup", asFlag (p) ? 1.0 : 0.0);
         }
-        else if (k == "wet")
+        else if (k == "wet" || k == "dry")
         {
-            wet = &p;
+            if (auto db = asDb (v))     s.set (p, k, exactOrText (*db, ampKnobDb (n), 0.12), "amplitude 2 n");
+            else                        s.unparsed (p);
         }
-        else if (k == "dry")
+        else if (k == "lowpass" || k == "hipass")
         {
-            dry = &p;
+            if (auto hz = asHz (v))     s.set (p, k, exactOrText (*hz, 20000.0 * n, 1.0), "detector filter, 12 dB/oct");
+            else                        s.unparsed (p);
         }
-        else if (k == "lowpass")                    leave (s, p, "the detector low-pass has no equivalent in the Rovox Comp", filterOpen (p, true));
-        else if (k == "hipass")                     leave (s, p, "the detector high-pass has no equivalent in the Rovox Comp", filterOpen (p, false));
-        else if (k == "auto release")               leave (s, p, "auto release has no equivalent in the Rovox Comp", zeroish (p));
+        else if (k == "legacy attack knee options")
+        {
+            if (v.ok && ! v.infinite)   s.set (p, "legacy_knee", exactOrText (v.value, n, 0.006), "0.25 is the default knee");
+            else                        s.unparsed (p);
+        }
+        else if (k == "auto release")               leave (s, p, "auto release (program-dependent release) is not modelled", zeroish (p));
         else if (k == "signin" || k == "audin")     leave (s, p, "the external side-chain input has no equivalent in the Rovox Comp", zeroish (p));
         else if (k == "filter preview")             leave (s, p, "the detector filter preview has no equivalent in the Rovox Comp", zeroish (p));
         else if (k == "multichannel mode")          leave (s, p, "multichannel mode has no equivalent in the Rovox Comp", zeroish (p));
         else if (k == "deprecated broken anti alias")   leave (s, p, "legacy anti-alias mode has no equivalent in the Rovox Comp", zeroish (p));
-        else if (k == "resvd" || k == "legacy attack knee options" || k == "metering index")
-            continue;       // reserved / compatibility / metering slots, no setting
+        else if (k == "resvd" || k == "metering index")
+            continue;       // reserved / metering slots, no setting
         else
             s.skip (p, "no equivalent in the Rovox Comp");
     }
 
-    // ReaComp output = dry * x + wet * compressed; Rovox output = mix * makeup * compressed + (1 - mix) * x.
-    // The FX-wide Wet (w) blends the whole effect: (1 - w) * x + w * output, so mix = w * (1 - dry) and makeup = wet / (1 - dry).
-    if (wet != nullptr || dry != nullptr || s.overallWet < 1.0)
-    {
-        const auto wv = wet != nullptr ? asDb (parseReaperValue (wet->formatted)) : std::optional<double> (0.0);
-        const auto dv = dry != nullptr ? asDb (parseReaperValue (dry->formatted)) : std::optional<double> (minusInfDb);
-
-        if (! wv || ! dv)
-        {
-            if (wet != nullptr && ! wv)     s.unparsed (*wet);
-            if (dry != nullptr && ! dv)     s.unparsed (*dry);
-        }
-        else
-        {
-            const double w = dbToLin (*wv), d = dbToLin (*dv);
-            const double base = std::clamp (1.0 - d, 0.0, 1.0);
-            const double mix = base * s.overallWet;
-            const double makeupDb = base > 0.0 && w > 0.0 ? linToDb (w / base) : 0.0;
-            auto note = "wet " + std::to_string (*wv) + " dB / dry " + std::to_string (*dv) + " dB";
-
-            if (s.overallWet < 1.0)
-                note += ", FX wet " + std::to_string (s.overallWet * 100.0) + " %";
-
-            if (wet != nullptr)     s.set (*wet, "makeup", makeupDb, note);
-            if (dry != nullptr)     s.set (*dry, "mix", mix * 100.0, note);
-            else                    s.out.translated.push_back ({ "(mix)", "", "mix", mix * 100.0, note });
-
-            if (d >= 1.0)
-                s.out.untranslated.push_back ({ "Dry", dry != nullptr ? dry->formatted : "", "dry level at or above 0 dB cannot be reproduced; the mix is 0 %" });
-        }
-    }
-
-    s.overallWetApplied = true;
+    // ReaComp's behaviour (detector, envelope, knee, make-up, dry / wet) instead of the Rovox compressor
+    s.out.translated.push_back ({ "(ReaComp)", "", "reaper_compat", 1.0, "detector, envelope and knee as ReaComp does" });
 }
 
 //------------------------------------------------------------------------------ ReaLimit
 void translateLimit (const ReaperFxEntry& fx, Sink& s)
 {
-    const ReaperFxParam *threshold = nullptr, *ceiling = nullptr;
-
     for (auto& p : fx.params)
     {
         const auto w = words (p.name);
+        const auto v = parseReaperValue (p.formatted);
+        const double n = p.normalized;
 
-        if (hasPrefixWord (w, "thresh"))            threshold = &p;
-        else if (hasPrefixWord (w, "ceil"))         ceiling = &p;
+        if (hasPrefixWord (w, "thresh"))
+        {
+            if (auto db = asDb (v))     s.set (p, "threshold", exactOrText (*db, -60.0 + 72.0 * n, 0.011), "-60 + 72 n");
+            else                        s.unparsed (p);
+        }
+        else if (hasPrefixWord (w, "ceil"))
+        {
+            if (auto db = asDb (v))     s.set (p, "ceiling", exactOrText (*db, -24.0 + 24.0 * n, 0.011), "-24 + 24 n");
+            else                        s.unparsed (p);
+        }
         else if (hasWord (w, "release"))
         {
-            if (auto ms = asMs (parseReaperValue (p.formatted)))    s.set (p, "release", *ms);
-            else                                                    s.unparsed (p);
+            // the number is the rate of the slow stage in dB per second; "inf" is the top of the knob (no slow stage)
+            if (v.ok && v.infinite)
+                s.set (p, "release_rate", 1000.0, "infinite rate: no slow stage");
+            else if (v.ok && v.value > 0.0)
+                s.set (p, "release_rate", n > 0.0 ? exactOrText (v.value, 6.0 - 20.0 * std::log10 (n), 0.06 + 0.006 * v.value) : v.value, "dB per second");
+            else
+                s.unparsed (p);
         }
         else
         {
@@ -637,18 +633,8 @@ void translateLimit (const ReaperFxEntry& fx, Sink& s)
         }
     }
 
-    // ReaLimit limits at the threshold and brings the peaks up to the ceiling: Rovox input gain = ceiling - threshold
-    const auto t = threshold != nullptr ? asDb (parseReaperValue (threshold->formatted)) : std::optional<double> (0.0);
-    const auto c = ceiling != nullptr ? asDb (parseReaperValue (ceiling->formatted)) : std::optional<double> (0.0);
-
-    if (threshold != nullptr && ! t)        s.unparsed (*threshold);
-    if (ceiling != nullptr && ! c)          s.unparsed (*ceiling);
-
-    if (c && ceiling != nullptr)
-        s.set (*ceiling, "ceiling", *c);
-
-    if (t && c && threshold != nullptr)
-        s.set (*threshold, "input_gain", std::max (0.0, *c - *t), "threshold " + std::to_string (*t) + " dB, ceiling " + std::to_string (*c) + " dB");
+    // ReaLimit's behaviour (threshold boost, sample-peak limiting, two-stage release) instead of the Rovox limiter
+    s.out.translated.push_back ({ "(ReaLimit)", "", "reaper_compat", 1.0, "limiting as ReaLimit does" });
 }
 
 //------------------------------------------------------------------------------ ReaGate
@@ -660,15 +646,17 @@ void translateGate (const ReaperFxEntry& fx, Sink& s)
         if (joinWords (words (p.name)) == "send midi")
             sendMidi = ! zeroish (p);
 
-    // plain numbers: threshold / hysteresis / dry / wet in dB, attack / release / hold in ms
+    // plain numbers: threshold / hysteresis / dry / wet in dB, attack / release / hold / pre-open / RMS size in ms. ReaGate shows its times as whole
+    // milliseconds and acts on the displayed value (a knob at 99.5 ms behaves as 100 ms, measured), so the time is the text, not the knob position.
     for (auto& p : fx.params)
     {
         const auto k = joinWords (words (p.name));
         const auto v = parseReaperValue (p.formatted);
+        const double n = p.normalized;
 
         if (k == "threshold" || k == "thresh")
         {
-            if (auto db = asDb (v))     s.set (p, "threshold", *db);
+            if (auto db = asDb (v))     s.set (p, "threshold", exactOrText (*db, ampKnobDb (n), 0.12), "amplitude 2 n");
             else                        s.unparsed (p);
         }
         else if (k == "attack")
@@ -688,35 +676,48 @@ void translateGate (const ReaperFxEntry& fx, Sink& s)
         }
         else if (k == "hysteresis")
         {
-            if (auto db = asDb (v))     s.set (p, "hysteresis", *db);
+            if (auto db = asDb (v))     s.set (p, "rea_hysteresis", exactOrText (*db, ampKnobDb (n), 0.12), "amplitude 2 n");
             else                        s.unparsed (p);
         }
-        else if (k == "dry")
+        else if (k == "dry" || k == "wet")
         {
-            // ReaGate's dry level is what passes while the gate is closed
-            if (auto db = asDb (v))     s.set (p, "range", std::max (*db, -100.0), "dry level = attenuation while closed");
+            if (auto db = asDb (v))     s.set (p, k, exactOrText (*db, ampKnobDb (n), 0.12), "amplitude 2 n");
             else                        s.unparsed (p);
         }
-        else if (k == "wet")
+        else if (k == "pre open")
         {
-            const auto db = asDb (v);
-            leave (s, p, "wet level other than 0 dB has no equivalent in the Rovox Gate", db && std::abs (*db) < 0.05);
+            if (auto ms = asMs (v))     s.set (p, "pre_open", *ms);
+            else                        s.unparsed (p);
         }
-        else if (k == "pre open")                   leave (s, p, "pre-open has no equivalent in the Rovox Gate", zeroish (p));
-        else if (k == "lowpass")                    leave (s, p, "the detector low-pass has no equivalent in the Rovox Gate", filterOpen (p, true));
-        else if (k == "hipass")                     leave (s, p, "the detector high-pass has no equivalent in the Rovox Gate", filterOpen (p, false));
+        else if (k == "rms size")
+        {
+            if (auto ms = asMs (v))     s.set (p, "rms", *ms);
+            else                        s.unparsed (p);
+        }
+        else if (k == "lowpass" || k == "hipass")
+        {
+            if (auto hz = asHz (v))     s.set (p, k, exactOrText (*hz, 20000.0 * n, 1.0), "detector filter, 12 dB/oct");
+            else                        s.unparsed (p);
+        }
+        else if (k == "invert wet")
+        {
+            const auto t = lowerOf (trim (p.formatted));
+            const bool on = t.rfind ("enabled", 0) == 0;
+            s.set (p, "invert_wet", on ? 1.0 : 0.0, t.find ("legacy") != std::string::npos ? "legacy mode treated as the current one (not measured)" : "");
+        }
         else if (k == "signin" || k == "audin")     leave (s, p, "the external side-chain input has no equivalent in the Rovox Gate", zeroish (p));
-        else if (k == "noise level")                leave (s, p, "the noise level has no equivalent in the Rovox Gate", isMinusInf (p));
+        else if (k == "noise level")                leave (s, p, "the noise level (added noise while open) is not modelled", isMinusInf (p));
         else if (k == "preview filter")             leave (s, p, "the detector filter preview has no equivalent in the Rovox Gate", zeroish (p));
-        else if (k == "rms size")                   leave (s, p, "RMS detection has no equivalent in the Rovox Gate", zeroish (p));
         else if (k == "send midi")                  leave (s, p, "MIDI output has no equivalent in the Rovox Gate", zeroish (p));
         else if (k == "midi note" || k == "midi channel")   leave (s, p, "MIDI output has no equivalent in the Rovox Gate", ! sendMidi);
-        else if (k == "invert wet")                 leave (s, p, "inverted wet has no equivalent in the Rovox Gate", ! asFlag (p));
         else if (k == "multichannel mode")          leave (s, p, "multichannel mode has no equivalent in the Rovox Gate", zeroish (p));
         else if (k == "metering index")             continue;
         else
             s.skip (p, "no equivalent in the Rovox Gate");
     }
+
+    // ReaGate's behaviour (detector, gain trajectory, pre-open) instead of the Rovox gate
+    s.out.translated.push_back ({ "(ReaGate)", "", "reaper_compat", 1.0, "gain trajectory as ReaGate does" });
 }
 
 //------------------------------------------------------------------------------ ReaVerbate
@@ -784,7 +785,7 @@ void translateVerb (const ReaperFxEntry& fx, Sink& s)
 /** ReaDelay's amplitude knobs (Wet, Dry, Feedback, Volume): amplitude = 2 n, in dB (-inf at 0). */
 double reaDelayGainDb (double n)
 {
-    return n <= 1.0e-7 ? minusInfDb : 20.0 * std::log10 (2.0 * n);
+    return ampKnobDb (n);
 }
 
 void translateDelay (const ReaperFxEntry& fx, Sink& s)
@@ -963,8 +964,8 @@ FxTranslation translateReaperFx (const std::string& id, const ReaperFxEntry& ent
     else if (id == "verb")      translateVerb (fx, s);
     else if (id == "delay")     translateDelay (fx, s);
 
-    // the Rovox EQ and Delay carry the generic Wet (linear crossfade) and Delta (processed - input, the Wet is ignored) themselves
-    const bool hasMix = id == "eq" || id == "delay";
+    // the Rovox EQ, dynamics and Delay carry the generic Wet (linear crossfade) and Delta (processed - input, the Wet is ignored) themselves
+    const bool hasMix = id == "eq" || id == "delay" || id == "comp" || id == "gate" || id == "limit";
     const bool deltaOn = delta != nullptr && lowerOf (trim (delta->formatted)) != "normal" && delta->normalized >= 0.5;
 
     if (hasMix && genericWet != nullptr)

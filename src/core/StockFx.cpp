@@ -951,4 +951,627 @@ void Verb::process (float* const* io, int numChannels, int numSamples)
     }
 }
 
+//==============================================================================
+double DetectorFilter::Biquad::run (double x) noexcept
+{
+    const double out = b0 * x + z1;
+    z1 = flush (b1 * x - a1 * out + z2);
+    z2 = flush (b2 * x - a2 * out);
+    return out;
+}
+
+void DetectorFilter::set (double sampleRate, double lowPassHz, double highPassHz)
+{
+    lpOn_ = lowPassHz > 0.0 && lowPassHz < 20000.0 && lowPassHz < 0.49 * sampleRate;
+    hpOn_ = highPassHz > 0.5;
+
+    if (lpOn_)
+        designLoopFilter (true, sampleRate, lowPassHz, lp_.b0, lp_.b1, lp_.b2, lp_.a1, lp_.a2);
+
+    if (hpOn_)
+        designLoopFilter (false, sampleRate, highPassHz, hp_.b0, hp_.b1, hp_.b2, hp_.a1, hp_.a2);
+}
+
+void DetectorFilter::reset() noexcept
+{
+    lp_.z1 = lp_.z2 = hp_.z1 = hp_.z2 = 0.0;
+}
+
+double DetectorFilter::run (double x) noexcept
+{
+    return hpOn_ ? hp_.run (lpOn_ ? lp_.run (x) : x) : (lpOn_ ? lp_.run (x) : x);
+}
+
+namespace
+{
+/** The 0.5 ms (24 samples at 48 kHz) offset of the ReaGate timings. Measured at 48 kHz only; at other rates it is scaled with time (unmeasured). */
+double gateOffsetSamples (double sampleRate)            { return 0.0005 * sampleRate; }
+long roundSamples (double v)                            { return v > 0.0 ? std::lround (v) : 0L; }
+}
+
+//==============================================================================
+int ReaGate::latencySamples (const ReaGateParams& p, double sampleRate)
+{
+    const double ms = std::clamp (p.preOpenMs, 0.0, maxPreOpenMs);
+    return (int) roundSamples (ms * sampleRate / 1000.0 - gateOffsetSamples (sampleRate));
+}
+
+void ReaGate::prepare (double sampleRate)
+{
+    sampleRate_ = sampleRate;
+
+    for (auto& l : line_)
+        l.assign ((size_t) std::ceil (maxPreOpenMs * sampleRate / 1000.0) + 8, 0.0f);
+
+    for (auto& r : rmsRing_)
+        r.assign ((size_t) std::ceil (maxRmsMs * sampleRate / 1000.0) + 8, 0.0);
+
+    reset();
+    setParams (params_);
+}
+
+void ReaGate::reset()
+{
+    for (auto& l : line_)
+        std::fill (l.begin(), l.end(), 0.0f);
+
+    for (auto& r : rmsRing_)
+        std::fill (r.begin(), r.end(), 0.0);
+
+    for (auto& f : filter_)
+        f.reset();
+
+    rmsSum_[0] = rmsSum_[1] = 0.0;
+    writePos_ = rmsPos_ = 0;
+    gain_ = 0.0;
+    holdLeft_ = 0;
+    open_ = false;
+}
+
+void ReaGate::setParams (const ReaGateParams& p)
+{
+    params_ = p;
+    const double d = gateOffsetSamples (sampleRate_), ms = sampleRate_ / 1000.0;
+    look_ = latencySamples (p, sampleRate_);
+    openLin_ = p.thresholdDb <= -149.0 ? 0.0 : dbToLin (p.thresholdDb);
+    closeLin_ = p.hysteresisDb <= -99.0 ? 0.0 : openLin_ * dbToLin (p.hysteresisDb);
+
+    const long attack = roundSamples (p.attackMs * ms - d), release = roundSamples (p.releaseMs * ms - d);
+    attackStep_ = attack > 0 ? 1.0 / (double) attack : 1.0;
+    releaseStep_ = release > 0 ? 1.0 / (double) release : 1.0;
+    const long hold = std::max (roundSamples (p.holdMs * ms - d), roundSamples (p.attackMs * ms - d) - 1);
+    holdSamples_ = hold + look_;        // closing stays on the audio when the audio is delayed for the pre-open
+
+    const int n = p.rmsMs > 0.0 ? (int) std::clamp (roundSamples (std::min (p.rmsMs, maxRmsMs) * ms - d), 1L, (long) rmsRing_[0].size() - 1) : 0;
+
+    if (n != rmsN_)
+    {
+        rmsN_ = n;
+        rmsSum_[0] = rmsSum_[1] = 0.0;
+        rmsPos_ = 0;
+
+        for (auto& r : rmsRing_)
+            std::fill (r.begin(), r.end(), 0.0);
+    }
+
+    for (auto& f : filter_)
+        f.set (sampleRate_, p.lowPassHz, p.highPassHz);
+}
+
+void ReaGate::process (float* const* io, int numChannels, int numSamples)
+{
+    const int nch = std::min (numChannels, 2);
+    const size_t cap = line_[0].size();
+
+    if (cap == 0 || nch < 1)
+        return;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        double x[2] = { io[0][i], nch > 1 ? (double) io[1][i] : 0.0 };
+        double level = 0.0;
+
+        for (int c = 0; c < nch; ++c)
+        {
+            const double d = filter_[(size_t) c].run (x[c]);
+
+            if (rmsN_ > 0)
+            {
+                auto& ring = rmsRing_[(size_t) c];
+                const double sq = d * d;
+                rmsSum_[c] = std::max (0.0, rmsSum_[c] + sq - ring[rmsPos_]);
+                ring[rmsPos_] = sq;
+                level = std::max (level, std::sqrt (rmsSum_[c] / (double) rmsN_));
+            }
+            else
+            {
+                level = std::max (level, std::abs (d));
+            }
+        }
+
+        if (rmsN_ > 0 && ++rmsPos_ >= (size_t) rmsN_)
+            rmsPos_ = 0;
+
+        if (level >= (open_ ? closeLin_ : openLin_))
+        {
+            open_ = true;
+            holdLeft_ = holdSamples_;
+            gain_ = std::min (1.0, gain_ + attackStep_);
+        }
+        else if (holdLeft_ > 0)
+        {
+            --holdLeft_;
+        }
+        else
+        {
+            open_ = false;
+            gain_ = gain_ - releaseStep_ < 1.0e-9 ? 0.0 : gain_ - releaseStep_;
+        }
+
+        double delayed[2] = { x[0], x[1] };
+
+        if (look_ > 0)
+        {
+            const size_t read = (writePos_ + cap - (size_t) look_) % cap;
+
+            for (int c = 0; c < nch; ++c)
+            {
+                delayed[c] = line_[(size_t) c][read];
+                line_[(size_t) c][writePos_] = (float) x[c];
+            }
+
+            if (++writePos_ >= cap)
+                writePos_ = 0;
+        }
+
+        const double wetGain = params_.wet * (params_.invertWet ? 1.0 - gain_ : gain_);
+
+        for (int c = 0; c < nch; ++c)
+            io[c][i] = toFloat (delayed[c] * (params_.dry + wetGain));
+    }
+}
+
+//==============================================================================
+namespace
+{
+// ReaComp's default soft knee (Legacy Attack/Knee Options at its default): gain reduction K(x) for a ratio of infinity, measured as a ramp through the
+// knee. The lower half of each table, x = -W .. 0 in 1 dB steps. The upper half follows from K(x) = x + K(-x) (the measured upper half agrees to
+// 0.002 dB; the top of the measurement range cuts off the 24 dB table).
+constexpr double kneeTable3[]  = { 0.0, 0.4078, 0.8647, 1.3502 };
+constexpr double kneeTable6[]  = { 0.0, 0.3301, 0.7034, 1.1039, 1.5325, 1.9894, 2.4749 };
+constexpr double kneeTable12[] = { 0.0, 0.2001, 0.4301, 0.681, 0.9542, 1.2508, 1.572, 1.9188, 2.2921, 2.6927, 3.1212, 3.5781, 4.0637 };
+constexpr double kneeTable24[] = { 0.0, 0.0597, 0.1295, 0.2071, 0.2934, 0.3892, 0.4955, 0.6132, 0.7433, 0.8871, 1.0457, 1.2202, 1.4119, 1.6221, 1.852,
+                                   2.103, 2.3761, 2.6728, 2.994, 3.3408, 3.7141, 4.1146, 4.5432, 5.0001, 5.4856 };
+// The other knee (Legacy Attack/Knee Options 0, 0.5 or 1), only measured at W = 12: K(x) for x = -12 .. +12.
+constexpr double legacyTable12[] = { 0.0, 0.0942, 0.205, 0.3295, 0.4691, 0.6257, 0.8015, 0.9986, 1.2199, 1.4682, 1.7467, 2.0592, 2.4099, 2.8034, 3.2448,
+                                     3.7401, 4.2959, 4.9195, 5.6192, 6.4042, 7.285, 8.2733, 9.3823, 10.6265, 11.9988 };
+
+/** Monotone piecewise cubic Hermite interpolation (Fritsch-Carlson). */
+class Pchip
+{
+public:
+    Pchip (std::vector<double> x, std::vector<double> y) : x_ (std::move (x)), y_ (std::move (y)), m_ (y_.size(), 0.0)
+    {
+        const size_t n = y_.size();
+        std::vector<double> h (n - 1), delta (n - 1);
+
+        for (size_t k = 0; k + 1 < n; ++k)
+        {
+            h[k] = x_[k + 1] - x_[k];
+            delta[k] = (y_[k + 1] - y_[k]) / h[k];
+        }
+
+        m_[0] = delta[0];
+        m_[n - 1] = delta[n - 2];
+
+        for (size_t k = 1; k + 1 < n; ++k)
+        {
+            if (delta[k - 1] * delta[k] <= 0.0)
+                continue;
+
+            const double w1 = 2.0 * h[k] + h[k - 1], w2 = h[k] + 2.0 * h[k - 1];
+            m_[k] = (w1 + w2) / (w1 / delta[k - 1] + w2 / delta[k]);
+        }
+    }
+
+    double operator() (double x) const
+    {
+        x = std::clamp (x, x_.front(), x_.back());
+        size_t k = (size_t) (std::upper_bound (x_.begin(), x_.end(), x) - x_.begin());
+        k = k == 0 ? 0 : std::min (k - 1, y_.size() - 2);
+        const double h = x_[k + 1] - x_[k], t = (x - x_[k]) / h, t2 = t * t, t3 = t2 * t;
+        return (2 * t3 - 3 * t2 + 1) * y_[k] + (t3 - 2 * t2 + t) * h * m_[k] + (-2 * t3 + 3 * t2) * y_[k + 1] + (t3 - t2) * h * m_[k + 1];
+    }
+
+private:
+    std::vector<double> x_, y_, m_;
+};
+
+/** The tables hold K(-x) at x = 0 .. W (nominal knee width in the file name, in 1 dB steps, from -W up to 0). The knees were measured at W - 0.05 (the
+    measurement lands on the lower rounding edge of the displayed value): K(-x) is zero from x = W - 0.05, which is where the shape ends. The shape is
+    f(u) = K(-u * width) / K(0) for u = 0 .. 1. */
+struct KneeSet { int nominal; const double* table; };
+
+Pchip kneeShapeOf (const KneeSet& set)
+{
+    const double width = (double) set.nominal - 0.05;
+    std::vector<double> u, f;
+
+    for (int j = 0; j < set.nominal; ++j)
+    {
+        u.push_back ((double) j / width);
+        f.push_back (set.table[set.nominal - j] / set.table[set.nominal]);
+    }
+
+    u.push_back (1.0);
+    f.push_back (0.0);
+    return Pchip (std::move (u), std::move (f));
+}
+
+/** Gain at the threshold of the default knee: the mean of the linear gains at the two ends of the knee. */
+double kneeCentreDb (double width)
+{
+    return -20.0 * std::log10 (0.5 * (1.0 + std::pow (10.0, -width / 20.0)));
+}
+
+constexpr size_t kneeGrid = 513;        // K(x) / W for x / W = -1 .. 1
+} // namespace
+
+ReaKnee::ReaKnee (double kneeDb, bool legacy) : width_ (kneeDb < 0.05 ? 0.0 : std::min (kneeDb, 24.0))
+{
+    if (width_ <= 0.0)
+        return;
+
+    shape_.resize (kneeGrid);
+
+    if (legacy)
+    {
+        std::vector<double> x (25), y (25);
+
+        for (size_t k = 0; k < 25; ++k)
+        {
+            x[k] = -1.0 + (double) k / 12.0;
+            y[k] = legacyTable12[k] / 12.0;
+        }
+
+        const Pchip curve (std::move (x), std::move (y));
+
+        for (size_t g = 0; g < kneeGrid; ++g)
+            shape_[g] = curve (-1.0 + 2.0 * (double) g / (double) (kneeGrid - 1));
+    }
+    else
+    {
+        static const KneeSet sets[4] = { { 3, kneeTable3 }, { 6, kneeTable6 }, { 12, kneeTable12 }, { 24, kneeTable24 } };
+        const Pchip shapes[4] = { kneeShapeOf (sets[0]), kneeShapeOf (sets[1]), kneeShapeOf (sets[2]), kneeShapeOf (sets[3]) };
+        const auto measuredWidth = [] (size_t i) { return (double) sets[i].nominal - 0.05; };
+        size_t lo = 0;
+
+        while (lo < 2 && width_ > measuredWidth (lo + 1))
+            ++lo;
+
+        const double blend = std::clamp ((width_ - measuredWidth (lo)) / (measuredWidth (lo + 1) - measuredWidth (lo)), 0.0, 1.0);
+        const double centre = kneeCentreDb (width_);
+
+        for (size_t g = 0; g < kneeGrid; ++g)
+        {
+            const double t = -1.0 + 2.0 * (double) g / (double) (kneeGrid - 1), u = std::abs (t);
+            const double below = centre * ((1.0 - blend) * shapes[lo] (u) + blend * shapes[lo + 1] (u));       // K(-|x|)
+            shape_[g] = (t <= 0.0 ? below : u * width_ + below) / width_;                                       // K(x) = x + K(-x) above the threshold
+        }
+    }
+
+    shape_.front() = 0.0;
+    shape_.back() = 1.0;
+
+    for (size_t g = 1; g < kneeGrid; ++g)       // the gain reduction never falls with the level
+        shape_[g] = std::clamp (shape_[g], shape_[g - 1], 1.0);
+}
+
+double ReaKnee::reduction (double overDb) const noexcept
+{
+    if (width_ <= 0.0)
+        return std::max (0.0, overDb);
+
+    if (overDb <= -width_)
+        return 0.0;
+
+    if (overDb >= width_)
+        return overDb;
+
+    const double pos = (overDb / width_ + 1.0) * 0.5 * (double) (kneeGrid - 1);
+    const size_t k = std::min ((size_t) pos, kneeGrid - 2);
+    const double t = pos - (double) k;
+    return width_ * (shape_[k] * (1.0 - t) + shape_[k + 1] * t);
+}
+
+//==============================================================================
+int ReaComp::latencySamples (const ReaCompParams& p, double sampleRate)
+{
+    return (int) roundSamples (std::clamp (p.preCompMs, 0.0, maxPreCompMs) * sampleRate / 1000.0);
+}
+
+double ReaComp::makeupDb (const ReaCompParams& p)
+{
+    return p.autoMakeup ? -p.thresholdDb * (1.0 - (p.ratio >= ReaCompParams::infiniteRatio ? 0.0 : 1.0 / std::max (1.0, p.ratio))) * 0.5 : 0.0;
+}
+
+double ReaComp::staticGainDb (const ReaCompParams& p, double levelDb)
+{
+    const double slope = 1.0 - (p.ratio >= ReaCompParams::infiniteRatio ? 0.0 : 1.0 / std::max (1.0, p.ratio));
+    return -slope * ReaKnee (p.kneeDb, p.legacyKnee).reduction (levelDb - p.thresholdDb);
+}
+
+void ReaComp::prepare (double sampleRate)
+{
+    sampleRate_ = sampleRate;
+
+    for (auto& l : line_)
+        l.assign ((size_t) std::ceil (maxPreCompMs * sampleRate / 1000.0) + 8, 0.0f);
+
+    for (auto& r : rmsRing_)
+        r.assign ((size_t) std::ceil (maxRmsMs * sampleRate / 1000.0) + 8, 0.0);
+
+    minVal_.assign (line_[0].size(), 1.0);
+    minAt_.assign (line_[0].size(), 0);
+    reset();
+    setParams (params_);
+}
+
+void ReaComp::reset()
+{
+    for (auto& l : line_)
+        std::fill (l.begin(), l.end(), 0.0f);
+
+    for (auto& r : rmsRing_)
+        std::fill (r.begin(), r.end(), 0.0);
+
+    for (auto& f : filter_)
+        f.reset();
+
+    rmsSum_[0] = rmsSum_[1] = 0.0;
+    writePos_ = rmsPos_ = 0;
+    env_ = 0.0;
+    lastReductionDb_ = 0.0;
+    minHead_ = minCount_ = 0;
+    sample_ = 0;
+}
+
+void ReaComp::setParams (const ReaCompParams& p)
+{
+    if (p.kneeDb != params_.kneeDb || p.legacyKnee != params_.legacyKnee)
+        knee_ = ReaKnee (p.kneeDb, p.legacyKnee);
+
+    params_ = p;
+    const double ms = sampleRate_ / 1000.0;
+    attackCoef_ = p.attackMs <= 0.0 ? 0.0 : std::exp (-1.0 / (p.attackMs * ms));
+    releaseCoef_ = p.releaseMs <= 0.0 ? 0.0 : std::exp (-1.0 / (p.releaseMs * ms));
+    thresholdLin_ = dbToLin (p.thresholdDb);
+    slope_ = 1.0 - (p.ratio >= ReaCompParams::infiniteRatio ? 0.0 : 1.0 / std::max (1.0, p.ratio));
+    makeup_ = dbToLin (makeupDb (p));
+    look_ = std::min (latencySamples (p, sampleRate_), (int) line_[0].size() - 2);
+
+    const int n = p.rmsMs > 0.0 ? (int) std::clamp (roundSamples (std::min (p.rmsMs, maxRmsMs) * ms), 1L, (long) rmsRing_[0].size() - 1) : 0;
+
+    if (n != rmsN_)
+    {
+        rmsN_ = n;
+        rmsSum_[0] = rmsSum_[1] = 0.0;
+        rmsPos_ = 0;
+
+        for (auto& r : rmsRing_)
+            std::fill (r.begin(), r.end(), 0.0);
+    }
+
+    for (auto& f : filter_)
+        f.set (sampleRate_, p.lowPassHz, p.highPassHz);
+}
+
+void ReaComp::process (float* const* io, int numChannels, int numSamples)
+{
+    const int nch = std::min (numChannels, 2);
+    const size_t cap = line_[0].size();
+
+    if (cap == 0 || nch < 1)
+        return;
+
+    double worst = 0.0;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        double x[2] = { io[0][i], nch > 1 ? (double) io[1][i] : 0.0 };
+        double level = 0.0;
+
+        for (int c = 0; c < nch; ++c)
+        {
+            const double d = filter_[(size_t) c].run (x[c]);
+
+            if (rmsN_ > 0)
+            {
+                auto& ring = rmsRing_[(size_t) c];
+                const double sq = d * d;
+                rmsSum_[c] = std::max (0.0, rmsSum_[c] + sq - ring[rmsPos_]);
+                ring[rmsPos_] = sq;
+                level = std::max (level, std::sqrt (rmsSum_[c] / (double) rmsN_));
+            }
+            else
+            {
+                level = std::max (level, std::abs (d));
+            }
+        }
+
+        if (rmsN_ > 0 && ++rmsPos_ >= (size_t) rmsN_)
+            rmsPos_ = 0;
+
+        // the envelope starts an attack from the threshold level and releases toward the input level
+        if (level > env_)
+        {
+            env_ = std::max (env_, thresholdLin_);
+            env_ = level + attackCoef_ * (env_ - level);
+        }
+        else
+        {
+            env_ = level + releaseCoef_ * (env_ - level);
+        }
+
+        env_ = flush (env_);
+        double reduction = 0.0;
+
+        if (env_ > 1.0e-12)
+            reduction = slope_ * knee_.reduction (20.0 * std::log10 (env_) - params_.thresholdDb);
+
+        worst = std::max (worst, reduction);
+        double gain = (reduction > 0.0 ? dbToLin (-reduction) : 1.0) * makeup_;
+        double delayed[2] = { x[0], x[1] };
+
+        if (look_ > 0)
+        {
+            // the audio sample that leaves now is `look_` samples old; it gets the lowest gain of the window from its own time up to now
+            const size_t qcap = minVal_.size();
+
+            while (minCount_ > 0 && minVal_[(minHead_ + minCount_ - 1) % qcap] >= gain)
+                --minCount_;
+
+            minVal_[(minHead_ + minCount_) % qcap] = gain;
+            minAt_[(minHead_ + minCount_) % qcap] = sample_;
+            ++minCount_;
+
+            while (minAt_[minHead_] < sample_ - look_)
+            {
+                minHead_ = (minHead_ + 1) % qcap;
+                --minCount_;
+            }
+
+            gain = minVal_[minHead_];
+            const size_t read = (writePos_ + cap - (size_t) look_) % cap;
+
+            for (int c = 0; c < nch; ++c)
+            {
+                delayed[c] = line_[(size_t) c][read];
+                line_[(size_t) c][writePos_] = (float) x[c];
+            }
+
+            if (++writePos_ >= cap)
+                writePos_ = 0;
+        }
+
+        ++sample_;
+
+        for (int c = 0; c < nch; ++c)
+            io[c][i] = toFloat (delayed[c] * (params_.dry + params_.wet * gain));
+    }
+
+    lastReductionDb_ = worst;
+}
+
+//==============================================================================
+namespace
+{
+constexpr double limitMargin = 0.99839;        // 0.014 dB below 0 dBFS: where the measured limiter settles
+constexpr double slowChargeFactor = 4.0;        // slow-stage charge rate / release rate (fitted)
+}
+
+void ReaLimit::prepare (double sampleRate)
+{
+    sampleRate_ = sampleRate;
+    lookahead_ = std::max (2, (int) std::lround (0.002 * sampleRate));
+    fastSamples_ = std::max (1, (int) std::lround (0.010 * sampleRate));
+
+    for (auto& a : audio_)
+        a.assign ((size_t) lookahead_, 0.0f);
+
+    required_.assign ((size_t) lookahead_, 1.0);
+    reset();
+    setParams (params_);
+}
+
+void ReaLimit::reset()
+{
+    for (auto& a : audio_)
+        std::fill (a.begin(), a.end(), 0.0f);
+
+    std::fill (required_.begin(), required_.end(), 1.0);
+    pos_ = 0;
+    fast_ = 1.0;
+    up_ = 0.0;
+    slowDb_ = 0.0;
+    lastReductionDb_ = 0.0;
+}
+
+void ReaLimit::setParams (const ReaLimitParams& p)
+{
+    params_ = p;
+    boost_ = dbToLin (-p.thresholdDb);
+    out_ = dbToLin (p.ceilingDb);
+}
+
+void ReaLimit::process (float* const* io, int numChannels, int numSamples)
+{
+    const int nch = std::min (numChannels, 2);
+    const size_t window = (size_t) lookahead_;
+
+    if (audio_[0].empty() || nch < 1)
+        return;
+
+    const bool slowStage = params_.releaseDbPerSec < ReaLimitParams::infiniteRelease;
+    const double release = std::max (params_.releaseDbPerSec, 0.0) / sampleRate_, charge = slowChargeFactor * release;
+    double worst = 0.0;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        double peak = 0.0;
+
+        for (int c = 0; c < nch; ++c)
+        {
+            const double x = io[c][i];
+            audio_[(size_t) c][pos_] = (float) x;
+            peak = std::max (peak, std::abs (x));
+        }
+
+        peak *= boost_;
+        required_[pos_] = peak > limitMargin ? limitMargin / peak : 1.0;
+
+        if (++pos_ >= window)
+            pos_ = 0;
+
+        // the oldest entry (at pos_) is the audio sample the gain is computed for. Its gain is held under a line from 1 (window samples ahead) down to the
+        // level each of the next samples needs, and under the fast-stage release of the previous gain.
+        const double released = std::min (1.0, fast_ + up_);
+        double now = released, lowest = 1.0;
+
+        for (double r : required_)
+            lowest = std::min (lowest, r);
+
+        if (lowest < 1.0)
+            for (size_t k = 0; k < window; ++k)
+            {
+                const double r = required_[(pos_ + k) % window];
+                now = std::min (now, r + (1.0 - r) * (double) k / (double) window);
+            }
+
+        if (now < released - 1.0e-15 || now < fast_ - 1.0e-15)
+            up_ = (1.0 - now) / (double) fastSamples_;
+
+        fast_ = now;
+
+        double gain = fast_;
+
+        if (slowStage)
+        {
+            const double d = fast_ < 1.0 ? -20.0 * std::log10 (fast_) : 0.0;
+            slowDb_ = d > slowDb_ ? std::min (d, slowDb_ + charge) : std::max (0.0, slowDb_ - release);
+
+            if (slowDb_ > 0.0)
+                gain = std::min (gain, dbToLin (-slowDb_));
+        }
+
+        if (gain < 1.0)
+            worst = std::max (worst, -20.0 * std::log10 (gain));
+
+        for (int c = 0; c < nch; ++c)
+            io[c][i] = toFloat (audio_[(size_t) c][pos_] * boost_ * gain * out_);
+    }
+
+    lastReductionDb_ = worst;
+}
+
 } // namespace rovox::fx

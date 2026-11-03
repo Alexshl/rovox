@@ -15,8 +15,8 @@
   },
   {
    "name": "Release",
-   "value": 100
+   "value": 20
   }
  ],
- "description": "threshold -12, ceiling -1, release 100 ms"
+ "description": "threshold -12, ceiling -1, release 20 dB/s (the knob is a rate in dB/s)"
 }

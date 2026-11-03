@@ -20,6 +20,16 @@ void registerFadeStage (te::Engine&);
 /** Sets a fade of a clip. A plain linear ramp is the clip's own fade, any other curve goes to the stage (which is installed on the clip's track). */
 void setItemFade (te::Clip&, bool fadeIn, double lengthSeconds, const fades::FadeCurve&);
 
+/** True for the item-fade stage. It is an implementation detail of the track chain: fx.list, project.get, the track JSON and the FX indices
+    users give (fx.add index, fx.move to_index) leave it out, so the first FX users see is index 0. */
+bool isFadeStage (te::Plugin&);
+
+/** Position in the plugin list of the `visibleIndex`-th plugin that is not the fade stage (the list size when there are fewer). */
+int chainIndexOfVisible (te::PluginList&, int visibleIndex);
+
+/** Index of a plugin among the plugins that are not the fade stage. */
+int visibleIndexOf (te::PluginList&, te::Plugin&);
+
 /** The fade length of a clip in seconds, whichever of the two mechanisms holds it. */
 double itemFadeSeconds (te::Clip&, bool fadeIn);
 

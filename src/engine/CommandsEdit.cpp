@@ -245,7 +245,8 @@ void registerProjectGet (CommandRegistry& r)
                     json list = json::array();
 
                     for (auto* pl : t->pluginList.getPlugins())
-                        list.push_back (pluginInfo (*pl, false));
+                        if (! isFadeStage (*pl))
+                            list.push_back (pluginInfo (*pl, false));
 
                     fx[Project::idOf (t->state)] = list;
                 }
@@ -618,6 +619,9 @@ void registerFxExtraCommands (CommandRegistry& r)
 
             for (auto* pl : list.value()->getPlugins())
             {
+                if (isFadeStage (*pl))
+                    continue;
+
                 auto j = pluginInfo (*pl, false);
                 j["index"] = index++;
                 j["is_fader"] = dynamic_cast<te::VolumeAndPanPlugin*> (pl) != nullptr;

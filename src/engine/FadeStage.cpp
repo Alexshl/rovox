@@ -192,6 +192,38 @@ void installStage (te::AudioTrack& track)
 }
 } // namespace
 
+bool isFadeStage (te::Plugin& p)
+{
+    return dynamic_cast<RovoxItemFades*> (&p) != nullptr;
+}
+
+int chainIndexOfVisible (te::PluginList& list, int visibleIndex)
+{
+    int seen = 0;
+
+    for (int i = 0; i < list.size(); ++i)
+        if (! isFadeStage (*list[i]) && seen++ == visibleIndex)
+            return i;
+
+    return list.size();
+}
+
+int visibleIndexOf (te::PluginList& list, te::Plugin& plugin)
+{
+    int seen = 0;
+
+    for (auto* pl : list.getPlugins())
+    {
+        if (pl == &plugin)
+            return seen;
+
+        if (! isFadeStage (*pl))
+            ++seen;
+    }
+
+    return -1;
+}
+
 void registerFadeStage (te::Engine& engine)
 {
     engine.getPluginManager().createBuiltInType<RovoxItemFades>();

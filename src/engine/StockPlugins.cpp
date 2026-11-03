@@ -80,6 +80,12 @@ float parseValue (const ParamDef& d, const juce::String& s)
     return s.getFloatValue();
 }
 
+/** A gain knob in dB whose bottom end (-150) means -inf (silence). */
+double gainOrSilence (double db)
+{
+    return db <= -149.0 ? 0.0 : std::pow (10.0, db / 20.0);
+}
+
 //==============================================================================
 /** Base of the stock effects: parameters kept in the plugin state (so that they are saved and undoable), stereo in / out. */
 class StockPlugin : public te::Plugin
@@ -286,38 +292,119 @@ public:
     double getLatencySeconds() override             { return (double) latencySamples() / sampleRate; }
 
 private:
+    // parameter order: the Rovox compressor (10), then the ReaComp mode: reaper_compat, fx_wet, fx_delta, dry, wet, lowpass, hipass, legacy knee
+    static constexpr size_t compatFlag = 10, fxWet = 11, fxDelta = 12, reaDry = 13, reaWet = 14, reaLowPass = 15, reaHighPass = 16, reaLegacy = 17;
+    static constexpr double nativeMaxLookaheadMs = 20.0, nativeMaxRmsMs = 200.0;
+
     static std::vector<ParamDef> definitions()
     {
-        return { num ("threshold", "Threshold", -60.0f, 0.0f, -18.0f, "dB", 1),
+        return { num ("threshold", "Threshold", -100.0f, 6.0f, -18.0f, "dB", 1, -30.0f),
                  num ("ratio", "Ratio", 1.0f, 100.0f, 4.0f, ":1", 2, 6.0f),
-                 num ("attack", "Attack", 0.01f, 500.0f, 10.0f, "ms", 2, 30.0f),
-                 num ("release", "Release", 1.0f, 5000.0f, 100.0f, "ms", 1, 300.0f),
+                 num ("attack", "Attack", 0.0f, 500.0f, 10.0f, "ms", 2, 30.0f),
+                 num ("release", "Release", 0.0f, 5000.0f, 100.0f, "ms", 1, 300.0f),
                  num ("knee", "Knee", 0.0f, 30.0f, 6.0f, "dB", 1),
-                 num ("lookahead", "Pre-comp (lookahead)", 0.0f, 20.0f, 0.0f, "ms", 2),
+                 num ("lookahead", "Pre-comp (lookahead)", 0.0f, 250.0f, 0.0f, "ms", 2, 20.0f),
                  num ("makeup", "Makeup gain", -12.0f, 36.0f, 0.0f, "dB", 1),
                  toggle ("auto_makeup", "Auto makeup", false),
-                 num ("rms", "RMS size (0 = peak)", 0.0f, 200.0f, 0.0f, "ms", 1, 20.0f),
-                 num ("mix", "Wet (parallel mix)", 0.0f, 100.0f, 100.0f, "%", 0) };
+                 num ("rms", "RMS size (0 = peak)", 0.0f, 1000.0f, 0.0f, "ms", 1, 20.0f),
+                 num ("mix", "Wet (parallel mix)", 0.0f, 100.0f, 100.0f, "%", 0),
+                 toggle ("reaper_compat", "ReaComp mode", false),       // imported ReaComp: ReaComp's detector, envelope, knee and mix (src/core/StockFx.h)
+                 num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
+                 toggle ("fx_delta", "FX delta (processed - input)", false),
+                 num ("dry", "Dry (ReaComp mode)", -150.0f, 6.0f, -150.0f, "dB", 1),
+                 num ("wet", "Wet (ReaComp mode)", -150.0f, 6.0f, 0.0f, "dB", 1),
+                 num ("lowpass", "Detector low-pass (ReaComp mode)", 0.0f, 20000.0f, 20000.0f, "Hz", 0),
+                 num ("hipass", "Detector high-pass (ReaComp mode)", 0.0f, 20000.0f, 0.0f, "Hz", 0),
+                 num ("legacy_knee", "Legacy attack/knee option (ReaComp mode)", 0.0f, 1.0f, 0.25f, "", 2) };
     }
+
+    bool compat() const                         { return flag (compatFlag); }
 
     fx::CompParams readParams() const
     {
-        return { value (0), value (1), value (2), value (3), value (4), value (5), value (6), flag (7), value (8), value (9) / 100.0 };
+        return { value (0), value (1), value (2), value (3), value (4), std::min ((double) value (5), nativeMaxLookaheadMs), value (6), flag (7),
+                 std::min ((double) value (8), nativeMaxRmsMs), value (9) / 100.0 };
     }
 
-    void prepareDsp (double sr) override        { sr_ = sr; comp_.prepare (sr); comp_.setParams (readParams()); }
-    void resetDsp() override                    { comp_.reset(); }
-    int latencySamples() const override         { return (int) std::lround (value (5) * 0.001 * sampleRate); }
+    fx::ReaCompParams readReaParams() const
+    {
+        fx::ReaCompParams p;
+        p.thresholdDb = value (0);
+        p.ratio = value (1);
+        p.attackMs = value (2);
+        p.releaseMs = value (3);
+        p.preCompMs = value (5);
+        p.lowPassHz = value (reaLowPass);
+        p.highPassHz = value (reaHighPass);
+        p.rmsMs = value (8);
+        p.kneeDb = value (4);
+        p.legacyKnee = std::abs (value (reaLegacy) - 0.25f) > 1.0e-3f;
+        p.autoMakeup = flag (7);
+        p.dry = gainOrSilence (value (reaDry));
+        p.wet = gainOrSilence (value (reaWet));
+        return p;
+    }
+
+    void prepareDsp (double sr) override
+    {
+        sr_ = sr;
+        comp_.prepare (sr);
+        comp_.setParams (readParams());
+
+        if (compat())
+            prepareRea();
+    }
+
+    void prepareRea()
+    {
+        reaComp_.prepare (sr_);
+        reaComp_.setParams (readReaParams());
+        reaReady_ = true;
+    }
+
+    void resetDsp() override                    { comp_.reset(); if (reaReady_) reaComp_.reset(); }
+
+    int latencySamples() const override
+    {
+        if (compat())
+            return fx::ReaComp::latencySamples (readReaParams(), sampleRate);
+
+        return (int) std::lround (std::min ((double) value (5), nativeMaxLookaheadMs) * 0.001 * sampleRate);
+    }
+
     json meters() const override                { return { { "gain_reduction_db", (double) grDb_.load() } }; }
 
     void run (float* const* io, int n, int count, const te::PluginRenderContext&) override
     {
+        if (compat())
+        {
+            if (! reaReady_)
+                prepareRea();
+
+            const double wet = std::clamp ((double) value (fxWet) / 100.0, 0.0, 1.0);
+            const bool delta = flag (fxDelta), mix = delta || wet < 1.0;
+
+            if (mix)
+                saveDry (io, n, count);
+
+            reaComp_.setParams (readReaParams());
+            reaComp_.process (io, n, count);
+            grDb_ = (float) reaComp_.lastGainReductionDb();
+
+            if (mix)
+                mixDry (io, n, count, wet, delta);
+
+            return;
+        }
+
         comp_.setParams (readParams());
         comp_.process (io, n, count);
         grDb_ = (float) comp_.lastGainReductionDb();
     }
 
     fx::Comp comp_;
+    fx::ReaComp reaComp_;
+    bool reaReady_ = false;
     std::atomic<float> grDb_ { 0.0f };
 };
 
@@ -331,29 +418,105 @@ public:
 
     juce::String getName() const override           { return "Rovox Gate"; }
     juce::String getPluginType() override           { return xmlTypeName; }
+    double getLatencySeconds() override             { return (double) latencySamples() / sampleRate; }
 
 private:
+    // parameter order: the Rovox gate (6), then the ReaGate mode: reaper_compat, fx_wet, fx_delta, pre-open, RMS size, lowpass, hipass, dry, wet,
+    // invert wet, hysteresis
+    static constexpr size_t compatFlag = 6, fxWet = 7, fxDelta = 8, reaPreOpen = 9, reaRms = 10, reaLowPass = 11, reaHighPass = 12, reaDry = 13, reaWet = 14,
+                            reaInvert = 15, reaHysteresis = 16;
+
     static std::vector<ParamDef> definitions()
     {
-        return { num ("threshold", "Threshold", -80.0f, 0.0f, -40.0f, "dB", 1),
-                 num ("attack", "Attack", 0.01f, 500.0f, 1.0f, "ms", 2, 10.0f),
+        return { num ("threshold", "Threshold", -100.0f, 6.0f, -40.0f, "dB", 1, -40.0f),
+                 num ("attack", "Attack", 0.0f, 500.0f, 1.0f, "ms", 2, 10.0f),
                  num ("hold", "Hold", 0.0f, 2000.0f, 50.0f, "ms", 1, 100.0f),
-                 num ("release", "Release", 1.0f, 5000.0f, 100.0f, "ms", 1, 300.0f),
+                 num ("release", "Release", 0.0f, 5000.0f, 100.0f, "ms", 1, 300.0f),
                  num ("hysteresis", "Hysteresis", 0.0f, 24.0f, 3.0f, "dB", 1),
-                 num ("range", "Range (closed attenuation)", -100.0f, 0.0f, -80.0f, "dB", 1) };
+                 num ("range", "Range (closed attenuation)", -100.0f, 0.0f, -80.0f, "dB", 1),
+                 toggle ("reaper_compat", "ReaGate mode", false),       // imported ReaGate: ReaGate's detector and gain trajectory (src/core/StockFx.h)
+                 num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
+                 toggle ("fx_delta", "FX delta (processed - input)", false),
+                 num ("pre_open", "Pre-open (ReaGate mode)", 0.0f, 250.0f, 0.0f, "ms", 1, 20.0f),
+                 num ("rms", "RMS size (ReaGate mode, 0 = peak)", 0.0f, 1000.0f, 0.0f, "ms", 1, 20.0f),
+                 num ("lowpass", "Detector low-pass (ReaGate mode)", 0.0f, 20000.0f, 20000.0f, "Hz", 0),
+                 num ("hipass", "Detector high-pass (ReaGate mode)", 0.0f, 20000.0f, 0.0f, "Hz", 0),
+                 num ("dry", "Dry (ReaGate mode)", -150.0f, 6.0f, -150.0f, "dB", 1),
+                 num ("wet", "Wet (ReaGate mode)", -150.0f, 6.0f, 0.0f, "dB", 1),
+                 toggle ("invert_wet", "Invert wet (ReaGate mode)", false),
+                 num ("rea_hysteresis", "Hysteresis (ReaGate mode)", -100.0f, 24.0f, 0.0f, "dB", 1, 0.0f) };
     }
+
+    bool compat() const                         { return flag (compatFlag); }
 
     fx::GateParams readParams() const
     {
         return { value (0), value (1), value (2), value (3), value (4), value (5) };
     }
 
-    void prepareDsp (double sr) override        { sr_ = sr; gate_.prepare (sr); gate_.setParams (readParams()); }
-    void resetDsp() override                    { gate_.reset(); }
+    fx::ReaGateParams readReaParams() const
+    {
+        fx::ReaGateParams p;
+        p.thresholdDb = value (0);
+        p.attackMs = value (1);
+        p.holdMs = value (2);
+        p.releaseMs = value (3);
+        p.preOpenMs = value (reaPreOpen);
+        p.lowPassHz = value (reaLowPass);
+        p.highPassHz = value (reaHighPass);
+        p.hysteresisDb = value (reaHysteresis);
+        p.rmsMs = value (reaRms);
+        p.dry = gainOrSilence (value (reaDry));
+        p.wet = gainOrSilence (value (reaWet));
+        p.invertWet = flag (reaInvert);
+        return p;
+    }
+
+    void prepareDsp (double sr) override
+    {
+        sr_ = sr;
+        gate_.prepare (sr);
+        gate_.setParams (readParams());
+
+        if (compat())
+            prepareRea();
+    }
+
+    void prepareRea()
+    {
+        reaGate_.prepare (sr_);
+        reaGate_.setParams (readReaParams());
+        reaReady_ = true;
+    }
+
+    void resetDsp() override                    { gate_.reset(); if (reaReady_) reaGate_.reset(); }
+    int latencySamples() const override         { return compat() ? fx::ReaGate::latencySamples (readReaParams(), sampleRate) : 0; }
     json meters() const override                { return { { "gate_gain_db", (double) gainDb_.load() }, { "open", open_.load() } }; }
 
     void run (float* const* io, int n, int count, const te::PluginRenderContext&) override
     {
+        if (compat())
+        {
+            if (! reaReady_)
+                prepareRea();
+
+            const double wet = std::clamp ((double) value (fxWet) / 100.0, 0.0, 1.0);
+            const bool delta = flag (fxDelta), mix = delta || wet < 1.0;
+
+            if (mix)
+                saveDry (io, n, count);
+
+            reaGate_.setParams (readReaParams());
+            reaGate_.process (io, n, count);
+            gainDb_ = (float) (20.0 * std::log10 (std::max (reaGate_.lastGain(), 1.0e-6)));
+            open_ = reaGate_.lastGain() > 0.5;
+
+            if (mix)
+                mixDry (io, n, count, wet, delta);
+
+            return;
+        }
+
         gate_.setParams (readParams());
         gate_.process (io, n, count);
         gainDb_ = (float) gate_.gainDb();
@@ -361,6 +524,8 @@ private:
     }
 
     fx::Gate gate_;
+    fx::ReaGate reaGate_;
+    bool reaReady_ = false;
     std::atomic<float> gainDb_ { 0.0f };
     std::atomic<bool> open_ { false };
 };
@@ -378,26 +543,88 @@ public:
     double getLatencySeconds() override             { return (double) latencySamples() / sampleRate; }
 
 private:
+    // parameter order: the Rovox limiter (3), then the ReaLimit mode: reaper_compat, fx_wet, fx_delta, threshold, release rate (dB/s)
+    static constexpr size_t compatFlag = 3, fxWet = 4, fxDelta = 5, reaThreshold = 6, reaRelease = 7;
+
     static std::vector<ParamDef> definitions()
     {
         return { num ("input_gain", "Input gain", 0.0f, 24.0f, 0.0f, "dB", 1),
-                 num ("ceiling", "Ceiling (true peak)", -20.0f, 0.0f, -1.0f, "dBTP", 2),
-                 num ("release", "Release", 1.0f, 2000.0f, 80.0f, "ms", 1, 100.0f) };
+                 num ("ceiling", "Ceiling (true peak)", -24.0f, 0.0f, -1.0f, "dBTP", 2),
+                 num ("release", "Release", 1.0f, 2000.0f, 80.0f, "ms", 1, 100.0f),
+                 toggle ("reaper_compat", "ReaLimit mode", false),      // imported ReaLimit: sample-peak limiter with ReaLimit's release (src/core/StockFx.h)
+                 num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
+                 toggle ("fx_delta", "FX delta (processed - input)", false),
+                 num ("threshold", "Threshold (ReaLimit mode)", -60.0f, 12.0f, 0.0f, "dB", 2),
+                 num ("release_rate", "Release (ReaLimit mode, 1000 = instant)", 1.0f, 1000.0f, 15.0f, "dB/s", 1, 20.0f) };
     }
 
-    void prepareDsp (double sr) override        { sr_ = sr; limiter_.prepare (sr, 2); limiter_.setParams (value (0), value (1), value (2), 0.1); }
-    void resetDsp() override                    { limiter_.reset(); }
-    int latencySamples() const override         { return limiter_.latencySamples(); }
+    bool compat() const                         { return flag (compatFlag); }
+
+    fx::ReaLimitParams readReaParams() const
+    {
+        return { value (reaThreshold), value (1), value (reaRelease) };
+    }
+
+    void prepareDsp (double sr) override
+    {
+        sr_ = sr;
+        limiter_.prepare (sr, 2);
+        limiter_.setParams (value (0), value (1), value (2), 0.1);
+
+        if (compat())
+            prepareRea();
+    }
+
+    void prepareRea()
+    {
+        reaLimit_.prepare (sr_);
+        reaLimit_.setParams (readReaParams());
+        reaReady_ = true;
+    }
+
+    void resetDsp() override                    { limiter_.reset(); if (reaReady_) reaLimit_.reset(); }
+
+    int latencySamples() const override
+    {
+        if (! compat())
+            return limiter_.latencySamples();
+
+        return reaReady_ ? reaLimit_.latencySamples() : std::max (0, (int) std::lround (0.002 * sampleRate) - 1);
+    }
+
     json meters() const override                { return { { "gain_reduction_db", (double) grDb_.load() } }; }
 
     void run (float* const* io, int n, int count, const te::PluginRenderContext&) override
     {
+        if (compat())
+        {
+            if (! reaReady_)
+                prepareRea();
+
+            const double wet = std::clamp ((double) value (fxWet) / 100.0, 0.0, 1.0);
+            const bool delta = flag (fxDelta), mix = delta || wet < 1.0;
+
+            if (mix)
+                saveDry (io, n, count);
+
+            reaLimit_.setParams (readReaParams());
+            reaLimit_.process (io, n, count);
+            grDb_ = (float) reaLimit_.lastGainReductionDb();
+
+            if (mix)
+                mixDry (io, n, count, wet, delta);
+
+            return;
+        }
+
         limiter_.setParams (value (0), value (1), value (2), 0.1);
         limiter_.process (io, n, count);
         grDb_ = (float) limiter_.lastGainReductionDb();
     }
 
     StreamingLimiter limiter_;
+    fx::ReaLimit reaLimit_;
+    bool reaReady_ = false;
     std::atomic<float> grDb_ { 0.0f };
 };
 

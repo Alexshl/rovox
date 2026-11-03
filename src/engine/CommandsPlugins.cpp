@@ -4,6 +4,7 @@
 // M4 commands (tasks 400, 410, 420): plugin.catalog / rescan / probe / tag / unblacklist, fx.presets / preset_load / preset_save / move.
 #include "Command.h"
 
+#include "FadeStage.h"
 #include "JsfxPlugin.h"
 #include "PluginCatalog.h"
 #include "ParamsAction.h"
@@ -271,7 +272,7 @@ void registerPluginCommands (CommandRegistry& r)
                 return makeError (errc::preconditionFailed, "the plugin is not in a chain");
 
             const int count = list->size();
-            const int to = std::min (params["to_index"].get<int>(), count - 1);
+            const int to = std::min (chainIndexOfVisible (*list, params["to_index"].get<int>()), count - 1);     // the hidden fade stage is not counted
             auto* target = (*list)[to];
             const int from = list->indexOf (plugin);
 
@@ -284,9 +285,10 @@ void registerPluginCommands (CommandRegistry& r)
             json chain = json::array();
 
             for (auto* pl : list->getPlugins())
-                chain.push_back (Project::idOf (pl->state));
+                if (! isFadeStage (*pl))
+                    chain.push_back (Project::idOf (pl->state));
 
-            return json { { "plugin_id", params["plugin_id"] }, { "index", list->indexOf (plugin) }, { "chain", chain } };
+            return json { { "plugin_id", params["plugin_id"] }, { "index", visibleIndexOf (*list, *plugin) }, { "chain", chain } };
         }));
 }
 

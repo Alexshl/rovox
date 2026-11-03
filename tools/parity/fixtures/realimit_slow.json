@@ -15,8 +15,8 @@
   },
   {
    "name": "Release",
-   "value": 150
+   "value": 6
   }
  ],
- "description": "threshold -18, ceiling -0.5, release 500 ms on pink noise"
+ "description": "threshold -18, ceiling -0.5, release 6 dB/s (the knob is a rate in dB/s: 500 ms is not representable) on pink noise"
 }

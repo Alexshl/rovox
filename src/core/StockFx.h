@@ -7,6 +7,7 @@
 // All process() functions work in place on up to two channels.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <vector>
@@ -235,6 +236,165 @@ private:
     std::array<std::array<Loop, 2>, ReaDelayParams::maxTaps> loop_;
     std::array<long, ReaDelayParams::maxTaps> delay_ {};
     size_t writePos_ = 0;
+};
+
+//==============================================================================
+/** Detector filter of ReaComp / ReaGate: a 12 dB/oct low-pass and high-pass (RBJ, Q = 1, 0 dB at the corner). The low-pass is off at 20 kHz and
+    above, the high-pass at 0.5 Hz and below. */
+class DetectorFilter
+{
+public:
+    void set (double sampleRate, double lowPassHz, double highPassHz);
+    void reset() noexcept;
+    double run (double x) noexcept;
+
+private:
+    struct Biquad { double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0; double run (double x) noexcept; };
+    Biquad lp_, hp_;
+    bool lpOn_ = false, hpOn_ = false;
+};
+
+//==============================================================================
+/** ReaGate behaviour. Amplitudes (dry, wet) are linear. The closed gate is exactly silent. The timing offset D is 24 samples at 48 kHz (measured at
+    48 kHz only); at other rates it is taken as the same time, 0.5 ms. Attack: the gain rises by 1 / (attack - D) per sample. Hold (after the level
+    fell below the close threshold): max(hold - D, attack - D - 1) samples at gain 1. Release: the gain falls by 1 / (release - D) per sample. Pre-open
+    delays the audio by (pre-open - D) samples (reported as latency) while the detector and the gain run on the undelayed input, so the gate opens
+    that much before the audio; the hold is lengthened by the same amount so that closing stays on the audio. */
+struct ReaGateParams
+{
+    double thresholdDb = -150.0, attackMs = 3.0, releaseMs = 100.0, preOpenMs = 0.0, holdMs = 0.0, lowPassHz = 20000.0, highPassHz = 0.0;
+    double hysteresisDb = 0.0;      // the gate closes below threshold + hysteresis
+    double rmsMs = 0.0;             // 0 = peak detector
+    double dry = 0.0, wet = 1.0;    // amplitudes
+    bool invertWet = false;         // wet passes while the gate is closed
+    bool operator== (const ReaGateParams&) const = default;
+};
+
+class ReaGate
+{
+public:
+    static constexpr double maxPreOpenMs = 250.0, maxRmsMs = 1000.0;
+
+    void prepare (double sampleRate);       // allocates
+    void reset();
+    void setParams (const ReaGateParams&);
+    int latencySamples() const noexcept     { return look_; }
+    static int latencySamples (const ReaGateParams&, double sampleRate);
+
+    void process (float* const* io, int numChannels, int numSamples);
+    double lastGain() const noexcept        { return gain_; }
+
+private:
+    double sampleRate_ = 44100.0, gain_ = 0.0, openLin_ = 0.0, closeLin_ = 0.0, attackStep_ = 1.0, releaseStep_ = 1.0, rmsSum_[2] = { 0.0, 0.0 };
+    long holdSamples_ = 0, holdLeft_ = 0;
+    int look_ = 0, rmsN_ = 0;
+    size_t writePos_ = 0, rmsPos_ = 0;
+    bool open_ = false;
+    ReaGateParams params_;
+    std::array<DetectorFilter, 2> filter_;
+    std::array<std::vector<float>, 2> line_;
+    std::array<std::vector<double>, 2> rmsRing_;
+};
+
+//==============================================================================
+/** Soft knee of ReaComp: the gain reduction (dB, for a ratio of infinity) at `over` dB above the threshold, K(over) = 0 below -W and over above +W.
+    Built from the measured knee tables (W = 3, 6, 12, 24 dB). The default knee has K(x) = x + K(-x); K(0) is the mean-of-linear-gains law
+    -20 log10 ((1 + 10^(-W/20)) / 2) (it matches the measurements to 0.002 dB), and the shape K(-x) / K(0) against x / W is interpolated from the
+    tables (monotone cubic in x, linear in W between the tables; below 3 dB the 3 dB shape, above 24 dB the 24 dB shape). The "legacy" knee
+    (Legacy Attack/Knee Options other than the default) only has a 12 dB table; its normalised shape is scaled to every W. */
+class ReaKnee
+{
+public:
+    ReaKnee (double kneeDb, bool legacy);
+    double reduction (double overDb) const noexcept;
+    double kneeDb() const noexcept          { return width_; }
+
+private:
+    double width_ = 0.0;
+    std::vector<double> shape_;             // K(x) / W for x / W = -1 .. 1, evenly spaced
+};
+
+/** ReaComp behaviour: hard or soft knee, peak or boxcar-RMS detector (linked channels: the larger one), detector low-pass / high-pass, the
+    attack / release envelope of the specification (see process()), pre-comp as a latency-compensated lookahead (the gain reduction starts that much before the loud audio, its release stays on the audio), make-up
+    and dry / wet sum. */
+struct ReaCompParams
+{
+    double thresholdDb = 0.0, ratio = 4.0, attackMs = 3.0, releaseMs = 100.0, preCompMs = 0.0, lowPassHz = 20000.0, highPassHz = 0.0;
+    double rmsMs = 5.0, kneeDb = 0.0;
+    bool legacyKnee = false;        // Legacy Attack/Knee Options other than the default 0.25
+    bool autoMakeup = false;        // make-up gain -threshold * (1 - 1 / ratio) / 2
+    double dry = 0.0, wet = 1.0;    // amplitudes
+    bool operator== (const ReaCompParams&) const = default;
+    static constexpr double infiniteRatio = 99.0;       // the ratio knob shows "inf" from here
+};
+
+class ReaComp
+{
+public:
+    static constexpr double maxPreCompMs = 250.0, maxRmsMs = 1000.0;
+
+    void prepare (double sampleRate);       // allocates
+    void reset();
+    void setParams (const ReaCompParams&);
+    int latencySamples() const noexcept     { return look_; }
+    static int latencySamples (const ReaCompParams&, double sampleRate);
+
+    /** Gain (dB) of the static curve for a detector level, without make-up. */
+    static double staticGainDb (const ReaCompParams&, double levelDb);
+    static double makeupDb (const ReaCompParams&);
+
+    void process (float* const* io, int numChannels, int numSamples);
+    double lastGainReductionDb() const noexcept { return lastReductionDb_; }
+
+private:
+    double sampleRate_ = 44100.0, attackCoef_ = 0.0, releaseCoef_ = 0.0, env_ = 0.0, thresholdLin_ = 1.0, slope_ = 1.0, makeup_ = 0.0;
+    double lastReductionDb_ = 0.0, rmsSum_[2] = { 0.0, 0.0 };
+    int look_ = 0, rmsN_ = 0;
+    size_t writePos_ = 0, rmsPos_ = 0;
+    ReaCompParams params_;
+    ReaKnee knee_ { 0.0, false };
+    std::array<DetectorFilter, 2> filter_;
+    std::array<std::vector<float>, 2> line_;
+    std::array<std::vector<double>, 2> rmsRing_;
+    // sliding minimum of the gain over the pre-comp window (monotonic queue in a ring): the gain falls early but is released on the audio
+    std::vector<double> minVal_;
+    std::vector<long long> minAt_;
+    size_t minHead_ = 0, minCount_ = 0;
+    long long sample_ = 0;
+};
+
+//==============================================================================
+/** ReaLimit behaviour: the input is boosted by -threshold, limited so that sample peaks stay just below 0 dBFS (0.014 dB below), then scaled by the
+    ceiling. Before every peak the gain is held under a line that falls linearly (in amplitude) over 2 ms to the level the peak needs (lookahead,
+    reported as latency), after it the gain returns linearly over 10 ms (fast stage). A second, slow stage accumulates the gain reduction while the fast stage limits and releases at `releaseDbPerSec` dB per second;
+    the applied gain is the lower of the two stages. The charge rate of the slow stage (4 x the release rate) is a fit to the measurements, the
+    law itself is not known. */
+struct ReaLimitParams
+{
+    double thresholdDb = 0.0, ceilingDb = 0.0;
+    double releaseDbPerSec = 15.0;      // >= infiniteRelease: no slow stage
+    static constexpr double infiniteRelease = 1000.0;
+    bool operator== (const ReaLimitParams&) const = default;
+};
+
+class ReaLimit
+{
+public:
+    void prepare (double sampleRate);       // allocates
+    void reset();
+    void setParams (const ReaLimitParams&);
+    int latencySamples() const noexcept     { return std::max (0, lookahead_ - 1); }
+
+    void process (float* const* io, int numChannels, int numSamples);
+    double lastGainReductionDb() const noexcept { return lastReductionDb_; }
+
+private:
+    double sampleRate_ = 44100.0, boost_ = 1.0, out_ = 1.0, fast_ = 1.0, up_ = 0.0, slowDb_ = 0.0, lastReductionDb_ = 0.0;
+    int lookahead_ = 1, fastSamples_ = 1;
+    size_t pos_ = 0;
+    ReaLimitParams params_;
+    std::array<std::vector<float>, 2> audio_;
+    std::vector<double> required_;
 };
 
 //==============================================================================

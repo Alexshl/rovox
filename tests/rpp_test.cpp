@@ -205,11 +205,14 @@ ROVOX_TEST (rpp, synthetic_project_maps_to_tracks_items_markers_tempo_and_sends)
     // the Rovox effects sit in the chain before the fader and keep their original chunk
     {
         auto fx = env.ok (id, "fx.list", { { "target", Project::idOf (audio[0]->state) } })["fx"];
-        REQUIRE (fx.size() >= 4);
-        CHECK (fx[0]["name"] == "Rovox Item Fades");      // the item has REAPER's default fade (a curve, not the engine's linear ramp): the stage applies it before the FX
-        CHECK (fx[1]["name"] == "Rovox Comp");
-        CHECK (fx[2]["name"] == "Rovox EQ");
-        CHECK (fx[3]["is_fader"] == true);
+        REQUIRE (fx.size() >= 3);
+        // the item has REAPER's default fade (a curve, not the engine's linear ramp): a hidden stage applies it before the FX, it is not listed
+        CHECK (fx[0]["name"] == "Rovox Comp");
+        CHECK (fx[1]["name"] == "Rovox EQ");
+        CHECK (fx[2]["is_fader"] == true);
+        for (auto& f : fx)
+            CHECK (f["type"] != "rovoxfades");
+        CHECK (fx[0]["index"] == 0);
         auto* mapped = p.findPlugin (rep["mapped"][1]["plugin_id"].get<std::string>());
         REQUIRE (mapped != nullptr);
         CHECK (toStd (mapped->state["rovox:reaper_fx"].toString()).find ("reaeq.vst.dylib") != std::string::npos);
@@ -555,7 +558,8 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
 
     CHECK (clamped);
 
-    // ReaComp: unit-less ratio 3.00, release 250 (ms), pre-comp, wet -3 dB / dry -inf = makeup -3 dB at 100 % wet; Auto Release is listed as untranslated
+    // ReaComp (detector, envelope and knee as ReaComp does): unit-less ratio 3.00, release 250 (ms), pre-comp, own wet -3 dB / dry -inf; Auto Release is
+    // listed as untranslated
     CHECK_NEAR (valueOf (env, id, comp, "threshold"), -24.5, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "ratio"), 3.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "attack"), 15.0, 1e-3);
@@ -563,24 +567,29 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK_NEAR (valueOf (env, id, comp, "knee"), 4.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "lookahead"), 2.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "rms"), 10.0, 1e-3);
-    CHECK_NEAR (valueOf (env, id, comp, "makeup"), -3.0, 1e-3);
-    CHECK_NEAR (valueOf (env, id, comp, "mix"), 100.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "wet"), -3.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, comp, "dry"), -150.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, comp, "auto_makeup"), 0.0, 1e-6);
+    CHECK_NEAR (valueOf (env, id, comp, "legacy_knee"), 0.25, 1e-6);
+    CHECK_NEAR (valueOf (env, id, comp, "reaper_compat"), 1.0, 1e-6);
     REQUIRE (comp["untranslated"].size() == 1);          // only the auto release: open filters, off flags and reserved slots are no settings
     CHECK (comp["untranslated"][0]["param"] == "Auto Release");
 
-    // ReaLimit (matched by track index and order, the GUID differs): input gain = ceiling - threshold
-    CHECK_NEAR (valueOf (env, id, limit, "input_gain"), 5.7, 1e-3);
+    // ReaLimit (matched by track index and order, the GUID differs): threshold boosts, the release is the slow-stage rate in dB per second
+    CHECK_NEAR (valueOf (env, id, limit, "threshold"), -6.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, limit, "ceiling"), -0.3, 1e-3);
-    CHECK_NEAR (valueOf (env, id, limit, "release"), 120.0, 1e-2);
+    CHECK_NEAR (valueOf (env, id, limit, "release_rate"), 120.0, 1e-2);
+    CHECK_NEAR (valueOf (env, id, limit, "reaper_compat"), 1.0, 1e-6);
 
-    // ReaGate; its dry level is the attenuation while closed
+    // ReaGate (gain trajectory as ReaGate does); its dry level is a dry gain
     CHECK_NEAR (valueOf (env, id, gate, "threshold"), -35.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, gate, "attack"), 2.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, gate, "hold"), 40.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, gate, "release"), 150.0, 1e-2);
-    CHECK_NEAR (valueOf (env, id, gate, "hysteresis"), 4.0, 1e-3);
-    CHECK_NEAR (valueOf (env, id, gate, "range"), -24.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "rea_hysteresis"), 4.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "dry"), -24.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "wet"), 0.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, gate, "reaper_compat"), 1.0, 1e-6);
     CHECK (gate["untranslated"].empty());
 
     // ReaVerbate (also bypassed in the RPP)
@@ -624,23 +633,23 @@ ROVOX_TEST (rpp, generic_block_and_units_of_the_real_reaper_shape)
         return parseReaperFxEntry ({ { "name", "x" }, { "params", withGeneric (params, first, bypass, wet) } });
     };
 
-    // ReaComp: dry -inf / wet +0 dB / FX wet 50 % -> mix 50 %; the own Wet is the dB one
+    // ReaComp: dry -inf / wet +0 dB / FX wet 50 %: the FX-wide Wet is the Rovox fx_wet, the own Wet is the dB one
     auto r = translateReaperFx ("comp", entry ({ p (0, "Threshold", 0, "-20.0"), p (1, "Dry", 0, "-inf"), p (2, "Wet", 0, "+0.0") }, 3, "bypassed", "50"));
     CHECK (r.bypassed);
     CHECK (r.untranslated.empty());
-    double mix = -1.0, makeup = -1.0;
+    double fxWet = -1.0, wet = -999.0;
 
     for (auto& t : r.translated)
     {
-        if (t.to == "mix")      mix = t.value;
-        if (t.to == "makeup")   makeup = t.value;
+        if (t.to == "fx_wet")   fxWet = t.value;
+        if (t.to == "wet")      wet = t.value;
     }
 
-    CHECK_NEAR (mix, 50.0, 1e-6);
-    CHECK_NEAR (makeup, 0.0, 1e-6);
+    CHECK_NEAR (fxWet, 50.0, 1e-6);
+    CHECK_NEAR (wet, 0.0, 1e-6);
 
     // an effect without a mix parameter lists an FX wet other than 100 % as untranslated; a delta solo too
-    auto g = translateReaperFx ("gate", entry ({ p (0, "Threshold", 0, "-30.0") }, 1, "normal", "40"));
+    auto g = translateReaperFx ("verb", entry ({ p (0, "Room size", 0, "50") }, 1, "normal", "40"));
     CHECK (! g.bypassed);
     REQUIRE (g.untranslated.size() == 1);
     CHECK (g.untranslated[0].from == "Wet");

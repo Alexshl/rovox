@@ -15,8 +15,8 @@
   },
   {
    "name": "Release",
-   "value": 10
+   "value": 40
   }
  ],
- "description": "threshold -6, ceiling -3, release 10 ms on a sweep"
+ "description": "threshold -6, ceiling -3, release 40 dB/s (fast end of the knob, the top of the range is 46) on a sweep"
 }
