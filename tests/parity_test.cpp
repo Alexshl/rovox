@@ -2003,3 +2003,304 @@ ROVOX_TEST (parity, the_fade_stage_is_hidden_from_fx_lists_and_indices_but_still
     CHECK_NEAR (ch[0][(size_t) (0.75 * 0.25 * rate)], 0.5 * std::pow (0.75, 4.0), 5.0e-3);       // shape 4 (curve -1): t^4 at three quarters of the 0.25 s fade
     CHECK_NEAR (ch[0][30000], 0.5, 1.0e-2);
 }
+
+//------------------------------------------------------------------------------ ReaVerbate (spec-reaverbate.md v2)
+namespace
+{
+struct VerbCase
+{
+    const char* name;
+    double fs;
+    int channel;                                    // the input channel that carries the impulse
+    double n[8];                                    // wet, dry, room, damp, width, delay, lowpass, hipass (knob positions)
+    std::vector<std::pair<int, double>> taps;       // first output samples above 1e-7 (index, value) of the impulse channel
+    std::vector<std::pair<int, double>> spots;      // samples of the left output
+};
+
+// measured: unit impulse at 1.0 on one input channel, REAPER 7.81 renders (float32)
+const std::vector<VerbCase> verbCases {
+    { "verb3_48000_rs30_d0_L", 48000, 0, { 0.497130051, 0, 0, 0, 1, 0, 1, 0 }, { { 1214, 0.0149139017 }, { 1293, 0.0149139017 }, { 1380, -0.0149139017 }, { 1389, 0.0149139017 }, { 1409, -0.0149139017 }, { 1458, -0.0149139017 } }, { { 1116, 0 }, { 2232, 0 }, { 5000, -0.00253862655 }, { 10000, 5.05666103e-05 }, { 20000, 4.63430752e-08 }, { 30000, -3.70445924e-10 } } },
+    { "verb3_44100_rs98_d0_R", 44100, 1, { 0.497130051, 0, 0.992647082, 0, 1, 0, 1, 0 }, { { 1139, 0.0149139017 }, { 1211, 0.0149139017 }, { 1300, 0.0149139017 }, { 1315, -0.0149139017 }, { 1342, -0.0149139017 }, { 1379, 0.0149139017 } }, {  } },
+    { "verb4_44100_damp50", 44100, 0, { 0.497130051, 0, 0.492647067, 0.5, 1, 0, 1, 0 }, { { 1116, 0.0149139017 }, { 1188, 0.0149139017 }, { 1269, -0.0149139017 }, { 1277, 0.0149139017 }, { 1296, -0.0149139017 }, { 1341, -0.0298278034 } }, { { 1116, 0.0149139017 }, { 2232, 0.0001193114 }, { 5000, 0.00327548338 }, { 10000, -0.00111038901 }, { 20000, 4.07048501e-05 }, { 30000, -1.35400899e-06 } } },
+    { "verb4_44100_w05", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 0.75, 0, 1, 0 }, { { 1116, 0.0111854263 }, { 1188, 0.0111854263 }, { 1269, -0.0111854263 }, { 1277, 0.0111854263 }, { 1296, -0.0111854263 }, { 1341, -0.0223708525 } }, { { 1116, 0.0111854263 }, { 2232, 0.0015100328 }, { 5000, 0.00299055036 }, { 10000, -0.00204695924 }, { 20000, 4.50828265e-05 }, { 30000, -7.29432713e-06 } } },
+    { "verb4_44100_w0", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 0.5, 0, 1, 0 }, { { 1116, 0.00745695084 }, { 1188, 0.00745695084 }, { 1269, -0.00745695084 }, { 1277, 0.00745695084 }, { 1296, -0.00745695084 }, { 1341, -0.0149139017 } }, { { 1116, 0.00745695084 }, { 2232, 0.00100668846 }, { 5000, 0.00199370016 }, { 10000, -0.00136463961 }, { 20000, 3.00552183e-05 }, { 30000, -4.86288445e-06 } } },
+    { "verb4_44100_lp2k", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0, 0.0999750011, 0 }, { { 1116, 0.000263520342 }, { 1117, 0.000970520661 }, { 1118, 0.00169823086 }, { 1119, 0.00212659431 }, { 1120, 0.00229909946 }, { 1121, 0.00226660119 } }, { { 1116, 0.000263520342 }, { 2232, 0.00245303242 }, { 5000, 0.001564682 }, { 10000, -0.000841991627 }, { 20000, 2.47584703e-05 }, { 30000, -2.42733336e-06 } } },
+    { "verb4_44100_hp500", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0, 1, 0.0249750009 }, { { 1116, 0.0143836401 }, { 1117, -0.00105797581 }, { 1118, -0.0010504754 }, { 1119, -0.00103835447 }, { 1120, -0.0010219895 }, { 1121, -0.0010017521 } }, { { 1116, 0.0143836401 }, { 2232, 0.00110735849 }, { 5000, 0.00172603654 }, { 10000, -0.00256114826 }, { 20000, 1.93481083e-05 }, { 30000, -6.4739711e-06 } } },
+    { "verb4_44100_pre50", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0.0990000032, 1, 0 }, { { 3298, 0.0149139017 }, { 3370, 0.0149139017 }, { 3451, -0.0149139017 }, { 3459, 0.0149139017 }, { 3478, -0.0149139017 }, { 3523, -0.0298278034 } }, { { 1116, 0 }, { 2232, 0 }, { 5000, -0.00186423771 }, { 10000, -0.00138831651 }, { 20000, -0.000107627966 }, { 30000, -1.22405136e-05 } } },
+    { "verb4_44100_pre7", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0.0137, 1, 0 }, { { 1418, 0.0149139017 }, { 1490, 0.0149139017 }, { 1571, -0.0149139017 }, { 1579, 0.0149139017 }, { 1598, -0.0149139017 }, { 1643, -0.0298278034 } }, { { 1116, 0 }, { 2232, 0 }, { 5000, -0.0155505892 }, { 10000, -9.98171381e-05 }, { 20000, 3.92918628e-05 }, { 30000, 3.77023866e-06 } } },
+    { "verb4_44100_dry6", 44100, 0, { 0.25, 0.25, 0.492647067, 0, 1, 0, 1, 0 }, { { 0, 0.5 }, { 1116, 0.00749999983 }, { 1188, 0.00749999983 }, { 1269, -0.00749999983 }, { 1277, 0.00749999983 }, { 1296, -0.00749999983 } }, { { 1116, 0.00749999983 }, { 2232, 0.00101250014 }, { 5000, 0.00200520991 }, { 10000, -0.00137251767 }, { 20000, 3.02287262e-05 }, { 30000, -4.89095828e-06 } } },
+    { "verb4_96000_d0", 96000, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0, 1, 0 }, { { 2429, 0.0149139017 }, { 2586, 0.0149139017 }, { 2762, -0.0149139017 }, { 2779, 0.0149139017 }, { 2820, -0.0149139017 }, { 2918, -0.0149139017 } }, { { 1116, 0 }, { 2232, 0 }, { 5000, -0.00186423771 }, { 10000, -0.00245792419 }, { 20000, 0.000745251484 }, { 30000, -0.000488610764 } } },
+    { "verb5_44100_lp19990", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0, 0.9995, 0 }, { { 1116, 0.0127506154 }, { 1117, 0.00417534588 }, { 1118, -0.00376077462 }, { 1119, 0.00316998758 }, { 1120, -0.00249166437 }, { 1121, 0.00179861207 } }, { { 1116, 0.0127506154 }, { 2232, -0.000641830731 }, { 5000, 0.00683686417 }, { 10000, -0.00260369247 }, { 20000, 0.000123538091 }, { 30000, -1.06128809e-05 } } },
+    { "verb5_44100_hp10", 44100, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0, 1, 0.0005 }, { { 1116, 0.0149032781 }, { 1117, -2.12486812e-05 }, { 1118, -2.12486175e-05 }, { 1119, -2.12485102e-05 }, { 1120, -2.12483592e-05 }, { 1121, -2.12481664e-05 } }, { { 1116, 0.0149032781 }, { 2232, 0.00161541544 }, { 5000, 0.00414096424 }, { 10000, -0.00276446715 }, { 20000, 5.55486658e-05 }, { 30000, -9.84163671e-06 } } },
+    { "verb5_48000_lp2k", 48000, 0, { 0.497130051, 0, 0.492647067, 0, 1, 0, 0.1, 0 }, { { 1214, 0.000224975476 }, { 1215, 0.00083477085 }, { 1216, 0.00147942919 }, { 1217, 0.00188708713 }, { 1218, 0.00208745827 }, { 1219, 0.00211595511 } }, { { 1116, 0 }, { 2232, -0.00503242109 }, { 5000, 0.000234015475 }, { 10000, 9.93424401e-05 }, { 20000, 9.34740165e-05 }, { 30000, -2.31672334e-06 } } },
+};
+
+Planar verbImpulse (const VerbCase& c, size_t length, int block)
+{
+    fx::ReaVerb v;
+    v.prepare (c.fs);
+    v.setParams ({ c.n[0], c.n[1], c.n[2], c.n[3], c.n[4], c.n[5], c.n[6], c.n[7] });
+    Planar io (2, std::vector<float> (length, 0.0f));
+    io[(size_t) c.channel][0] = 1.0f;
+
+    for (size_t at = 0; at < length; at += (size_t) block)
+    {
+        float* p[2] = { io[0].data() + at, io[1].data() + at };
+        v.process (p, 2, (int) std::min ((size_t) block, length - at));
+    }
+
+    return io;
+}
+} // namespace
+
+ROVOX_TEST (parity, reaverbate_exact_model_matches_the_measured_impulse_responses)
+{
+    for (auto& c : verbCases)
+    {
+        const auto y = verbImpulse (c, 31000, 480);
+        const auto& out = y[(size_t) c.channel];
+
+        for (auto& [index, value] : c.taps)
+            if (std::abs (out[(size_t) index] - value) > 5.0e-8)
+            {
+                std::cerr << "    " << c.name << " tap " << index << ": " << out[(size_t) index] << " vs " << value << "\n";
+                CHECK (false);
+            }
+
+        // nothing audible before the first tap
+        const auto first = (size_t) c.taps.front().first;
+
+        for (size_t i = 1; i < first; ++i)
+            CHECK (std::abs (out[i]) < 1.0e-7f);
+
+        for (auto& [index, value] : c.spots)
+            if (std::abs (y[0][(size_t) index] - value) > 5.0e-8)
+            {
+                std::cerr << "    " << c.name << " sample " << index << ": " << y[0][(size_t) index] << " vs " << value << "\n";
+                CHECK (false);
+            }
+
+        // width 1: every channel has its own reverberator, the other output stays silent
+        if (c.n[4] == 1.0)
+            for (float v : y[(size_t) (1 - c.channel)])
+                CHECK (v == 0.0f);
+    }
+}
+
+ROVOX_TEST (parity, reaverbate_lengths_round_down_per_sum_and_the_result_is_block_size_independent)
+{
+    CHECK (fx::ReaVerb::lineLength (1116, 0, 48000.0) == 1214);
+    CHECK (fx::ReaVerb::lineLength (1116, 23, 48000.0) == 1239);           // floor of the sum, not of the parts
+    CHECK (fx::ReaVerb::lineLength (1116, 0, 96000.0) == 2429);
+    CHECK (fx::ReaVerb::lineLength (153, 23, 44100.0) == 176);
+
+    const auto& c = verbCases[5];                                         // low-pass case: filters and feedback together
+    const auto a = verbImpulse (c, 20000, 480), b = verbImpulse (c, 20000, 37);
+    CHECK (a == b);
+}
+
+ROVOX_TEST (parity, reaverbate_translation_takes_the_knob_positions_and_selects_the_reaper_mode)
+{
+    const json verb = { { "name", "ReaVerbate" },
+                        { "params", json::array ({ prm (0, "Wet", 0.497130051, "-0.1"), prm (1, "Dry", 0.25, "-6.0"), prm (2, "Room size", 0.492647067, "63.5"),
+                                                   prm (3, "Dampening", 0.5, "50"), prm (4, "Width", 0.75, "0.50"), prm (5, "Delay", 0.0990000032, "49.5"),
+                                                   prm (6, "Lowpass", 0.0999750011, "2000"), prm (7, "Hipass", 0.0249750009, "500"),
+                                                   prm (8, "Bypass", 0.0, "normal"), prm (9, "Wet", 0.3, "30"), prm (10, "Delta", 0.0, "normal") }) } };
+    const auto t = translateReaperFx ("verb", parseReaperFxEntry (verb));
+    CHECK_NEAR (translatedValue (t, "rea_wet"), 0.497130051, 1e-12);
+    CHECK_NEAR (translatedValue (t, "rea_dry"), 0.25, 1e-12);
+    CHECK_NEAR (translatedValue (t, "rea_room"), 0.492647067, 1e-12);
+    CHECK_NEAR (translatedValue (t, "rea_damp"), 0.5, 1e-12);
+    CHECK_NEAR (translatedValue (t, "rea_width"), 0.75, 1e-12);
+    CHECK_NEAR (translatedValue (t, "rea_delay"), 0.0990000032, 1e-12);
+    CHECK_NEAR (translatedValue (t, "rea_lp"), 0.0999750011, 1e-12);
+    CHECK_NEAR (translatedValue (t, "rea_hp"), 0.0249750009, 1e-12);
+    CHECK_NEAR (translatedValue (t, "reaper_compat"), 1.0, 1e-12);
+    CHECK_NEAR (translatedValue (t, "fx_wet"), 30.0, 1e-9);
+    CHECK (t.untranslated.empty());
+}
+
+//------------------------------------------------------------------------------ ReaFir (spec-reafir.md v2)
+namespace
+{
+const char* const reaFirHeader = "cmZlcu5e7f4CAAAAAQAAAAAAAAACAAAAAAAAAAIAAAABAAAAAAAAAAIAAAAAAAAAWAAAAAEAAAAAABAA";
+const char* const reaFirName = "AFByb2dyYW0gMQAQAAAA";
+// the saved state of a fresh ReaFir (also of all 4 instances in the user's project) and the same with single fields changed
+const char* const reaFirDefault = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAAAAAKUrSEUAAAAAAAAAAAAAAACtVQM8AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+const char* const reaFirMode1 = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAQAAAAIAAADXOb9DAAAAAKUrSEUAAAAAAAAAAAAAAACtVQM8AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+const char* const reaFirFlatM12 = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAABAwaUrSEUAAEDBAAAAAAAAAACtVQM8AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+const char* const reaFirCurve = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAABAwaUrSEUAAAAAAAAAAAAAAACtVQM8AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+const char* const reaFirGainHalf = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAAAAAKUrSEUAAAAAAAAAAAAAAACtVQM8AAAAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+
+std::string reaFirRpp (const char* state)
+{
+    return std::string ("<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  PANLAW 1\n  PANMODE 3\n  TEMPO 120 4 4 0\n"
+                        "  <TRACK {AAAAAAAA-0000-0000-0000-0000000000A1}\n    NAME \"T\"\n    VOLPAN 1 0 -1 -1 1\n    ISBUS 0 0\n"
+                        "    <FXCHAIN\n      SHOW 0\n      LASTSEL 0\n      DOCKED 0\n      BYPASS 0 0 0\n"
+                        "      <VST \"VST: ReaFir (FFT EQ+Dynamics Processor) (Cockos)\" reafir.vst.dylib 0 \"\" 1919247986<56535472656672726561666972666674> \"\"\n"
+                        "        ") + reaFirHeader + "\n        " + state + "\n        " + reaFirName + "\n      >\n      FXID {80AA1093-9FEB-FE49-949F-57955B9893D7}\n    >\n"
+           "    <ITEM\n      POSITION 0\n      LENGTH 1\n      <SOURCE WAVE\n        FILE \"item.wav\"\n      >\n    >\n  >\n>\n";
+}
+
+struct FirImport
+{
+    json report;
+    std::vector<float> left;
+};
+
+FirImport importReaFir (test::Env& env, const char* state)
+{
+    const auto dir = test::makeTempDir ("parityfir");
+    test::writeWav (dir / "item.wav", { std::vector<float> (48000, 0.5f) }, 48000, 24);
+    std::ofstream (dir / "t.RPP") << reaFirRpp (state);
+    const auto id = env.newProject ("fir");
+    auto imp = env.run (id, "import.rpp", { { "path", (dir / "t.RPP").string() } });
+    REQUIRE (imp.ok);
+    RenderRequest rq;
+    rq.tailS = 0.0;
+    auto rr = renderProject (env.project (id), rq);
+    REQUIRE (rr.ok());
+    std::vector<std::vector<float>> ch;
+    double rate = 0.0;
+    REQUIRE (test::readWav (env.project (id).dir() / rr.value()["file"]["path"].get<std::string>(), ch, rate));
+    REQUIRE (! ch.empty());
+    return { imp.data, ch[0] };
+}
+
+double warningCount (const json& report, const std::string& code)
+{
+    double n = 0;
+
+    for (auto& w : report["warnings"])
+        n += w["code"] == code ? 1 : 0;
+
+    return n;
+}
+
+/** Magnitude of an impulse response at a frequency (dB): the DFT of the whole response. */
+double responseDb (const std::vector<float>& h, double hz, double fs)
+{
+    double re = 0, im = 0;
+
+    for (size_t i = 0; i < h.size(); ++i)
+    {
+        re += h[i] * std::cos (2 * pi * hz * (double) i / fs);
+        im -= h[i] * std::sin (2 * pi * hz * (double) i / fs);
+    }
+
+    return 20.0 * std::log10 (std::max (1.0e-12, std::hypot (re, im)));
+}
+} // namespace
+
+ROVOX_TEST (parity, reafir_default_state_is_an_exact_pass_through_without_latency)
+{
+    fx::ReaFir f;
+    f.prepare (48000.0);
+    f.setParams ({});
+    CHECK (f.isFlat());
+    CHECK (f.latencySamples() == 0);
+    std::vector<float> x (3000), y;
+
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] = (float) std::sin (0.01 * (double) i * (double) i);
+
+    y = x;
+    float* io[1] = { y.data() };
+    f.process (io, 1, (int) y.size());
+    CHECK (x == y);
+
+    // a flat curve at -12 dB and an output gain are exact gains, still without latency
+    fx::ReaFirParams p;
+    p.points = { { 382.45, -12.0 }, { 3202.73, -12.0 } };
+    p.outputGain = 0.5;
+    f.setParams (p);
+    CHECK (f.latencySamples() == 0);
+    y = x;
+    io[0] = y.data();
+    f.process (io, 1, (int) y.size());
+
+    for (size_t i = 0; i < x.size(); ++i)
+        CHECK_NEAR (y[i], x[i] * 0.5 * std::pow (10.0, -12.0 / 20.0), 1e-7);
+}
+
+ROVOX_TEST (parity, reafir_curve_is_flat_beyond_the_end_points_and_smooth_between_them)
+{
+    const std::vector<fx::ReaFirPoint> pts { { 382.45, -12.0 }, { 3202.73, 0.0 } };
+    CHECK_NEAR (fx::ReaFir::curveGainDb (pts, 100.0), -12.0, 1e-12);
+    CHECK_NEAR (fx::ReaFir::curveGainDb (pts, 10000.0), 0.0, 1e-12);
+    CHECK_NEAR (fx::ReaFir::curveGainDb (pts, 382.45), -12.0, 1e-12);
+
+    // measured gains (dB) of the response between the points; the smoothstep in log-frequency is within 0.35 dB
+    const double measured[][2] = { { 450, -11.757 }, { 600, -10.396 }, { 800, -8.483 }, { 1000, -6.836 }, { 1500, -3.787 }, { 2000, -1.834 }, { 2500, -0.641 }, { 3000, -0.060 } };
+
+    for (auto& m : measured)
+        CHECK_NEAR (fx::ReaFir::curveGainDb (pts, m[0]), m[1], 0.35);
+}
+
+ROVOX_TEST (parity, reafir_fir_for_a_curve_is_zero_phase_with_the_curve_gain_and_a_quarter_fft_latency)
+{
+    const double fs = 48000.0;
+    fx::ReaFir f;
+    f.prepare (fs);
+    fx::ReaFirParams p;
+    p.points = { { 382.45, -12.0 }, { 3202.73, 0.0 } };
+    f.setParams (p);
+    CHECK (! f.isFlat());
+    CHECK (f.latencySamples() == 1024);
+    std::vector<float> h (4096, 0.0f);
+    h[0] = 1.0f;
+    float* io[1] = { h.data() };
+
+    for (size_t at = 0; at < h.size(); at += 500)
+    {
+        io[0] = h.data() + at;
+        f.process (io, 1, (int) std::min<size_t> (500, h.size() - at));
+    }
+
+    for (int k = 1; k <= 1000; ++k)                                             // symmetric around the latency
+        CHECK_NEAR (h[(size_t) (1024 - k)], h[(size_t) (1024 + k)], 1e-6);
+
+    CHECK_NEAR (responseDb (h, 100.0, fs), -12.0, 0.4);
+    CHECK_NEAR (responseDb (h, 1000.0, fs), -6.84, 0.6);
+    CHECK_NEAR (responseDb (h, 8000.0, fs), 0.0, 0.2);
+}
+
+ROVOX_TEST (parity, reafir_import_maps_the_default_state_as_exact_pass_through)
+{
+    test::Env env;
+    const auto r = importReaFir (env, reaFirDefault);
+    CHECK (r.report["unsupported"].empty());
+    REQUIRE (r.report["mapped"].size() == 1);
+    CHECK (r.report["mapped"][0]["mapped_to"] == "Rovox FIR EQ");
+    CHECK (r.report["mapped"][0]["fft_size"] == 4096);
+    CHECK (r.report["mapped"][0]["approximate"] == false);
+    CHECK (r.report["warnings"].empty());
+    CHECK_NEAR (r.left[30000], 0.5, 1e-6);
+    CHECK_NEAR (r.left[100], 0.5, 1e-6);
+}
+
+ROVOX_TEST (parity, reafir_import_applies_flat_gain_curves_exactly_and_other_curves_approximately)
+{
+    test::Env env;
+    const auto flat = importReaFir (env, reaFirFlatM12);
+    CHECK (flat.report["mapped"][0]["approximate"] == false);
+    CHECK_NEAR (flat.left[30000], 0.5 * std::pow (10.0, -12.0 / 20.0), 1e-6);
+    CHECK_NEAR (flat.left[100], 0.5 * std::pow (10.0, -12.0 / 20.0), 1e-6);
+
+    const auto gain = importReaFir (env, reaFirGainHalf);
+    CHECK_NEAR (gain.left[30000], 0.25, 1e-6);
+
+    const auto curve = importReaFir (env, reaFirCurve);
+    CHECK (curve.report["mapped"][0]["approximate"] == true);
+    CHECK (curve.report["warnings"].empty());
+    CHECK_NEAR (curve.left[30000], 0.5 * std::pow (10.0, -12.0 / 20.0), 2e-3);      // DC is below the first point
+}
+
+ROVOX_TEST (parity, reafir_import_warns_about_modes_other_than_eq_and_passes_the_audio_through)
+{
+    test::Env env;
+    const auto r = importReaFir (env, reaFirMode1);
+    CHECK (r.report["unsupported"].empty());
+    CHECK (warningCount (r.report, "REAFIR_MODE_UNSUPPORTED") == 1);
+    CHECK_NEAR (r.left[30000], 0.5, 1e-6);
+}

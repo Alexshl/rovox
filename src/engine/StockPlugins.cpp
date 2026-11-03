@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <sstream>
 
 namespace rovox
 {
@@ -806,9 +807,12 @@ public:
     juce::String getName() const override           { return "Rovox Verb"; }
     juce::String getPluginType() override           { return xmlTypeName; }
     bool noTail() override                          { return false; }
-    double getTailLength() const override           { return fx::Verb::tailSeconds (readParams()); }
+    double getTailLength() const override           { return compat() ? fx::ReaVerb::tailSeconds (readReaParams()) : fx::Verb::tailSeconds (readParams()); }
 
 private:
+    // parameter order: the Rovox reverb (8), then the ReaVerbate mode: reaper_compat, fx_wet, fx_delta, and the normalized knob positions of ReaVerbate
+    static constexpr size_t compatFlag = 8, fxWet = 9, fxDelta = 10, reaFirst = 11;
+
     static std::vector<ParamDef> definitions()
     {
         return { num ("room_size", "Room size", 0.0f, 1.0f, 0.5f, "", 3),
@@ -818,25 +822,192 @@ private:
                  num ("low_cut", "Low cut", 20.0f, 1000.0f, 20.0f, "Hz", 0, 100.0f),
                  num ("high_cut", "High cut", 1000.0f, 20000.0f, 20000.0f, "Hz", 0, 6000.0f),
                  num ("wet", "Wet", -96.0f, 12.0f, -12.0f, "dB", 1),
-                 num ("dry", "Dry", -96.0f, 12.0f, 0.0f, "dB", 1) };
+                 num ("dry", "Dry", -96.0f, 12.0f, 0.0f, "dB", 1),
+                 toggle ("reaper_compat", "ReaVerbate mode", false),         // imported ReaVerbate: its exact reverberator (src/core/StockFx.h)
+                 num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
+                 toggle ("fx_delta", "FX delta (processed - input)", false),
+                 num ("rea_wet", "Wet (ReaVerbate mode, knob position, amplitude 2 n)", 0.0f, 1.0f, 0.25f, "", 4),
+                 num ("rea_dry", "Dry (ReaVerbate mode, knob position, amplitude 2 n)", 0.0f, 1.0f, 0.5f, "", 4),
+                 num ("rea_room", "Room size (ReaVerbate mode, knob position)", 0.0f, 1.0f, 0.294118f, "", 4),
+                 num ("rea_damp", "Dampening (ReaVerbate mode, knob position)", 0.0f, 1.0f, 0.5f, "", 4),
+                 num ("rea_width", "Width (ReaVerbate mode, knob position, width = 2 n - 1)", 0.0f, 1.0f, 1.0f, "", 4),
+                 num ("rea_delay", "Delay (ReaVerbate mode, knob position, 500 ms n)", 0.0f, 1.0f, 0.0f, "", 4),
+                 num ("rea_lp", "Lowpass (ReaVerbate mode, knob position, 20 kHz n; 1 = off)", 0.0f, 1.0f, 1.0f, "", 4),
+                 num ("rea_hp", "Hipass (ReaVerbate mode, knob position, 20 kHz n; 0 = off)", 0.0f, 1.0f, 0.0f, "", 4) };
     }
+
+    bool compat() const                         { return flag (compatFlag); }
 
     fx::VerbParams readParams() const
     {
         return { value (0), value (1), value (2), value (3), value (4), value (5), value (6), value (7) };
     }
 
-    void prepareDsp (double sr) override        { sr_ = sr; verb_.prepare (sr); verb_.setParams (readParams()); }
-    void resetDsp() override                    { verb_.reset(); }
+    fx::ReaVerbParams readReaParams() const
+    {
+        return { value (reaFirst), value (reaFirst + 1), value (reaFirst + 2), value (reaFirst + 3), value (reaFirst + 4), value (reaFirst + 5),
+                 value (reaFirst + 6), value (reaFirst + 7) };
+    }
+
+    void prepareDsp (double sr) override
+    {
+        sr_ = sr;
+        verb_.prepare (sr);
+        verb_.setParams (readParams());
+
+        if (compat())
+            prepareRea();
+    }
+
+    void prepareRea()
+    {
+        reaVerb_.prepare (sr_);
+        reaVerb_.setParams (readReaParams());
+        reaReady_ = true;
+    }
+
+    void resetDsp() override                    { verb_.reset(); if (reaReady_) reaVerb_.reset(); }
 
     void run (float* const* io, int n, int count, const te::PluginRenderContext&) override
     {
+        if (compat())
+        {
+            if (! reaReady_)
+                prepareRea();
+
+            const double wet = std::clamp ((double) value (fxWet) / 100.0, 0.0, 1.0);
+            const bool delta = flag (fxDelta), mix = delta || wet < 1.0;
+
+            if (mix)
+                saveDry (io, n, count);
+
+            reaVerb_.setParams (readReaParams());
+            reaVerb_.process (io, n, count);
+
+            if (mix)
+                mixDry (io, n, count, wet, delta);
+
+            return;
+        }
+
         verb_.setParams (readParams());
         verb_.process (io, n, count);
     }
 
     fx::Verb verb_;
+    fx::ReaVerb reaVerb_;
+    bool reaReady_ = false;
 };
+//==============================================================================
+/** Imported ReaFir in EQ mode: the curve (frequency:gain-dB points, in the "curve" property of the plugin state) as an exact gain when it is flat, else as a
+    zero-phase FIR whose latency the host compensates (src/core/StockFx.h). */
+class RovoxFir : public StockPlugin
+{
+public:
+    static inline const char* xmlTypeName = "rovoxfir";
+
+    RovoxFir (te::PluginCreationInfo info) : StockPlugin (info, definitions())
+    {
+        firParams_.points = parseCurve (toStd (state["curve"].toString()));
+    }
+
+    juce::String getName() const override           { return "Rovox FIR EQ"; }
+    juce::String getPluginType() override           { return xmlTypeName; }
+    double getLatencySeconds() override             { return (double) latencySamples() / sampleRate; }
+    bool noTail() override                          { return fir_.isFlat(); }
+    double getTailLength() const override           { return (double) fir_.latencySamples() / sr_; }
+
+    static std::vector<fx::ReaFirPoint> parseCurve (const std::string& text)
+    {
+        std::vector<fx::ReaFirPoint> out;
+        std::istringstream in (text);
+        std::string item;
+
+        while (in >> item)
+        {
+            const auto colon = item.find (':');
+
+            if (colon == std::string::npos)
+                continue;
+
+            fx::ReaFirPoint pt;
+            pt.freqHz = std::atof (item.substr (0, colon).c_str());
+            pt.gainDb = std::atof (item.substr (colon + 1).c_str());
+
+            if (pt.freqHz > 0.0)
+                out.push_back (pt);
+        }
+
+        return out;
+    }
+
+private:
+    static std::vector<ParamDef> definitions()
+    {
+        return { num ("fft_size", "FFT size", 64.0f, 65536.0f, 4096.0f, "", 0, 4096.0f),
+                 num ("gain", "Output gain", -96.0f, 12.0f, 0.0f, "dB", 2) };
+    }
+
+    void valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& property) override
+    {
+        StockPlugin::valueTreePropertyChanged (tree, property);
+
+        if (tree == state && property == juce::Identifier ("curve"))
+        {
+            auto points = parseCurve (toStd (state["curve"].toString()));
+            const juce::SpinLock::ScopedLockType lock (lock_);
+            pending_ = std::move (points);
+            dirty_ = true;
+        }
+    }
+
+    fx::ReaFirParams currentParams()
+    {
+        if (dirty_.exchange (false))
+        {
+            const juce::SpinLock::ScopedLockType lock (lock_);
+            firParams_.points = pending_;
+        }
+
+        firParams_.fftSize = (int) std::lround (value (0));
+        firParams_.outputGain = dbToLinOrZero (value (1));
+        return firParams_;
+    }
+
+    static double dbToLinOrZero (double db)         { return db <= -95.9 ? 0.0 : std::pow (10.0, db / 20.0); }
+
+    int latencySamples() const override             { return fir_.latencySamples(); }
+
+    void prepareDsp (double sr) override
+    {
+        sr_ = sr;
+        fir_.prepare (sr);
+        applied_ = currentParams();
+        fir_.setParams (applied_);
+    }
+
+    void resetDsp() override                        { fir_.reset(); }
+
+    void run (float* const* io, int n, int count, const te::PluginRenderContext&) override
+    {
+        const auto p = currentParams();
+
+        if (! (p == applied_))
+        {
+            applied_ = p;
+            fir_.setParams (p);
+        }
+
+        fir_.process (io, n, count);
+    }
+
+    fx::ReaFir fir_;
+    fx::ReaFirParams firParams_, applied_;
+    std::vector<fx::ReaFirPoint> pending_;
+    juce::SpinLock lock_;
+    std::atomic<bool> dirty_ { false };
+};
+
 } // namespace
 
 //==============================================================================
@@ -861,6 +1032,9 @@ const std::vector<StockInfo>& stockPlugins()
         { "rovox:verb", "verb", "Rovox Verb", RovoxVerb::xmlTypeName, "ReaVerbate",
           "Algorithmic reverb (damped combs and allpasses): room size, damping, pre-delay, width, low/high cut, wet/dry. Similar to ReaVerbate.",
           { "stock", "reverb", "space" } },
+        { "rovox:fir", "fir", "Rovox FIR EQ", RovoxFir::xmlTypeName, "ReaFir",
+          "FFT-style EQ from a frequency/gain curve (property `curve`, points \"hz:db\"): a flat curve is an exact gain, any other curve a zero-phase FIR with reported latency. Imported ReaFir in EQ mode; its dynamics modes are not modelled.",
+          { "stock", "eq", "filter" } },
         { "rovox:drums", "drums", "Rovox Drums", drumsXmlType, "MT-PowerDrumKit",
           "General MIDI drum sampler (instrument): plays MIDI drum parts written for MT-PowerDrumKit unchanged (kick 35/36, snare 38/40, side stick 37, hats 42/44/46 with choke, toms, cymbals, cowbell, tambourine) "
           "with velocity layers and round robin. Samples: DRSKit (CC BY 4.0), loaded from ROVOX_DRUMKITS_PATH or the object store; plugin state reports the kit and unmapped notes.",
@@ -914,6 +1088,7 @@ void registerStockPlugins (te::Engine& engine)
     pm.createBuiltInType<RovoxLimit>();
     pm.createBuiltInType<RovoxDelay>();
     pm.createBuiltInType<RovoxVerb>();
+    pm.createBuiltInType<RovoxFir>();
     registerDrumsPlugin (engine);
     registerPanStage (engine);
     registerFadeStage (engine);

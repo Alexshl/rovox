@@ -1,0 +1,9 @@
+{
+ "name": "reafir_mykola_default",
+ "kind": "eq",
+ "fx": "ReaFir (FFT EQ+Dynamics Processor)",
+ "signal": "pink",
+ "channels": 2,
+ "params": [],
+ "description": "ReaFir in the default state, byte-identical to the 4 instances in mykola.RPP: identity with 4096-sample reported PDC (spec-reafir.md v2)"
+}

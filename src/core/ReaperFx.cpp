@@ -741,44 +741,60 @@ void translateVerb (const ReaperFxEntry& fx, Sink& s)
         {
             if (auto db = asDb (v))     s.set (p, "wet", *db);
             else                        s.unparsed (p);
+
+            s.set (p, "rea_wet", std::clamp (p.normalized, 0.0, 1.0), "knob position, amplitude 2 n");
         }
         else if (k == "dry")
         {
             if (auto db = asDb (v))     s.set (p, "dry", *db);
             else                        s.unparsed (p);
+
+            s.set (p, "rea_dry", std::clamp (p.normalized, 0.0, 1.0), "knob position, amplitude 2 n");
         }
         else if (k == "room size" || k == "room")
         {
             s.set (p, "room_size", verbFraction (v, p.normalized, true));
+            s.set (p, "rea_room", std::clamp (p.normalized, 0.0, 1.0), "knob position, feedback 0.3 + 0.68 n");
         }
         else if (k == "dampening" || k == "damping")
         {
             s.set (p, "damping", verbFraction (v, p.normalized, true));
+            s.set (p, "rea_damp", std::clamp (p.normalized, 0.0, 1.0), "knob position, damping 0.4 n");
         }
         else if (k == "width" || k == "stereo width")
         {
             s.set (p, "width", verbFraction (v, p.normalized, false));
+            s.set (p, "rea_width", std::clamp (p.normalized, 0.0, 1.0), "knob position, width 2 n - 1");
         }
         else if (k == "delay" || k == "initial delay" || k == "pre delay" || k == "predelay")
         {
             if (auto ms = asMs (v))     s.set (p, "pre_delay", *ms);
             else                        s.unparsed (p);
+
+            s.set (p, "rea_delay", std::clamp (p.normalized, 0.0, 1.0), "knob position, 500 ms n, whole samples");
         }
         else if (k == "lowpass")
         {
             if (auto hz = asHz (v))     s.set (p, "high_cut", *hz, "REAPER lowpass = Rovox high cut");
             else                        s.unparsed (p);
+
+            s.set (p, "rea_lp", std::clamp (p.normalized, 0.0, 1.0), "knob position, 20 kHz n");
         }
         else if (k == "hipass" || k == "highpass")
         {
             if (auto hz = asHz (v))     s.set (p, "low_cut", *hz, "REAPER highpass = Rovox low cut");
             else                        s.unparsed (p);
+
+            s.set (p, "rea_hp", std::clamp (p.normalized, 0.0, 1.0), "knob position, 20 kHz n");
         }
         else
         {
             s.skip (p, "no equivalent in the Rovox Verb");
         }
     }
+
+    // ReaVerbate's own reverberator (10 combs, 6 allpasses, per-channel input) instead of the Rovox reverb
+    s.out.translated.push_back ({ "(ReaVerbate)", "", "reaper_compat", 1.0, "reverberator as ReaVerbate does" });
 }
 
 //------------------------------------------------------------------------------ ReaDelay
@@ -965,7 +981,7 @@ FxTranslation translateReaperFx (const std::string& id, const ReaperFxEntry& ent
     else if (id == "delay")     translateDelay (fx, s);
 
     // the Rovox EQ, dynamics and Delay carry the generic Wet (linear crossfade) and Delta (processed - input, the Wet is ignored) themselves
-    const bool hasMix = id == "eq" || id == "delay" || id == "comp" || id == "gate" || id == "limit";
+    const bool hasMix = id == "eq" || id == "delay" || id == "comp" || id == "gate" || id == "limit" || id == "verb";
     const bool deltaOn = delta != nullptr && lowerOf (trim (delta->formatted)) != "normal" && delta->normalized >= 0.5;
 
     if (hasMix && genericWet != nullptr)

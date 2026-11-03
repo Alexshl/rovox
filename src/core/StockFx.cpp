@@ -1627,4 +1627,313 @@ void ReaLimit::process (float* const* io, int numChannels, int numSamples)
     lastReductionDb_ = worst;
 }
 
+//==============================================================================
+namespace
+{
+constexpr int reaVerbCombs[10] = { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617, 1685, 1748 };
+constexpr int reaVerbAllpasses[6] = { 556, 441, 341, 225, 180, 153 };
+constexpr int reaVerbSpread = 23;
+}
+
+long ReaVerb::lineLength (int base, int spread, double sampleRate)
+{
+    return std::max (1L, (long) std::floor ((base + spread) * sampleRate / 44100.0 + 1.0e-9));
+}
+
+double ReaVerb::Biquad::run (double x) noexcept
+{
+    const double out = b0 * x + z1;
+    z1 = flush (b1 * x - a1 * out + z2);
+    z2 = flush (b2 * x - a2 * out);
+    return out;
+}
+
+void ReaVerb::prepare (double sampleRate)
+{
+    sampleRate_ = sampleRate;
+
+    for (size_t c = 0; c < 2; ++c)
+    {
+        const int spread = c == 0 ? 0 : reaVerbSpread;
+
+        for (size_t i = 0; i < numCombs; ++i)
+            ch_[c].combs[i].buf.assign ((size_t) lineLength (reaVerbCombs[i], spread, sampleRate), 0.0);
+
+        for (size_t i = 0; i < numAllpasses; ++i)
+            ch_[c].allpasses[i].buf.assign ((size_t) lineLength (reaVerbAllpasses[i], spread, sampleRate), 0.0);
+
+        ch_[c].pre.assign ((size_t) std::floor (0.5 * sampleRate) + 2, 0.0);
+    }
+
+    reset();
+    setParams (params_);
+}
+
+void ReaVerb::reset()
+{
+    for (auto& c : ch_)
+    {
+        for (auto& comb : c.combs)
+        {
+            std::fill (comb.buf.begin(), comb.buf.end(), 0.0);
+            comb.pos = 0;
+            comb.store = 0.0;
+        }
+
+        for (auto& ap : c.allpasses)
+        {
+            std::fill (ap.buf.begin(), ap.buf.end(), 0.0);
+            ap.pos = 0;
+        }
+
+        std::fill (c.pre.begin(), c.pre.end(), 0.0);
+        c.prePos = 0;
+        c.lp.z1 = c.lp.z2 = c.hp.z1 = c.hp.z2 = 0.0;
+    }
+}
+
+void ReaVerb::designFilters()
+{
+    const auto design = [this] (bool low, double n, Biquad& f)
+    {
+        const double w0 = 2.0 * pi * 20000.0 * n / sampleRate_, cosw = std::cos (w0), alpha = std::sin (w0) / 2.0;      // Q = 1
+        const double a0 = 1.0 + alpha;
+        f.b0 = (low ? (1.0 - cosw) / 2.0 : (1.0 + cosw) / 2.0) / a0;
+        f.b1 = (low ? 1.0 - cosw : -(1.0 + cosw)) / a0;
+        f.b2 = f.b0;
+        f.a1 = -2.0 * cosw / a0;
+        f.a2 = (1.0 - alpha) / a0;
+    };
+
+    lpOn_ = params_.lowpass < 1.0 - 1.0e-6;
+    hpOn_ = params_.hipass > 1.0e-9;
+
+    for (auto& c : ch_)
+    {
+        if (lpOn_)      design (true, std::clamp (params_.lowpass, 1.0e-6, 1.0), c.lp);
+        if (hpOn_)      design (false, std::clamp (params_.hipass, 1.0e-6, 1.0), c.hp);
+    }
+}
+
+void ReaVerb::setParams (const ReaVerbParams& p)
+{
+    params_ = p;
+    feedback_ = 0.3 + 0.68 * std::clamp (p.room, 0.0, 1.0);
+    damp_ = 0.4 * std::clamp (p.damp, 0.0, 1.0);
+    preSamples_ = (size_t) std::clamp ((long) std::floor (std::clamp (p.delay, 0.0, 1.0) * 0.5 * sampleRate_), 0L, (long) ch_[0].pre.size() - 2);
+    designFilters();
+}
+
+double ReaVerb::tailSeconds (const ReaVerbParams& p)
+{
+    const double feedback = 0.3 + 0.68 * std::clamp (p.room, 0.0, 1.0);
+    const double loop = 1800.0 / 44100.0;
+    return std::min (60.0, -3.0 * loop / std::log10 (feedback) + std::clamp (p.delay, 0.0, 1.0) * 0.5);
+}
+
+void ReaVerb::process (float* const* io, int numChannels, int numSamples)
+{
+    const int nch = std::min (numChannels, 2);
+    const double wet = 2.0 * std::clamp (params_.wet, 0.0, 1.0), dry = 2.0 * std::clamp (params_.dry, 0.0, 1.0);
+    const double width = 2.0 * std::clamp (params_.width, 0.0, 1.0) - 1.0;
+    const double wet1 = wet * (width / 2.0 + 0.5), wet2 = wet * (1.0 - width) / 2.0;
+    const double f = feedback_, d = damp_;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const double in[2] = { io[0][i], nch > 1 ? (double) io[1][i] : (double) io[0][i] };
+        double rev[2];
+
+        for (size_t c = 0; c < 2; ++c)
+        {
+            const double u = 0.015 * in[c];
+            double sum = 0.0;
+
+            for (auto& comb : ch_[c].combs)
+            {
+                const double out = comb.buf[comb.pos];
+                comb.store = flush (out * (1.0 - d) + comb.store * d);
+                comb.buf[comb.pos] = flush (u + comb.store * f);
+
+                if (++comb.pos >= comb.buf.size())
+                    comb.pos = 0;
+
+                sum += out;
+            }
+
+            for (auto& ap : ch_[c].allpasses)
+            {
+                const double bo = ap.buf[ap.pos];
+                const double y = -sum + bo;
+                ap.buf[ap.pos] = flush (sum + 0.5 * bo);
+                sum = y;
+
+                if (++ap.pos >= ap.buf.size())
+                    ap.pos = 0;
+            }
+
+            rev[c] = sum;
+        }
+
+        const double mixed[2] = { wet1 * rev[0] + wet2 * rev[1], wet1 * rev[1] + wet2 * rev[0] };
+        double out[2];
+
+        for (size_t c = 0; c < 2; ++c)
+        {
+            auto& s = ch_[c];
+            double y = mixed[c];
+
+            if (lpOn_)      y = s.lp.run (y);
+            if (hpOn_)      y = s.hp.run (y);
+
+            if (preSamples_ > 0)
+            {
+                const size_t cap = s.pre.size();
+                s.pre[s.prePos] = y;
+                y = s.pre[(s.prePos + cap - preSamples_) % cap];
+                s.prePos = (s.prePos + 1) % cap;
+            }
+
+            out[c] = y + dry * in[c];
+        }
+
+        io[0][i] = toFloat (out[0]);
+
+        if (nch > 1)
+            io[1][i] = toFloat (out[1]);
+    }
+}
+
+//==============================================================================
+bool ReaFir::curveIsFlat (const std::vector<ReaFirPoint>& pts)
+{
+    for (auto& p : pts)
+        if (std::abs (p.gainDb - pts.front().gainDb) > 1.0e-6)
+            return false;
+
+    return true;
+}
+
+double ReaFir::curveGainDb (const std::vector<ReaFirPoint>& pts, double hz)
+{
+    if (pts.empty())
+        return 0.0;
+
+    if (hz <= pts.front().freqHz)
+        return pts.front().gainDb;
+
+    for (size_t i = 1; i < pts.size(); ++i)
+        if (hz <= pts[i].freqHz)
+        {
+            const auto& a = pts[i - 1];
+            const auto& b = pts[i];
+            const double span = std::log (b.freqHz / a.freqHz);
+
+            if (! (span > 0.0))
+                return b.gainDb;
+
+            const double t = std::clamp (std::log (hz / a.freqHz) / span, 0.0, 1.0);
+            return a.gainDb + (b.gainDb - a.gainDb) * t * t * (3.0 - 2.0 * t);
+        }
+
+    return pts.back().gainDb;
+}
+
+void ReaFir::prepare (double sampleRate)
+{
+    sampleRate_ = sampleRate;
+    setParams (params_);
+}
+
+void ReaFir::reset()
+{
+    for (auto& h : history_)
+        std::fill (h.begin(), h.end(), 0.0);
+
+    pos_ = 0;
+}
+
+void ReaFir::setParams (const ReaFirParams& p)
+{
+    params_ = p;
+    std::sort (params_.points.begin(), params_.points.end(), [] (const ReaFirPoint& a, const ReaFirPoint& b) { return a.freqHz < b.freqHz; });
+    firActive_ = ! curveIsFlat (params_.points);
+    taps_.clear();
+    half_ = 0;
+
+    if (! firActive_)
+    {
+        gain_ = params_.outputGain * (params_.points.empty() ? 1.0 : std::pow (10.0, params_.points.front().gainDb / 20.0));
+        return;
+    }
+
+    gain_ = 1.0;
+    const int n = std::clamp (params_.fftSize, 64, 65536);
+    half_ = n / 4;
+    std::vector<double> mag ((size_t) n / 2 + 1), cosTable ((size_t) n);
+
+    for (size_t k = 0; k < mag.size(); ++k)
+        mag[k] = params_.outputGain * std::pow (10.0, curveGainDb (params_.points, (double) k * sampleRate_ / n) / 20.0);
+
+    for (size_t k = 0; k < cosTable.size(); ++k)
+        cosTable[k] = std::cos (2.0 * pi * (double) k / n);
+
+    taps_.assign ((size_t) (2 * half_ + 1), 0.0);
+
+    for (int i = 0; i <= half_; ++i)
+    {
+        double acc = mag[0];
+
+        for (int k = 1; k < n / 2; ++k)
+            acc += 2.0 * mag[(size_t) k] * cosTable[(size_t) (((long long) k * i) % n)];
+
+        acc += mag[(size_t) n / 2] * ((i & 1) ? -1.0 : 1.0);
+        const double w = 0.5 * (1.0 + std::cos (pi * i / (half_ + 1)));
+        taps_[(size_t) (half_ + i)] = taps_[(size_t) (half_ - i)] = acc / n * w;
+    }
+
+    for (auto& h : history_)
+        h.assign (taps_.size() * 2, 0.0);
+
+    pos_ = 0;
+}
+
+void ReaFir::process (float* const* io, int numChannels, int numSamples)
+{
+    const int nch = std::min(numChannels, 2);
+
+    if (! firActive_)
+    {
+        if (gain_ != 1.0)
+            for (int c = 0; c < nch; ++c)
+                for (int i = 0; i < numSamples; ++i)
+                    io[c][i] = toFloat (io[c][i] * gain_);
+
+        return;
+    }
+
+    const size_t len = taps_.size();
+
+    for (int c = 0; c < nch; ++c)
+    {
+        auto& h = history_[(size_t) c];
+        size_t pos = pos_;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            h[pos] = h[pos + len] = io[c][i];
+            const double* x = h.data() + pos + 1;
+            double acc = 0.0;
+
+            for (size_t j = 0; j < len; ++j)
+                acc += taps_[j] * x[j];
+
+            io[c][i] = toFloat (acc);
+            pos = pos + 1 >= len ? 0 : pos + 1;
+        }
+    }
+
+    pos_ = (pos_ + (size_t) numSamples) % len;
+}
+
 } // namespace rovox::fx

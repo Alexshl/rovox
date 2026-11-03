@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Rovox contributors
 
 // REAPER .RPP import (task 150): tracks, folders, audio and MIDI items, markers/regions, tempo, aux sends.
-// FX chains: REAPER stock FX (ReaEQ, ReaComp, ReaGate, ReaLimit, ReaDelay, ReaVerbate) become the Rovox stock effect (listed under `mapped`;
-// the original chunk stays verbatim on the track and on the new plugin as `rovox:reaper_fx`). Their binary state is not read: with a sidecar
+// FX chains: REAPER stock FX (ReaEQ, ReaComp, ReaGate, ReaLimit, ReaDelay, ReaVerbate, ReaFir) become the Rovox stock effect (listed under `mapped`;
+// the original chunk stays verbatim on the track and on the new plugin as `rovox:reaper_fx`). Their binary state is not read, except for ReaFir (the curve, FFT size and output gain come from the saved state; EQ mode only): with a sidecar
 // file `<project>.rovoxfx.json` (written by tools/reaper/rovox_export_fx.lua inside REAPER) the settings are translated from the values REAPER
 // shows, without one the parameters stay at their defaults. REAPER JS effects (`<JS ...>`) become JSFX plugins when the file is found under
 // $ROVOX_JSFX_PATH, with the slider values of the project. Bypass / offline state carries over. Everything else is listed as unsupported and

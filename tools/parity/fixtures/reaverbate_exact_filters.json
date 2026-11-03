@@ -1,0 +1,49 @@
+{
+ "name": "reaverbate_exact_filters",
+ "kind": "verb",
+ "fx": "ReaVerbate",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Wet",
+   "value": 0
+  },
+  {
+   "name": "Dry",
+   "value": {
+    "n": 0.0
+   }
+  },
+  {
+   "name": "Room size",
+   "value": 64
+  },
+  {
+   "name": "Dampening",
+   "value": 25
+  },
+  {
+   "name": "Width",
+   "value": 0.5
+  },
+  {
+   "name": "Delay",
+   "value": 7
+  },
+  {
+   "name": "Lowpass",
+   "value": 2000
+  },
+  {
+   "name": "Hipass",
+   "value": 500
+  }
+ ],
+ "tail_ms": 3000,
+ "rt60": true,
+ "thresholds": {
+  "null_db": -60
+ },
+ "description": "ReaVerbate sample-exact model check: room 64, damp 25, width 0.5, pre-delay 7 ms, LP 2 kHz, HP 500 Hz (spec-reaverbate.md v2)"
+}

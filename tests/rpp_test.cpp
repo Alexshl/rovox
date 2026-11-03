@@ -648,11 +648,17 @@ ROVOX_TEST (rpp, generic_block_and_units_of_the_real_reaper_shape)
     CHECK_NEAR (fxWet, 50.0, 1e-6);
     CHECK_NEAR (wet, 0.0, 1e-6);
 
-    // an effect without a mix parameter lists an FX wet other than 100 % as untranslated; a delta solo too
+    // the reverb carries the FX wet itself, like the others
     auto g = translateReaperFx ("verb", entry ({ p (0, "Room size", 0, "50") }, 1, "normal", "40"));
     CHECK (! g.bypassed);
-    REQUIRE (g.untranslated.size() == 1);
-    CHECK (g.untranslated[0].from == "Wet");
+    CHECK (g.untranslated.empty());
+    double verbFxWet = -1.0;
+
+    for (auto& t : g.translated)
+        if (t.to == "fx_wet")
+            verbFxWet = t.value;
+
+    CHECK_NEAR (verbFxWet, 40.0, 1e-6);
 
     // ReaEQ: BANDTYPE decides the type (it tells the kinds of "Band" apart), the band name is the fallback and is cross-checked
     auto eqEntry = parseReaperFxEntry ({ { "name", "ReaEQ" }, { "config", { { "BANDTYPE0", "1" }, { "BANDENABLED0", "1" } } },

@@ -1,0 +1,31 @@
+{
+ "name": "reaverbate_exact_pink",
+ "kind": "verb",
+ "fx": "ReaVerbate",
+ "signal": "pink",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Wet",
+   "value": -6
+  },
+  {
+   "name": "Dry",
+   "value": 0
+  },
+  {
+   "name": "Room size",
+   "value": 80
+  },
+  {
+   "name": "Dampening",
+   "value": 50
+  }
+ ],
+ "tail_ms": 4000,
+ "rt60": true,
+ "thresholds": {
+  "null_db": -60
+ },
+ "description": "ReaVerbate sample-exact model on stereo pink noise, wet -6 dry 0, room 80 damp 50 (spec-reaverbate.md v2)"
+}

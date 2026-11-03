@@ -13,10 +13,13 @@
 #include "ReaperFx.h"
 #include "RppParser.h"
 #include "Sha256.h"
+#include "StockFx.h"
 #include "StockPlugins.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -609,6 +612,95 @@ struct Importer
         ChangeCollector::assignMissingIds (plugin->state);
     }
 
+    /** The saved state of a ReaFir chunk: the base64 lines between the wrapper header line and the preset-name line, decoded and joined. Layout
+        (docs/parity/spec-reafir.md): 32-bit fields, FFT size at byte 12, processing mode (float) at 20, mode (int) at 24, number of curve points at 28,
+        the points (Hz, dB floats) from 32, then 40 bytes with the output gain (amplitude) at +12. Empty if the chunk has no such lines. */
+    static std::vector<unsigned char> reaFirState (const RppNode& node)
+    {
+        std::vector<std::string> lines;
+
+        for (auto& e : node.entries)
+            if (! e.isBlock() && ! e.tokens.empty())
+                lines.push_back (e.tokens[0]);
+
+        std::vector<unsigned char> out;
+
+        if (lines.size() < 3)
+            return out;
+
+        for (size_t i = 1; i + 1 < lines.size(); ++i)
+        {
+            juce::MemoryOutputStream decoded;
+
+            if (! juce::Base64::convertFromBase64 (decoded, toJuce (lines[i])))
+                return {};
+
+            const auto* data = static_cast<const unsigned char*> (decoded.getData());
+            out.insert (out.end(), data, data + decoded.getDataSize());
+        }
+
+        return out;
+    }
+
+    /** ReaFir: the curve and the output gain of the saved state go to the Rovox FIR EQ. A flat curve (the default state) is an exact pass-through, so
+        the render equals REAPER's; any other curve is an approximate zero-phase FIR. Modes other than EQ are not modelled (warning REAFIR_MODE_UNSUPPORTED). */
+    void mapReaFir (const RppNode& node, te::Plugin& plugin, json& entry, const std::string& trackId)
+    {
+        const auto state = reaFirState (node);
+        const auto warn = [&] (const std::string& code, const std::string& message)
+        {
+            report.warnings.push_back ({ { "code", code }, { "message", message }, { "track_id", trackId }, { "plugin_id", entry["plugin_id"] } });
+        };
+
+        const auto i32 = [&] (size_t at) { std::int32_t v = 0; std::memcpy (&v, state.data() + at, 4); return v; };
+        const auto f32 = [&] (size_t at) { float v = 0; std::memcpy (&v, state.data() + at, 4); return (double) v; };
+
+        if (state.size() < 88 || i32 (28) < 0 || i32 (28) > 1024 || state.size() < 32 + 8 * (size_t) i32 (28) + 40)
+        {
+            warn ("REAFIR_STATE_UNREADABLE", "the ReaFir state could not be read; the effect passes the audio through unchanged");
+            entry["status"] = "mapped (ReaFir state unreadable, pass-through)";
+            return;
+        }
+
+        const int fftSize = i32 (12), count = i32 (28), mode = i32 (24);
+        const auto tail = 32 + 8 * (size_t) count;
+        std::vector<rovox::fx::ReaFirPoint> points;
+
+        for (int k = 0; k < count; ++k)
+        {
+            const double hz = f32 (32 + 8 * (size_t) k), db = f32 (36 + 8 * (size_t) k);
+
+            if (std::isfinite (hz) && std::isfinite (db) && hz > 0.0)
+                points.push_back ({ hz, db });
+        }
+
+        const double outGain = f32 (tail + 12);
+        const bool plainProcessing = std::abs (f32 (20)) < 1.0e-6;
+        const bool curveApplies = plainProcessing && (mode == 2 || mode == 0 || mode == 3 || mode == 4);
+
+        if (mode != 2 || ! plainProcessing)
+            warn ("REAFIR_MODE_UNSUPPORTED", "ReaFir mode " + std::to_string (mode) + (plainProcessing ? "" : " with processing mode 1")
+                                              + " is not modelled (only the EQ mode is); "
+                                              + (curveApplies ? "the EQ curve is applied" : "the audio passes through unchanged"));
+
+        if (! curveApplies)
+            points.clear();
+
+        std::ostringstream curve;
+        curve.precision (9);
+
+        for (auto& pt : points)
+            curve << (curve.tellp() > 0 ? " " : "") << pt.freqHz << ":" << pt.gainDb;
+
+        plugin.state.setProperty ("curve", toJuce (curve.str()), nullptr);
+        setStockParam (plugin, "fft_size", fftSize);
+        setStockParam (plugin, "gain", std::isfinite (outGain) && outGain > 1.0e-5 ? 20.0 * std::log10 (outGain) : (outGain == 0.0 ? -96.0 : 0.0));
+        entry["status"] = "mapped (ReaFir EQ curve and output gain from the saved state)";
+        entry["fft_size"] = fftSize;
+        entry["curve_points"] = (int) points.size();
+        entry["approximate"] = ! rovox::fx::ReaFir::curveIsFlat (points);
+    }
+
     /** A REAPER stock FX becomes the Rovox stock effect. With a sidecar entry its settings are translated, else the parameters stay at their defaults.
         The original chunk is kept on the plugin. false if the FX is not one. */
     bool mapStockFx (const ChainFx& cfx, te::PluginList& list, const std::string& trackId, long trackIndex, const std::string& trackGuid)
@@ -639,6 +731,10 @@ struct Importer
             // MT-PowerDrumKit: the MIDI drum part (General MIDI notes) plays the Rovox drum kit unchanged; the original settings have no counterpart
             entry["status"] = "mapped (MT-PowerDrumKit to the Rovox drum sampler; the kit's own mixer settings are not translated)";
             entry["instrument"] = true;
+        }
+        else if (stock->shortId == "fir")
+        {
+            mapReaFir (fx, *plugin, entry, trackId);
         }
         else if (const json* side = sidecarFor (cfx, trackIndex, trackGuid, *stock))
         {

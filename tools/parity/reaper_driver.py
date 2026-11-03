@@ -140,6 +140,11 @@ local function export_fx(track, fx)
     params[#params+1] = { index = p, name = pname, normalized = reaper.TrackFX_GetParamNormalized(track, fx, p), formatted = formatted }
   end
   local config = {}
+  if reaper.TrackFX_GetNamedConfigParm then
+    -- reported plugin delay compensation (latency in samples), when the FX reports one
+    local okp, pdc = reaper.TrackFX_GetNamedConfigParm(track, fx, "pdc")
+    if okp then config.pdc = pdc end
+  end
   if name:lower():find("reaeq", 1, true) and reaper.TrackFX_GetNamedConfigParm then
     for band = 0, 63 do
       for _, key in ipairs({ "BANDTYPE", "BANDENABLED" }) do

@@ -440,4 +440,94 @@ private:
     std::array<Channel, 2> ch_;
 };
 
+//==============================================================================
+/** ReaVerbate behaviour (reaper_compat of the Rovox Verb): a Freeverb-type reverberator, but with 10 lowpass-feedback combs and 6 allpasses per channel,
+    no mono sum of the inputs (each channel feeds only its own reverberator, the right one is spread by 23 samples at 44.1 kHz), input gain 0.015.
+    Line length = floor((base + spread) * fs / 44100). All parameters are the normalized knob positions n (0..1) of the effect:
+    comb feedback 0.3 + 0.68 n_room, damping 0.4 n_damp, wet and dry amplitude 2 n, width 2 n - 1; the pre-delay of the wet path is floor(n * 0.5 * fs)
+    samples; low-pass / high-pass (wet only) are RBJ biquads with Q = 1 at 20000 n Hz, off at n = 1 / n = 0. */
+struct ReaVerbParams
+{
+    double wet = 0.25, dry = 0.5, room = 0.294117647, damp = 0.5, width = 1.0, delay = 0.0, lowpass = 1.0, hipass = 0.0;
+    bool operator== (const ReaVerbParams&) const = default;
+};
+
+class ReaVerb
+{
+public:
+    void prepare (double sampleRate);       // allocates
+    void reset();
+    void setParams (const ReaVerbParams&);
+    void process (float* const* io, int numChannels, int numSamples);
+    static double tailSeconds (const ReaVerbParams&);
+
+    /** Length in samples of a line with this 44.1 kHz base length and stereo spread. */
+    static long lineLength (int base, int spread, double sampleRate);
+
+private:
+    static constexpr size_t numCombs = 10, numAllpasses = 6;
+    struct Comb { std::vector<double> buf; size_t pos = 0; double store = 0.0; };
+    struct Allpass { std::vector<double> buf; size_t pos = 0; };
+    struct Biquad { double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0; double run (double x) noexcept; };
+    struct Channel
+    {
+        std::array<Comb, numCombs> combs;
+        std::array<Allpass, numAllpasses> allpasses;
+        std::vector<double> pre;
+        size_t prePos = 0;
+        Biquad lp, hp;
+    };
+
+    void designFilters();
+
+    double sampleRate_ = 44100.0, feedback_ = 0.5, damp_ = 0.2;
+    size_t preSamples_ = 0;
+    bool lpOn_ = false, hpOn_ = false;
+    ReaVerbParams params_;
+    std::array<Channel, 2> ch_;
+};
+
+//==============================================================================
+/** ReaFir (EQ mode) from its saved state. The curve is a list of (frequency Hz, gain dB) points: flat beyond the end points, a smoothstep in
+    log-frequency between neighbours (approximate: the measured transition is within 0.35 dB of it). A flat curve is an exact gain without any latency
+    (the REAPER render is the input once its reported latency is compensated). Any other curve is a zero-phase linear-phase FIR (frequency sampling on
+    a grid of fftSize bins, cosine-tapered to +-fftSize/4 samples; approximate), delayed by latencySamples() = fftSize/4 which the host compensates. */
+struct ReaFirPoint
+{
+    double freqHz = 1000.0, gainDb = 0.0;
+    bool operator== (const ReaFirPoint&) const = default;
+};
+
+struct ReaFirParams
+{
+    int fftSize = 4096;
+    std::vector<ReaFirPoint> points;        // sorted by frequency; empty = flat 0 dB
+    double outputGain = 1.0;                // amplitude
+    bool operator== (const ReaFirParams&) const = default;
+};
+
+class ReaFir
+{
+public:
+    void prepare (double sampleRate);       // allocates
+    void reset();
+    void setParams (const ReaFirParams&);   // designs the FIR (allocates): not for the audio thread
+    void process (float* const* io, int numChannels, int numSamples);
+
+    int latencySamples() const              { return firActive_ ? half_ : 0; }
+    bool isFlat() const                     { return ! firActive_; }
+    static bool curveIsFlat (const std::vector<ReaFirPoint>&);
+    /** Curve gain in dB at a frequency. */
+    static double curveGainDb (const std::vector<ReaFirPoint>&, double hz);
+
+private:
+    double sampleRate_ = 44100.0, gain_ = 1.0;
+    bool firActive_ = false;
+    int half_ = 0;                          // FIR support is -half_ .. +half_
+    ReaFirParams params_;
+    std::vector<double> taps_;              // 2 * half_ + 1
+    std::array<std::vector<double>, 2> history_;
+    size_t pos_ = 0;
+};
+
 } // namespace rovox::fx
