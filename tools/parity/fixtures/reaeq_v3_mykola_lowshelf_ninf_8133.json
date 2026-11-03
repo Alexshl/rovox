@@ -1,0 +1,94 @@
+{
+ "name": "reaeq_v3_mykola_lowshelf_ninf_8133",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Low Shelf",
+   "value": {
+    "n": 0.82
+   }
+  },
+  {
+   "name": "Gain-Low Shelf",
+   "value": {
+    "n": 0.0
+   }
+  },
+  {
+   "name": "BW-Low Shelf",
+   "value": {
+    "n": 0.2
+   }
+  },
+  {
+   "name": "Freq-Band 2",
+   "value": {
+    "n": 0.289505988
+   }
+  },
+  {
+   "name": "Gain-Band 2",
+   "value": {
+    "n": 0.5
+   }
+  },
+  {
+   "name": "BW-Band 2",
+   "value": {
+    "n": 0.5
+   }
+  },
+  {
+   "name": "Freq-Band 3",
+   "value": {
+    "n": 0.476048619
+   }
+  },
+  {
+   "name": "Gain-Band 3",
+   "value": {
+    "n": 0.5
+   }
+  },
+  {
+   "name": "BW-Band 3",
+   "value": {
+    "n": 0.5
+   }
+  },
+  {
+   "name": "Freq-High Shelf 4",
+   "value": {
+    "n": 0.739350855
+   }
+  },
+  {
+   "name": "Gain-High Shelf 4",
+   "value": {
+    "n": 0.5
+   }
+  },
+  {
+   "name": "BW-High Shelf 4",
+   "value": {
+    "n": 0.2
+   }
+  }
+ ],
+ "config": {
+  "BANDTYPE0": "0",
+  "BANDTYPE1": "8",
+  "BANDTYPE2": "8",
+  "BANDTYPE3": "1",
+  "BANDTYPE4": "4",
+  "BANDENABLED0": "1",
+  "BANDENABLED1": "1",
+  "BANDENABLED2": "1",
+  "BANDENABLED3": "1",
+  "BANDENABLED4": "0"
+ },
+ "description": "mykola.RPP ReaEQ on 'Vocal Texture' (low shelf part): 8132.8 Hz gain -inf BW 0.8 -> HPF at 8.1 kHz (spec-reaeq.md v3)"
+}

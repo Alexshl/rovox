@@ -377,16 +377,19 @@ ROVOX_TEST (project, slow_subscriber_gets_resync_and_does_not_block_others)
 
     for (int i = 0; i < 1000; ++i)
     {
-        hub.publish ("local", "p_x", { { "type", "project.changed" }, { "revision", i } });
+        // the fast reader is given room in its queue (it is a thread of a machine that may be busy): only the stuck subscriber overflows
+        const auto giveUp = std::chrono::steady_clock::now() + std::chrono::seconds (20);
 
-        if (i % 4 == 0)
-            std::this_thread::sleep_for (std::chrono::microseconds (200));      // let the reader keep up
+        while (fast->pending() >= 4 && std::chrono::steady_clock::now() < giveUp)
+            std::this_thread::yield();
+
+        hub.publish ("local", "p_x", { { "type", "project.changed" }, { "revision", i } });
     }
 
     const auto publishMs = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
     reader.join();
-    CHECK (publishMs < 1000.0);         // 1000 publishes with a stuck subscriber: nobody waited for it
-    CHECK (fastCount.load() > 500);
+    CHECK (publishMs < 20000.0);        // nobody waited for the stuck subscriber (a block would show as the 20 s the loop above allows per event)
+    CHECK (fastCount.load() == 1000);   // the subscriber that keeps up misses nothing
 
     Event e;
     REQUIRE (slow->tryPop (e));
@@ -880,11 +883,24 @@ ROVOX_TEST (project, every_mutating_command_is_exactly_one_step)
             std::cerr << "    " << name << " changed nothing the snapshot sees\n";
 
         CHECK (after != before);
-        REQUIRE (env.run (id, "undo").ok);
+        const auto stepsBefore = env.ok (id, "history.list");
+        auto undoResult = env.run (id, "undo");
+        REQUIRE (undoResult.ok);
         test::pumpMessages (30);
-        CHECK (test::snapshot (env, id) == before);          // one undo restores everything
+        const auto undone = test::snapshot (env, id);
+
+        if (undone != before)
+            std::cerr << "    " << name << ": undid '" << undoResult.data.dump() << "' but the project differs from before: " << json::diff (before, undone).dump().substr (0, 600)
+                      << "\n    history before the undo: " << stepsBefore.dump() << "\n";
+
+        CHECK (undone == before);          // one undo restores everything
         REQUIRE (env.run (id, "redo").ok);
         test::pumpMessages (30);
-        CHECK (test::snapshot (env, id) == after);
+        const auto redone = test::snapshot (env, id);
+
+        if (redone != after)
+            std::cerr << "    " << name << ": redo differs from after: " << json::diff (after, redone).dump() << "\n";
+
+        CHECK (redone == after);
     }
 }

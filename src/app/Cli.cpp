@@ -721,7 +721,8 @@ int runServe (const Options& o)
         std::cout << "web UI not found (build web/ and pass --web-dir); the API, MCP and /ws are available" << std::endl;
 
     // the plugin catalog is scanned in the background (the scan itself runs in a child process); plugin.catalog reports the scan state meanwhile
-    std::thread catalogScan ([&host] { host.catalog().rescan(); });
+    std::atomic<bool> catalogScanDone { false };
+    std::thread catalogScan ([&host, &catalogScanDone] { host.catalog().rescan(); catalogScanDone = true; });
 
     ServeTimer timer (pm, &server.uploads(), &mcpStack.server);
     timer.startTimer (200);
@@ -729,13 +730,33 @@ int runServe (const Options& o)
     timer.stopTimer();
 
     std::cout << "rovox shutting down" << std::endl;
-    catalogScan.join();
+    host.catalog().cancelScan();            // a scan of many plugins must not hold up the shutdown ...
+
+    // ... but lilv cannot be interrupted inside a bundle (ZynAddSubFX takes seconds on a busy machine), so the wait for the current bundle is bounded
+    for (int i = 0; i < 20 && ! catalogScanDone; ++i)
+        std::this_thread::sleep_for (std::chrono::milliseconds (100));
+
+    const bool scanStillRunning = ! catalogScanDone;
+
+    if (! scanStillRunning)
+        catalogScan.join();
+
     mcpStack.server.shutdown();
     gateway.shutdown();
     server.stop();
     pm.closeAll (SaveMode::autosave);       // dirty projects land in autosave/, ready for crash-style recovery on the next start
     shutdownStorage (storage.value());      // ... and, with object storage, in the bucket (bounded wait)
     ::close (lockFd);
+
+    if (scanStillRunning)
+    {
+        // everything is saved: leave without tearing the engine down under the scan thread (the process manager's stop timeout is 10 s)
+        mcpStack.jobs.shutdown();
+        std::cout.flush();
+        std::cerr.flush();
+        ::_exit (0);
+    }
+
     return 0;
 }
 

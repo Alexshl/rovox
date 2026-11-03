@@ -146,7 +146,12 @@ ROVOX_TEST (plugins, scan_builds_a_catalog_and_the_next_scan_is_incremental)
     std::cerr << "    full scan " << std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() << " s, unchanged rescan "
               << second.data["elapsed_ms"] << " ms\n";
 
-    auto fixtures = env.run ("", "plugin.catalog", { { "query", "Rovox Test" } });
+    auto beep = env.run ("", "plugin.catalog", { { "query", "Rovox Test Beep" } });
+    REQUIRE (beep.ok);
+    REQUIRE (beep.data["total"] == 1);
+    CHECK (beep.data["plugins"][0]["kind"] == "instrument");
+
+    auto fixtures = env.run ("", "plugin.catalog", { { "query", "Rovox Test" }, { "kind", "effect" } });
     REQUIRE (fixtures.ok);
     CHECK (fixtures.data["total"] == 3);
     CHECK (fixtures.data["plugins"][0]["connector"] == "local");
@@ -346,24 +351,20 @@ ROVOX_TEST (plugins, midi_written_by_the_agent_is_played_by_an_lv2_instrument)
     jobs.shutdown();
 }
 
-ROVOX_TEST (plugins, a_drum_kit_plays_a_pattern_in_the_child_render)
+ROVOX_TEST (plugins, an_instrument_plays_a_drum_pattern_in_the_child_render)
 {
+    // The instrument is the fixture "Rovox Test Beep" (deterministic, cannot crash): a third-party sample player (avldrums) segfaults in the
+    // render child about every other run under load, which says nothing about Rovox. The crash path itself is covered by the crash-* fixtures.
     test::Env env;
     scanOnce (env);
-    const auto uid = pluginUid (env, "instrument", "Black Pearl Drumkit");
-
-    if (uid.empty())
-        return;
-
     const auto id = env.newProject ("drums");
     const auto track = env.ok (id, "track.create", { { "name", "Drums" } })["track_id"].get<std::string>();
-    auto added = env.run (id, "fx.add", { { "track_id", track }, { "plugin", { { "plugin_uid", uid } } } });
+    auto added = env.run (id, "fx.add", { { "track_id", track }, { "plugin", { { "plugin_uid", "lv2:urn:rovox:test:beep" } } } });
 
     if (! added.ok)
         std::cerr << "    " << added.error->toJson().dump() << "\n";
 
     REQUIRE (added.ok);
-    std::cerr << "    " << added.data["plugin"].dump() << "\n";
     json pattern = json::array();
 
     for (int beat = 0; beat < 8; ++beat)
@@ -375,32 +376,14 @@ ROVOX_TEST (plugins, a_drum_kit_plays_a_pattern_in_the_child_render)
     REQUIRE (env.run (id, "item.create_midi", { { "track_id", track }, { "notes", pattern } }).ok);
     JobManager jobs { fs::path() };
     JobService service (env.pm, jobs, env.executor);
+    auto started = service.startRender ({ "local", id, Origin::system() }, { { "name", "drums" }, { "check", true } }, false);
+    REQUIRE (started.ok());
+    auto job = waitForJob (jobs, started.value().jobId);
 
-    // avldrums is a flaky plugin (spike P2: it can crash when a worker thread loads samples while the instance changes state). That is exactly what the
-    // child process is for: a crash is a PLUGIN_CRASHED job, the server carries on, and the render is repeated. At least one of three attempts must give sound.
-    bool rendered = false;
-    int crashes = 0;
+    if (job["state"] != "succeeded")
+        std::cerr << "    " << job.dump() << "\n";
 
-    for (int attempt = 0; attempt < 3 && ! rendered; ++attempt)
-    {
-        auto started = service.startRender ({ "local", id, Origin::system() }, { { "name", "drums" }, { "check", true } }, false);
-        REQUIRE (started.ok());
-        auto job = waitForJob (jobs, started.value().jobId);
-
-        if (job["state"] == "succeeded")
-        {
-            rendered = true;
-        }
-        else
-        {
-            CHECK (job["error"]["code"] == errc::pluginCrashed);
-            ++crashes;
-            std::cerr << "    attempt " << attempt + 1 << " crashed in the child (" << job["error"]["message"].get<std::string>().substr (0, 80) << "); the server is alive\n";
-        }
-    }
-
-    REQUIRE (rendered);
-    std::cerr << "    drums rendered after " << crashes << " crashed attempt(s)\n";
+    REQUIRE (job["state"] == "succeeded");
     CHECK (peakOf (env.project (id).rendersDir() / "drums.wav") > 0.01);
     jobs.shutdown();
 }

@@ -16,6 +16,19 @@ The complete per-component audit is still to be done before the first release.
 
 Rovox is distributed under AGPL-3.0-or-later, which is compatible with GPL-3.0 components.
 
+## Local patches to the submodule
+
+`cmake/patches/tracktion-rovox.patch` is applied to `third_party/tracktion_engine` by the top-level `CMakeLists.txt` at configure time (the submodule
+pointer itself stays unmodified; the patch carries the same GPL-3.0-or-later licence as the files it changes):
+
+- `tracktion_TimeStretch.cpp`, Signalsmith stretcher: the fractional part of the input frames per output block is carried across blocks, so the long-run
+  input/output ratio is exact for any block size (the unpatched rounding made a 1.0583 stretch 2.5e-4 too fast, 43 ms in 190 s).
+- `tracktion_WaveNode.cpp`, libsamplerate reader: the read position advances by the speed ratio per output frame, so a varispeed clip is not reset and
+  re-seeked at every block.
+
+Clips are played with libsamplerate's best sinc converter (`SRC_SINC_BEST_QUALITY`, bundled by Tracktion in `modules/3rd_party/libsamplerate`,
+BSD-2-Clause, Erik de Castro Lopo), selected by `RovoxEngineBehaviour::getClipDefaults`. No new third-party code is added.
+
 ## Fetched at configure time (CMake FetchContent, linked statically)
 
 | Component | Use | License |

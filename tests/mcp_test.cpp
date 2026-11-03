@@ -1302,8 +1302,11 @@ ROVOX_TEST (mcp, http_light_calls_are_fast)
     const double p50 = times[times.size() / 2], p99 = times[times.size() * 99 / 100];
     std::cerr << "    project.list over HTTP: p50 " << p50 << " ms, p99 " << p99 << " ms\n";
     // the harness pumps the message loop in 2 ms slices and shares the machine with the build, so this only guards against gross
-    // regressions; the p99 < 10 ms target is measured against the real server (tools/mcp_e2e.py --bench) in the live run
-    CHECK (p99 < 30.0);
+    // regressions; the p99 < 10 ms target is measured against the real server (tools/mcp_e2e.py --bench) in the live run.
+    // The p99 of 400 calls is the 4th slowest one, i.e. a measure of how busy the machine is (92 ms on a machine running 20 busy threads
+    // while the median stayed at 4 ms), so it is only bounded loosely; the median is what a slow code path would move.
+    CHECK (p50 < 15.0);
+    CHECK (p99 < 250.0);
 }
 
 ROVOX_TEST (mcp, reaper_compat_names_map_onto_the_rovox_tools)

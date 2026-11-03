@@ -37,6 +37,25 @@ endif()
 file(READ "${ROVOX_TE_DIR}/VERSION.md" ROVOX_TRACKTION_VERSION)
 string(STRIP "${ROVOX_TRACKTION_VERSION}" ROVOX_TRACKTION_VERSION)
 
+# Local patches to the Tracktion submodule (cmake/patches/*.patch, listed in NOTICE.md). Applied once at configure time; a patch that is
+# already in the tree is skipped, one that no longer applies stops the configure.
+find_package(Git REQUIRED)
+file(GLOB ROVOX_TE_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/*.patch")
+list(SORT ROVOX_TE_PATCHES)
+foreach(patch IN LISTS ROVOX_TE_PATCHES)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${patch}")
+    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${patch}"
+                    WORKING_DIRECTORY "${ROVOX_TE_DIR}" RESULT_VARIABLE already_applied OUTPUT_QUIET ERROR_QUIET)
+    if(NOT already_applied EQUAL 0)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${patch}"
+                        WORKING_DIRECTORY "${ROVOX_TE_DIR}" RESULT_VARIABLE apply_result ERROR_VARIABLE apply_error)
+        if(NOT apply_result EQUAL 0)
+            message(FATAL_ERROR "Cannot apply ${patch} to ${ROVOX_TE_DIR}: ${apply_error}")
+        endif()
+        message(STATUS "Applied ${patch}")
+    endif()
+endforeach()
+
 # JUCE comes from Tracktion's nested submodule so both always match
 add_subdirectory("${ROVOX_TE_DIR}/modules/juce" third_party_juce)
 add_subdirectory("${ROVOX_TE_DIR}/modules" third_party_tracktion)

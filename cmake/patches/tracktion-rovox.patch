@@ -1,0 +1,87 @@
+diff --git a/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp b/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp
+index 1993f02782b..4db6aac18a5 100644
+--- a/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp
+@@ -518,7 +518,7 @@ public:
+ 
+     double speedRatio = 1.0, readPosition = 0.0;
+     float gains[2] = { 1.0f, 1.0f };
+-    bool failedToRead = false;
++    bool failedToRead = false, wasPassingThrough = false;
+ 
+     SampleCount getReadPosition() const
+     {
+@@ -559,6 +559,26 @@ public:
+         const auto ratio = sampleRatio * speedRatio;
+         assert (ratio > 0.0);
+ 
++        // ROVOX PATCH: nothing to convert (same rate, normal speed): pass the source through bit-exact; the sinc filter would change the samples
++        if (ratio == 1.0)
++        {
++            if (! std::exchange (wasPassingThrough, true))
++                src_reset (src_state);
++
++            auto view = destBuffer;
++
++            if (! source->readSamples (view))
++            {
++                destBuffer.clear();
++                return false;
++            }
++
++            readPosition += numFramesToDo;
++            return true;
++        }
++
++        wasPassingThrough = false;
++
+         const auto numRead = src_callback_read (src_state, 1.0 / ratio,
+                                                 static_cast<long> (numFramesToDo),
+                                                 interleavedOutputScratchBuffer.getView().data.data);
+@@ -571,7 +591,7 @@ public:
+         }
+ 
+         choc::buffer::copy (destBuffer, interleavedOutputScratchBuffer.getStart (numFramesToDo));
+-        readPosition += numFramesToDo;
++        readPosition += numFramesToDo * speedRatio;     // ROVOX PATCH: setPosition() compares this with the clip-time position, which advances by speedRatio per output frame; without it every block was a jump (src_reset + seek)
+ 
+         return true;
+     }
+diff --git a/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp b/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp
+index 26fd3d15d2e..fced706b4e2 100644
+--- a/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp
++++ b/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp
+@@ -925,6 +925,7 @@ struct SignalsmithStretcher  : public TimeStretcher::Stretcher
+     {
+         stretch.reset();
+         hasDoneFinalBlock = false;
++        inputRemainder = 0.0;
+     }
+ 
+     bool setSpeedAndPitch (float speedRatio_, float semitonesUp) override
+@@ -936,7 +937,8 @@ struct SignalsmithStretcher  : public TimeStretcher::Stretcher
+ 
+     int getFramesNeeded() const override
+     {
+-        return juce::roundToInt (samplesPerOutputBuffer / speedRatio);
++        // ROVOX PATCH: the fractional part is carried across blocks so the long-run input/output ratio is exact
++        return juce::roundToInt (samplesPerOutputBuffer / (double) speedRatio + inputRemainder);
+     }
+ 
+     int getMaxFramesNeeded() const override
+@@ -948,6 +950,7 @@ struct SignalsmithStretcher  : public TimeStretcher::Stretcher
+     {
+         CRASH_TRACER
+         stretch.process (inChannels, numSamples, outChannels, samplesPerOutputBuffer);
++        inputRemainder = juce::jlimit (-1.0, 1.0, inputRemainder + samplesPerOutputBuffer / (double) speedRatio - numSamples);
+         return samplesPerOutputBuffer;
+     }
+ 
+@@ -971,6 +974,7 @@ private:
+     int numChannels = 0;
+     const int samplesPerOutputBuffer;
+     float speedRatio = 1.0f;
++    double inputRemainder = 0.0;
+     bool hasDoneFinalBlock = false;
+ 
+     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SignalsmithStretcher)

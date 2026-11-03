@@ -162,6 +162,16 @@ json PluginCatalog::rescan (bool force)
         state_ = "scanning";
     }
 
+    const auto cancelledResult = [&]
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        state_ = plugins_.empty() ? "never" : "done";
+        return json { { "cancelled", true } };
+    };
+
+    if (cancelled_)
+        return cancelledResult();
+
     // Scanned into the engine's own list: with `serve` that list has the out-of-process scanner (a plugin that crashes while it is scanned
     // is blacklisted by the scan child, not by this process), and Tracktion finds the description again there when it loads a plugin.
     auto& pm = host_.engine().getPluginManager();
@@ -188,8 +198,11 @@ json PluginCatalog::rescan (bool force)
                                               toFile (host_.dataDir() / "cache" / ("scan-deadman-" + name + ".txt")), false);
         juce::String scanned;
 
-        while (scanner.scanNextFile (true, scanned))
+        while (! cancelled_ && scanner.scanNextFile (true, scanned))
         {}
+
+        if (cancelled_)
+            return cancelledResult();
 
         for (auto& f : scanner.getFailedFiles())
         {

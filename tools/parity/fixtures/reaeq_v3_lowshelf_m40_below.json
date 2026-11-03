@@ -1,0 +1,35 @@
+{
+ "name": "reaeq_v3_lowshelf_m40_below",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Low Shelf",
+   "value": {
+    "n": 0.434
+   }
+  },
+  {
+   "name": "Gain-Low Shelf",
+   "value": {
+    "n": 0.00499
+   }
+  },
+  {
+   "name": "BW-Low Shelf",
+   "value": {
+    "n": 0.2
+   }
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "0"
+ },
+ "description": "ReaEQ single band type 0 (Low Shelf), 768.3 Hz, gain knob normalized 0.00499 (spec-reaeq.md v3 low-gain rules)"
+}

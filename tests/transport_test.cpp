@@ -124,11 +124,27 @@ ROVOX_TEST (transport, meters_move_while_playing_and_packets_are_decodable_in_or
         packets.push_back (p);
     });
 
+    const auto started = std::chrono::steady_clock::now();
     env.ok (f.project, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
     test::pumpMessages (100);
     env.ok (f.project, "mixer.get_meters");         // drop what was measured while the stream started
     test::pumpMessages (700);
+
+    // The stream is driven by a timer thread in real time, so on a loaded machine it can start late (or the meter taps attach late, after
+    // the playback graph was rebuilt): wait until the sine has been measured and enough packets were sent instead of assuming a fixed time.
     auto meters = env.ok (f.project, "mixer.get_meters");
+    auto packetCount = [&] { std::lock_guard<std::mutex> lock (m); return packets.size(); };
+
+    for (int i = 0; i < 40 && (meters["tracks"][0]["peak_db"][0].get<double>() <= -16.0 || packetCount() < 20); ++i)
+    {
+        test::pumpMessages (100);
+        auto more = env.ok (f.project, "mixer.get_meters");
+
+        if (more["tracks"][0]["peak_db"][0].get<double>() > meters["tracks"][0]["peak_db"][0].get<double>())
+            meters = more;
+    }
+
+    const auto playedS = std::chrono::duration<double> (std::chrono::steady_clock::now() - started).count();
     env.ok (f.project, "transport.set", { { "state", "stopped" } });
     test::pumpMessages (200);
     stream->setPacketSink ({});
@@ -142,9 +158,9 @@ ROVOX_TEST (transport, meters_move_while_playing_and_packets_are_decodable_in_or
     CHECK (meters["master"]["peak_db"][0].get<double>() > -20.0);
 
     std::lock_guard<std::mutex> lock (m);
-    std::cerr << "    " << packets.size() << " audio packets\n";
+    std::cerr << "    " << packets.size() << " audio packets in " << playedS << " s\n";
     CHECK (packets.size() >= 20);
-    CHECK (packets.size() <= 60);
+    CHECK ((double) packets.size() <= 60.0 * (playedS + 0.2));      // 40 per second at most (a packet every ~25 ms)
 
     std::uint32_t lastSeq = 0;
     bool first = true, ordered = true, headersOk = true;

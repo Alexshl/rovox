@@ -30,11 +30,12 @@ target_sources(rovox_engine_tests PRIVATE
     stock_test.cpp
     parity_test.cpp
     drums_test.cpp
-    transport_test.cpp)
+    transport_test.cpp
+    stretch_resample_test.cpp)
 
 target_link_libraries(rovox_engine_tests PRIVATE rovox_mcp)
 
-foreach(suite core engine project import render rpp upload cli mcp transport web stock drums jsfx plugins midi routing fx templates projects delivery storage parity)
+foreach(suite core engine project import render rpp upload cli mcp transport web stock drums jsfx plugins midi routing fx templates projects delivery storage parity stretch)
     add_test(NAME ${suite} COMMAND rovox_engine_tests ${suite})
 endforeach()
 
@@ -54,3 +55,10 @@ set_target_properties(rovox_test_lv2 PROPERTIES PREFIX "" OUTPUT_NAME crash LIBR
 configure_file(fixtures/rovox-test.lv2/manifest.ttl ${CMAKE_CURRENT_BINARY_DIR}/lv2/rovox-test.lv2/manifest.ttl COPYONLY)
 configure_file(fixtures/rovox-test.lv2/crash.ttl ${CMAKE_CURRENT_BINARY_DIR}/lv2/rovox-test.lv2/crash.ttl COPYONLY)
 add_dependencies(rovox_engine_tests rovox_test_lv2)
+
+# a deterministic LV2 instrument (plays a decaying sine per MIDI note-on) for the tests that need an instrument in the child render
+add_library(rovox_test_lv2_beep MODULE fixtures/rovox-test.lv2/beep.c)
+target_link_libraries(rovox_test_lv2_beep PRIVATE m)
+set_target_properties(rovox_test_lv2_beep PROPERTIES PREFIX "" OUTPUT_NAME beep LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lv2/rovox-test.lv2)
+configure_file(fixtures/rovox-test.lv2/beep.ttl ${CMAKE_CURRENT_BINARY_DIR}/lv2/rovox-test.lv2/beep.ttl COPYONLY)
+add_dependencies(rovox_engine_tests rovox_test_lv2_beep)

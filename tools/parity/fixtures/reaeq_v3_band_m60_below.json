@@ -1,0 +1,35 @@
+{
+ "name": "reaeq_v3_band_m60_below",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Band 1",
+   "value": {
+    "n": 0.434
+   }
+  },
+  {
+   "name": "Gain-Band 1",
+   "value": {
+    "n": 0.000499
+   }
+  },
+  {
+   "name": "BW-Band 1",
+   "value": {
+    "n": 0.3
+   }
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "8"
+ },
+ "description": "ReaEQ single band type 8 (Band), 768.3 Hz, gain knob normalized 0.000499 (spec-reaeq.md v3 low-gain rules)"
+}

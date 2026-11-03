@@ -115,6 +115,7 @@ private:
     Manifest manifest_;
     PublishFn publish_;
     std::unique_ptr<te::Edit> edit_;
+    std::unique_ptr<te::Edit::UndoTransactionInhibitor> undoInhibitor_;      // after edit_: gone before the Edit is
     std::unique_ptr<ChangeCollector> collector_;
     ActivityLog activity_;
     ProjectMixerStrip strip_;

@@ -11,8 +11,26 @@
 namespace rovox
 {
 
+// Audio clips saved before the real-time wave node with the best resampler became the default carry neither property and would stay on
+// the proxy path with the Lagrange interpolator (see RovoxEngineBehaviour::getClipDefaults).
+static void defaultClipResampling (juce::ValueTree node)
+{
+    if (node.hasType (te::IDs::AUDIOCLIP))
+    {
+        if (! node.hasProperty (te::IDs::resamplingQuality))
+            node.setProperty (te::IDs::resamplingQuality, juce::VariantConverter<te::ResamplingQuality>::toVar (te::ResamplingQuality::sincBest), nullptr);
+
+        if (! node.hasProperty (te::IDs::proxyAllowed))
+            node.setProperty (te::IDs::proxyAllowed, false, nullptr);
+    }
+
+    for (auto child : node)
+        defaultClipResampling (child);
+}
+
 std::unique_ptr<te::Edit> createEditForProject (te::Engine& engine, const fs::path& dir, juce::ValueTree state, te::Edit::EditRole role)
 {
+    defaultClipResampling (state);
     te::Edit::Options o { engine };
     o.editState = std::move (state);
     o.editProjectItemID = te::ProjectItemID::createNewID (te::ProjectID {});
@@ -40,6 +58,11 @@ Project::Project (EngineHost& host, fs::path dir, Manifest manifest, juce::Value
 
     edit_ = createEditForProject (host.engine(), dir_, std::move (editState), te::Edit::EditRole::forEditing);
 
+    // The command bus owns the undo transactions: one command is one step. Tracktion closes the open transaction 350 ms after a change, which on a
+    // busy machine fell between a command and the asynchronous follow-up writes of the Edit (e.g. a plugin reordered after fx.add), so that
+    // a single undo took back only the follow-up. Without it those writes join the transaction of the command that caused them.
+    undoInhibitor_ = std::make_unique<te::Edit::UndoTransactionInhibitor> (*edit_);
+
     ChangeCollector::assignMissingIds (edit_->state);
     edit_->getUndoManager().clearUndoHistory();
 
@@ -63,6 +86,7 @@ Project::~Project()
         s->forget (edit_.get());
 
     collector_.reset();
+    undoInhibitor_.reset();
     edit_.reset();
 
     if (lockFd_ >= 0)

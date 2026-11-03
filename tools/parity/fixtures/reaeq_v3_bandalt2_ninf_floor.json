@@ -1,0 +1,35 @@
+{
+ "name": "reaeq_v3_bandalt2_ninf_floor",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Band (alt 2) 1",
+   "value": {
+    "n": 0.434
+   }
+  },
+  {
+   "name": "Gain-Band (alt 2) 1",
+   "value": {
+    "n": 0.0
+   }
+  },
+  {
+   "name": "BW-Band (alt 2) 1",
+   "value": {
+    "n": 0.3
+   }
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "2"
+ },
+ "description": "ReaEQ single band type 2 (Band (alt 2)), 768.3 Hz, gain knob normalized 0 (spec-reaeq.md v3 low-gain rules)"
+}

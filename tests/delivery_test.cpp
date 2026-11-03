@@ -538,10 +538,11 @@ ROVOX_TEST (delivery, secrets_never_reach_results_the_journal_the_log_or_events)
     Mock mock;
     const std::string token = "777:ZZ-very-secret-bot-token-QQ";
     const std::string hmac = "whsec_very_secret_hmac_value";
+    const std::string chatId = "7316529804";            // long enough that it cannot appear by chance in a timestamp, a counter or an id in the output
     setSecret ("ROVOX_TEST_TG2", token.c_str());
     setSecret ("ROVOX_TEST_HOOK2", hmac.c_str());
     mock.script = { { 401, R"({"ok":false,"description":"bad token 777:ZZ-very-secret-bot-token-QQ"})" } };
-    f.service.registry().add (makeTelegramAdapter ("telegram.me", { "ROVOX_TEST_TG2", "" }, "555", mock.url()));
+    f.service.registry().add (makeTelegramAdapter ("telegram.me", { "ROVOX_TEST_TG2", "" }, chatId, mock.url()));
     f.service.registry().add (makeWebhookAdapter ("webhook.n8n", mock.url() + "/h", { "ROVOX_TEST_HOOK2", "" }));
 
     std::string seen;
@@ -570,7 +571,7 @@ ROVOX_TEST (delivery, secrets_never_reach_results_the_journal_the_log_or_events)
     seen += js.str();
     f.env.hub.removeObserver (observer);
 
-    for (auto& secret : { token, hmac, std::string ("555") })
+    for (auto& secret : { token, hmac, chatId })
         CHECK (! contains (seen, secret));
 
     CHECK (contains (seen, "telegram.me"));

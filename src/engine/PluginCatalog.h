@@ -8,6 +8,7 @@
 
 #include "EngineHost.h"
 
+#include <atomic>
 #include <mutex>
 #include <optional>
 
@@ -47,6 +48,10 @@ public:
     /** Scans the LV2 / VST3 search paths (blocking, any thread but one scan at a time). Unchanged search paths give the cached
         catalog at once unless `force`. */
     json rescan (bool force = false);
+
+    /** Ends a running scan after the file it is on and stops later ones (the server is shutting down). The unfinished scan is not recorded:
+        the catalog keeps what it had, and the next start scans again. */
+    void cancelScan() noexcept      { cancelled_ = true; }
 
     json query (const CatalogQuery&);
 
@@ -90,6 +95,7 @@ private:
     fs::path dir_;
     mutable std::mutex mutex_;
     std::mutex scanMutex_;
+    std::atomic<bool> cancelled_ { false };
     json plugins_ = json::object();         // plugin_uid -> record
     json blacklist_ = json::object(), probe_ = json::object(), tags_ = json::object(), presetCache_ = json::object();
     std::string fingerprint_, scannedAt_;

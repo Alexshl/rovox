@@ -1,0 +1,35 @@
+{
+ "name": "reaeq_v3_highshelf_ninf",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-High Shelf 1",
+   "value": {
+    "n": 0.434
+   }
+  },
+  {
+   "name": "Gain-High Shelf 1",
+   "value": {
+    "n": 0.0
+   }
+  },
+  {
+   "name": "BW-High Shelf 1",
+   "value": {
+    "n": 0.2
+   }
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "1"
+ },
+ "description": "ReaEQ single band type 1 (High Shelf), 768.3 Hz, gain knob normalized 0 (spec-reaeq.md v3 low-gain rules)"
+}

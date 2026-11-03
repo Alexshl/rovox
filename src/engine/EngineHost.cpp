@@ -52,6 +52,16 @@ public:
     bool addSystemAudioIODeviceTypes() override     { return config.audio == AudioMode::Device; }
     bool autoInitialiseDeviceManager() override     { return false; }
 
+    // Clips play through the real-time wave node: it resamples (sample-rate conversion, varispeed) with libsamplerate's best sinc converter.
+    // The proxy-file path uses a Lagrange interpolator whatever the clip's resamplingQuality says, and it loses highs (-1 dB at 16 kHz).
+    ClipDefaults getClipDefaults() override
+    {
+        ClipDefaults d;
+        d.useProxyFile = false;
+        d.resamplingQuality = te::ResamplingQuality::sincBest;
+        return d;
+    }
+
     // Spike P5: the default (400 tracks) makes Edit::insertTrack return null and ensureNumberOfAudioTracks spin forever.
     te::EditLimits getEditLimits() override
     {
