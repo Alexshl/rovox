@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
+#include "PanLaw.h"
+#include "PanStage.h"
 #include "ReaperFx.h"
 #include "RppImport.h"
 #include "RppParser.h"
@@ -732,4 +734,228 @@ ROVOX_TEST (rpp, local_reaper_projects_if_present)
                   << " missing " << r.data["missing_media"].size() << " warnings " << r.data["warnings"].size() << "\n";
         env.pm.close (id, SaveMode::discard);
     }
+}
+
+//==============================================================================
+// Pan modes / pan law (REAPER semantics) and item play rate
+namespace
+{
+std::string panRpp (const std::string& trackBody, const std::string& itemBody, int projectPanMode = 3)
+{
+    return "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  PANLAW 1\n  PANMODE " + std::to_string (projectPanMode) + "\n  TEMPO 120 4 4 0\n"
+           "  <TRACK {AAAAAAAA-0000-0000-0000-0000000000A1}\n    NAME \"T\"\n" + trackBody + "\n    ISBUS 0 0\n"
+           "    <ITEM\n      POSITION 0\n      LENGTH 1\n" + itemBody + "\n      <SOURCE WAVE\n        FILE \"item.wav\"\n      >\n    >\n  >\n>\n";
+}
+
+/** Imports the RPP into a new project (media in the RPP's folder), renders the master and returns the planar result. */
+std::vector<std::vector<float>> importAndRender (test::Env& env, const fs::path& dir, const std::string& rppText, std::string& projectId, double* sr = nullptr)
+{
+    std::ofstream (dir / "t.RPP") << rppText;
+    projectId = env.newProject ("pan");
+    REQUIRE (env.run (projectId, "import.rpp", { { "path", (dir / "t.RPP").string() } }).ok);
+    RenderRequest rq;
+    rq.tailS = 0.0;
+    auto rr = renderProject (env.project (projectId), rq);
+
+    if (! rr.ok())
+        std::cerr << "    render failed: " << rr.error().toJson().dump() << "\n";
+
+    REQUIRE (rr.ok());
+    std::vector<std::vector<float>> ch;
+    double rate = 0;
+    REQUIRE (test::readWav (env.project (projectId).dir() / rr.value()["file"]["path"].get<std::string>(), ch, rate));
+
+    if (sr != nullptr)
+        *sr = rate;
+
+    if (std::getenv ("ROVOX_TEST_KEEP_RENDER") != nullptr)
+        fs::copy_file (env.project (projectId).dir() / rr.value()["file"]["path"].get<std::string>(), std::string (std::getenv ("ROVOX_TEST_KEEP_RENDER")), fs::copy_options::overwrite_existing);
+
+    return ch;
+}
+
+double peakOf (const std::vector<float>& v, size_t from, size_t to)
+{
+    double m = 0;
+
+    for (size_t i = from; i < std::min(to, v.size()); ++i)
+        m = std::max (m, (double) std::abs (v[i]));
+
+    return m;
+}
+} // namespace
+
+ROVOX_TEST (rpp, pan_law_maths_per_mode)
+{
+    double l, r;
+    // 0 dB law (REAPER default): the near side stays at full level, the far side fades out linearly
+    pan::monoGains (0.5, 0.0, l, r);
+    CHECK_NEAR (l, 0.5, 1e-9);
+    CHECK_NEAR (r, 1.0, 1e-9);
+    pan::monoGains (-0.7, 0.0, l, r);
+    CHECK_NEAR (l, 1.0, 1e-9);
+    CHECK_NEAR (r, 0.3, 1e-9);
+
+    // -3 dB: constant power, centre at -3 dB, hard pan at full level
+    pan::monoGains (0.0, -3.0103, l, r);
+    CHECK_NEAR (l, std::sqrt (0.5), 1e-4);
+    CHECK_NEAR (r, std::sqrt (0.5), 1e-4);
+    pan::monoGains (1.0, -3.0103, l, r);
+    CHECK_NEAR (l, 0.0, 1e-9);
+    CHECK_NEAR (r, 1.0, 1e-9);
+
+    // -6 dB: centre at 0.5; -4.5 dB: centre at -4.5 dB
+    pan::monoGains (0.0, -6.0206, l, r);
+    CHECK_NEAR (l, 0.5, 1e-4);
+    pan::monoGains (0.0, -4.5, l, r);
+    CHECK_NEAR (20.0 * std::log10 (l), -4.5, 1e-3);
+    CHECK_NEAR (pan::lawDbFromReaper (1.0), 0.0, 1e-9);
+    CHECK_NEAR (pan::lawDbFromReaper (0.5), -6.0206, 1e-3);
+
+    // stereo balance (mode 3): balance without law for stereo, pan with law for mono
+    auto m = pan::matrix (pan::Mode::balance, -0.7, 1.0, -3.0, false);
+    CHECK_NEAR (m.ll, 1.0, 1e-9);
+    CHECK_NEAR (m.rr, 0.3, 1e-9);
+    CHECK_NEAR (m.lr, 0.0, 1e-9);
+    m = pan::matrix (pan::Mode::balance, 0.0, 1.0, -3.0, true);
+    CHECK_NEAR (m.ll, std::sqrt (0.5), 1e-3);
+
+    // classic 3.x: the law applies to stereo too
+    m = pan::matrix (pan::Mode::classic, 0.0, 1.0, -3.0, false);
+    CHECK_NEAR (m.ll, std::sqrt (0.5), 1e-3);
+    CHECK_NEAR (m.rr, std::sqrt (0.5), 1e-3);
+
+    // stereo pan: centre is a pass-through, hard right puts both channels on the right
+    m = pan::matrix (pan::Mode::stereoPan, 0.0, 1.0, 0.0, false);
+    CHECK_NEAR (m.ll, 1.0, 1e-9);
+    CHECK_NEAR (m.rr, 1.0, 1e-9);
+    CHECK_NEAR (m.lr + m.rl, 0.0, 1e-9);
+    m = pan::matrix (pan::Mode::stereoPan, 1.0, 1.0, 0.0, false);
+    CHECK_NEAR (m.ll, 0.0, 1e-9);
+    CHECK_NEAR (m.lr, 0.0, 1e-9);
+    CHECK_NEAR (m.rl, 1.0, 1e-9);
+    CHECK_NEAR (m.rr, 1.0, 1e-9);
+
+    // dual pan: (-1, +1) is the identity, a swap exchanges the channels
+    m = pan::matrix (pan::Mode::dualPan, -1.0, 1.0, 0.0, false);
+    CHECK_NEAR (m.ll, 1.0, 1e-9);
+    CHECK_NEAR (m.rr, 1.0, 1e-9);
+    CHECK_NEAR (m.lr, 0.0, 1e-9);
+    m = pan::matrix (pan::Mode::dualPan, 1.0, -1.0, 0.0, false);
+    CHECK_NEAR (m.lr, 1.0, 1e-9);
+    CHECK_NEAR (m.rl, 1.0, 1e-9);
+    CHECK_NEAR (m.ll, 0.0, 1e-9);
+
+    CHECK (pan::modeFromReaper (3) == pan::Mode::balance);
+    CHECK (pan::modeFromReaper (0) == pan::Mode::classic);
+    CHECK (pan::modeFromReaper (5) == pan::Mode::stereoPan);
+    CHECK (pan::modeFromReaper (6) == pan::Mode::dualPan);
+}
+
+ROVOX_TEST (rpp, pan_mode_and_law_are_imported_and_new_tracks_get_reaper_defaults)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("panimport");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -12, 1.0, 48000) }, 48000, 24);
+    std::string rppText = panRpp ("    VOLPAN 1 0.2 -1 -1 1\n    PANMODE 6", "", 0);
+    const auto pos = rppText.find ("PANLAW 1");
+    rppText.replace (pos, 8, "PANLAW 0.70794578438414");
+    std::ofstream (dir / "t.RPP") << rppText;
+    const auto id = env.newProject ("panimport");
+    REQUIRE (env.run (id, "import.rpp", { { "path", (dir / "t.RPP").string() } }).ok);
+    auto& p = env.project (id);
+    CHECK (projectPanMode (p.edit()) == 0);
+    CHECK_NEAR (projectPanLawDb (p.edit()), -3.0, 0.01);
+    auto audio = te::getAudioTracks (p.edit());
+    REQUIRE (audio.size() == 1);
+    CHECK (audio[0]->getVolumePlugin()->state.getProperty ("rovox:panMode", -1).operator int() == 6);
+
+    // a new project and a new track: balance / mono pan, 0 dB law
+    const auto id2 = env.newProject ("fresh");
+    CHECK (projectPanMode (env.project (id2).edit()) == 3);
+    CHECK_NEAR (projectPanLawDb (env.project (id2).edit()), 0.0, 1e-9);
+    const auto tid = env.ok (id2, "track.create", { { "name", "x" }, { "pan", 0.5 } })["track_id"].get<std::string>();
+    auto tracks = te::getAudioTracks (env.project (id2).edit());
+    REQUIRE (tracks.size() == 1);
+    CHECK (tracks[0]->getVolumePlugin()->getPan() > 0.49f);
+    CHECK (toStd (tracks[0]->getVolumePlugin()->state[te::IDs::type].toString()) == "rovoxvolume");
+    (void) tid;
+}
+
+ROVOX_TEST (rpp, stereo_item_balance_leaves_the_near_channel_alone_and_fades_the_far_one)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("panstereo");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -6, 1.0, 48000), test::sine (1000, -9, 1.0, 48000) }, 48000, 24);
+    std::string id;
+    auto out = importAndRender (env, dir, panRpp ("    VOLPAN 1 -0.7 -1 -1 1", ""), id);
+    REQUIRE (out.size() >= 2);
+    const double l = peakOf (out[0], 4800, 43200), r = peakOf (out[1], 4800, 43200);
+    CHECK_NEAR (20.0 * std::log10 (l), -6.0, 0.15);                         // REAPER: unchanged
+    CHECK_NEAR (20.0 * std::log10 (r), -9.0 + 20.0 * std::log10 (0.3), 0.15);    // REAPER: x 0.3
+}
+
+ROVOX_TEST (rpp, mono_item_pan_right_keeps_the_right_channel_and_halves_the_left)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("panmono");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -12, 1.0, 48000) }, 48000, 24);
+    std::string id;
+    auto out = importAndRender (env, dir, panRpp ("    VOLPAN 1 0.5 -1 -1 1", ""), id);
+    REQUIRE (out.size() >= 2);
+    const double l = peakOf (out[0], 4800, 43200), r = peakOf (out[1], 4800, 43200);
+    CHECK_NEAR (20.0 * std::log10 (r), -12.0, 0.15);
+    CHECK_NEAR (20.0 * std::log10 (l), -12.0 - 6.0206, 0.15);
+}
+
+ROVOX_TEST (rpp, item_playrate_scales_speed_and_source_offset_and_preserve_pitch_selects_a_stretcher)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("playrate");
+    test::writeWav (dir / "item.wav", { test::sine (440, -12, 4.0, 48000) }, 48000, 24);
+
+    // resample (pitch follows speed): 2 x, source offset 0.5 s
+    std::string id;
+    double sr = 48000.0;
+    auto out = importAndRender (env, dir, panRpp ("    VOLPAN 1 0 -1 -1 1", "      SOFFS 0.5\n      PLAYRATE 2 0 0 -1 0 0.0025"), id, &sr);
+    {
+        auto& p = env.project (id);
+        auto clips = te::getAudioTracks (p.edit())[0]->getClips();
+        REQUIRE (clips.size() == 1);
+        auto* wc = dynamic_cast<te::WaveAudioClip*> (clips[0]);
+        REQUIRE (wc != nullptr);
+        CHECK_NEAR (wc->getSpeedRatio(), 2.0, 1e-9);
+        CHECK_NEAR (wc->getPosition().getOffset().inSeconds(), 0.25, 1e-9);
+        CHECK_NEAR (wc->getPosition().getLength().inSeconds(), 1.0, 1e-9);
+        CHECK (wc->getTimeStretchMode() == te::TimeStretcher::disabled);
+    }
+
+    // zero crossings of the render: 440 Hz at double speed is 880 Hz
+    REQUIRE (! out.empty());
+    int crossings = 0;
+
+    for (size_t i = 4801; i < 43200; ++i)
+        if (out[0][i - 1] < 0.0f && out[0][i] >= 0.0f)
+            ++crossings;
+
+    CHECK_NEAR ((double) crossings / ((43200 - 4801) / sr), 880.0, 15.0);
+
+    // preserve pitch: a stretcher is selected
+    auto out2 = importAndRender (env, dir, panRpp ("    VOLPAN 1 0 -1 -1 1", "      PLAYRATE 1.05833333333333 1 0 -1 0 0.0025"), id, &sr);
+    auto clips = te::getAudioTracks (env.project (id).edit())[0]->getClips();
+    REQUIRE (clips.size() == 1);
+    auto* wc = dynamic_cast<te::WaveAudioClip*> (clips[0]);
+    REQUIRE (wc != nullptr);
+    CHECK_NEAR (wc->getSpeedRatio(), 1.05833333333333, 1e-9);
+    CHECK (wc->getTimeStretchMode() != te::TimeStretcher::disabled);
+
+    // the render stretches: the pitch stays at 440 Hz while the source runs 5.8 % faster
+    REQUIRE (! out2.empty());
+    int crossings2 = 0;
+
+    for (size_t i = 9601; i < 38400; ++i)
+        if (out2[0][i - 1] < 0.0f && out2[0][i] >= 0.0f)
+            ++crossings2;
+
+    CHECK_NEAR ((double) crossings2 / ((38400 - 9601) / sr), 440.0, 15.0);
 }

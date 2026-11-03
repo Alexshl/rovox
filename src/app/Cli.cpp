@@ -4,6 +4,7 @@
 #include "Cli.h"
 
 #include "CommandBus.h"
+#include "DrumKitLibrary.h"
 #include "EngineHost.h"
 #include "Gateway.h"
 #include "HttpServer.h"
@@ -436,6 +437,7 @@ std::string instanceOwnerId()
 std::shared_ptr<RemoteStorage> makeRemoteStorage (const StorageConfig& cfg)
 {
     auto store = makeS3ObjectStore (cfg.store);
+    DrumKitLibrary::instance().setObjectStore (store, cfg.prefix);      // drum kits live under <prefix>assets/drumkits/
     return std::make_shared<RemoteStorage> (store, StorageKeys { cfg.prefix }, store->describe(), instanceOwnerId(), cfg.leaseTtlS);
 }
 

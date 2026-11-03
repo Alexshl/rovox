@@ -33,6 +33,9 @@ const StockInfo* findStockPlugin (const std::string& key);
 /** The Rovox stock effect that stands in for a REAPER stock FX, by the name in the RPP chunk (for example "VST: ReaEQ (Cockos)"). nullptr if none. */
 const StockInfo* stockForReaperName (const std::string& fxName);
 
+/** True for the stock entries that are instruments (rovox:drums): they take MIDI, not audio. */
+bool isStockInstrument (const StockInfo&);
+
 /** plugin.catalog record of a stock effect (format "Rovox", connector "local"). */
 json stockCatalogRecord (const StockInfo&);
 

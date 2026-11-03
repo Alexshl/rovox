@@ -5,6 +5,7 @@
 
 #include "JsfxPlugin.h"
 #include "PluginCatalog.h"
+#include "DrumKitLibrary.h"
 #include "StockPlugins.h"
 
 #include <algorithm>
@@ -143,6 +144,7 @@ EngineHost::EngineHost (const EngineConfig& c) : config_ (c), budget_ (rovox::cp
     engine_ = std::make_unique<te::Engine> (std::make_unique<DataDirPropertyStorage> (config_.dataDir),
                                             std::make_unique<te::UIBehaviour>(),
                                             std::make_unique<RovoxEngineBehaviour> (config_, budget_));
+    DrumKitLibrary::instance().setCacheDir (config_.dataDir / "cache" / "drumkits");
     registerStockPlugins (*engine_);
     registerJsfxPlugin (*engine_);
 

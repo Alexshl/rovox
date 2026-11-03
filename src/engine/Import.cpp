@@ -5,6 +5,7 @@
 
 #include "Command.h"
 #include "Ids.h"
+#include "PanStage.h"
 #include "RppImport.h"
 #include "Sha256.h"
 
@@ -509,6 +510,7 @@ json applyImportPlan (Project& p, const ImportPlan& plan, const std::map<std::st
         if (track == nullptr)
             throw std::runtime_error ("track limit reached");
 
+        installPanStage (*track);
         std::string name = tp.name;
 
         if (auto it = rename.find (tp.sourceKey); it != rename.end())

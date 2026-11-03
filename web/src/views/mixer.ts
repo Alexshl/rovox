@@ -12,6 +12,8 @@ import type { MasterState } from '../net/protocol';
 import type { App } from '../store/session';
 import type { ProjectStore } from '../store/project';
 
+const DRUMS_CREDIT = 'Drum samples: DRSKit by the DrumGizmo team and Jes Eiler (DRSDrums), CC BY 4.0';
+
 const SCALE_DB = [12, 6, 0, -6, -12, -20, -30, -40, -60];
 
 class Strip {
@@ -137,7 +139,11 @@ class Strip {
     const list: PluginState[] = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
     clear(this.fxList);
     if (!list.length) this.fxList.append(h('div', { class: 'none', text: this.id === 'master' ? 'no master FX' : 'no FX' }));
-    for (const p of list.slice(0, 4)) this.fxList.append(h('div', { class: p.enabled ? 'on' : 'off', text: p.name, title: `${p.name} (${p.type})` }));
+    for (const p of list.slice(0, 4)) {
+      // the built-in drum sampler plays DRSKit samples (CC BY 4.0): the credit travels with the plugin
+      const credit = p.type === 'rovoxdrums' ? `\n${DRUMS_CREDIT}` : '';
+      this.fxList.append(h('div', { class: p.enabled ? 'on' : 'off', text: p.name, title: `${p.name} (${p.type})${credit}` }));
+    }
     if (list.length > 4) this.fxList.append(h('div', { class: 'none', text: `+${list.length - 4} ще` }));
   }
 

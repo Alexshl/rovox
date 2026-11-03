@@ -18,11 +18,13 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsRouting.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsTransport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DeliveryService.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/DrumsPlugin.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/EngineHost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Gateway.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/HttpServer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Import.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/JsfxPlugin.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PanStage.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Peaks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginCatalog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginHost.cpp

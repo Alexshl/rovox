@@ -3,6 +3,8 @@
 
 #include "StockPlugins.h"
 
+#include "DrumsPlugin.h"
+#include "PanStage.h"
 #include "Limiter.h"
 #include "StockFx.h"
 
@@ -501,7 +503,11 @@ const std::vector<StockInfo>& stockPlugins()
           { "stock", "delay", "time" } },
         { "rovox:verb", "verb", "Rovox Verb", RovoxVerb::xmlTypeName, "ReaVerbate",
           "Algorithmic reverb (damped combs and allpasses): room size, damping, pre-delay, width, low/high cut, wet/dry. Similar to ReaVerbate.",
-          { "stock", "reverb", "space" } } };
+          { "stock", "reverb", "space" } },
+        { "rovox:drums", "drums", "Rovox Drums", drumsXmlType, "MT-PowerDrumKit",
+          "General MIDI drum sampler (instrument): plays MIDI drum parts written for MT-PowerDrumKit unchanged (kick 35/36, snare 38/40, side stick 37, hats 42/44/46 with choke, toms, cymbals, cowbell, tambourine) "
+          "with velocity layers and round robin. Samples: DRSKit (CC BY 4.0), loaded from ROVOX_DRUMKITS_PATH or the object store; plugin state reports the kit and unmapped notes.",
+          { "instrument", "drums", "sampler" } } };
 
     return all;
 }
@@ -528,11 +534,17 @@ const StockInfo* stockForReaperName (const std::string& fxName)
     return nullptr;
 }
 
+bool isStockInstrument (const StockInfo& s)
+{
+    return s.xmlType == drumsXmlType;
+}
+
 json stockCatalogRecord (const StockInfo& s)
 {
-    return { { "plugin_uid", s.uid }, { "format", "Rovox" }, { "name", s.name }, { "vendor", "Rovox" }, { "version", "1" }, { "kind", "effect" },
+    const bool instrument = isStockInstrument (s);
+    return { { "plugin_uid", s.uid }, { "format", "Rovox" }, { "name", s.name }, { "vendor", "Rovox" }, { "version", "1" }, { "kind", instrument ? "instrument" : "effect" },
              { "categories", s.categories }, { "description", s.description },
-             { "io", { { "in", 2 }, { "out", 2 }, { "midi_in", false } } }, { "latency_samples", nullptr }, { "params_count", nullptr },
+             { "io", { { "in", instrument ? 0 : 2 }, { "out", 2 }, { "midi_in", instrument } } }, { "latency_samples", nullptr }, { "params_count", nullptr },
              { "file", "builtin" }, { "connector", "local" }, { "server_use_ok", true }, { "builtin", true } };
 }
 
@@ -545,6 +557,8 @@ void registerStockPlugins (te::Engine& engine)
     pm.createBuiltInType<RovoxLimit>();
     pm.createBuiltInType<RovoxDelay>();
     pm.createBuiltInType<RovoxVerb>();
+    registerDrumsPlugin (engine);
+    registerPanStage (engine);
 }
 
 json stockPluginExtras (te::Plugin& p)

@@ -3,6 +3,7 @@
 
 #include "Project.h"
 
+#include "PanStage.h"
 #include "Transport.h"
 
 #include <unistd.h>
@@ -21,7 +22,12 @@ std::unique_ptr<te::Edit> createEditForProject (te::Engine& engine, const fs::pa
 
     const auto editFile = toFile (dir / editFileName);
     o.editFileRetriever = [editFile] { return editFile; };
-    return te::Edit::createEdit (std::move (o));
+    auto edit = te::Edit::createEdit (std::move (o));
+
+    if (edit != nullptr)
+        installPanStages (*edit);       // REAPER pan law / pan mode on every track fader
+
+    return edit;
 }
 
 Project::Project (EngineHost& host, fs::path dir, Manifest manifest, juce::ValueTree editState, PublishFn publish)

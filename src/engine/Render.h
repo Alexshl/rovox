@@ -109,6 +109,9 @@ Result<json> renderEdit (te::Edit&, const RenderContext&, const RenderRequest&);
     keeps `source_revision` stable by construction. */
 Result<json> renderProject (Project&, const RenderRequest&);
 
+/** Adjusts an Edit created for rendering (time-stretched clips are stretched in the graph, not through proxy files). Done by makeRenderSnapshot and by the render child. */
+void prepareEditForRender (te::Edit&);
+
 /** Same, but the caller supplies the snapshot (for jobs that render on a worker thread). */
 std::unique_ptr<te::Edit> makeRenderSnapshot (Project&);
 

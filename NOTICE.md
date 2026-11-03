@@ -69,6 +69,20 @@ at run time (in child processes), not linked into Rovox and not part of this rep
 Commercial plugins are never bypassed: a plugin that needs an activation or a license that the server cannot satisfy simply fails to load and is
 reported (`PLUGIN_LOAD_FAILED`, blacklist), see `plugin.catalog` and `plugin.probe`.
 
+## Drum kit samples (not in the repository, not in the image)
+
+The built-in drum sampler (`rovox:drums`) plays a kit that is converted offline by `tools/drumkit/build_drskit.py` and kept in the object store
+(`<S3_PREFIX>assets/drumkits/drskit/<sha>/`) or in a directory named by `ROVOX_DRUMKITS_PATH`. No sample audio is committed.
+
+| Kit | Source | License |
+|---|---|---|
+| DRSKit 2.1 | DrumGizmo team and Jes Eiler (DRSDrums), https://drumgizmo.org/wiki/doku.php?id=kits:drskit | CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/) |
+
+The converted kit is a derivative (a stereo mix-down of the multi-microphone recordings, shortened, re-encoded as FLAC). Credit required by the license:
+"Drum samples: DRSKit by the DrumGizmo team and Jes Eiler (DRSDrums), CC BY 4.0". The line is shown as the tooltip of the plugin in the web mixer, is
+returned in the plugin state (`attribution`) and is written into the kit's `kit.json`. Anything that publishes audio made with this kit (for example
+a delivered render) must keep that credit.
+
 ## rovox-skills (`skills/`)
 
 Python 3 standard library only; no third-party dependency is installed. Optional extras (`analysis`: numpy, soundfile, librosa) are not part of

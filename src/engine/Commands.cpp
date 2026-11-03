@@ -4,6 +4,7 @@
 #include "Command.h"
 
 #include "Ids.h"
+#include "PanStage.h"
 #include "PluginHost.h"
 #include "ProjectManager.h"
 #include "JsfxPlugin.h"
@@ -288,6 +289,7 @@ void registerTrackCommands (CommandRegistry& r)
                 return makeError (errc::preconditionFailed, "cannot add a track: the Edit limit of "
                                                                + std::to_string (p.host().engine().getEngineBehaviour().getEditLimits().maxNumTracks) + " tracks is reached");
 
+            installPanStage (*track);
             track->setName (toJuce (params.value ("name", "Track " + std::to_string (te::getAudioTracks (p.edit()).size()))));
 
             if (params.contains ("volume_db"))  track->getVolumePlugin()->setVolumeDb (params["volume_db"].get<float>());
@@ -390,7 +392,7 @@ std::string builtinPluginType (const std::string& name)
     if (name == "chorus")       return te::ChorusPlugin::xmlTypeName;
     if (name == "fouroscillator") return te::FourOscPlugin::xmlTypeName;
 
-    if (name.rfind ("rovox_", 0) == 0)
+    if (name.rfind ("rovox_", 0) == 0 || name.rfind ("rovox:", 0) == 0)
         if (auto* stock = findStockPlugin (name.substr (6)))
             return stock->xmlType;
 
@@ -404,7 +406,7 @@ void registerFxCommands (CommandRegistry& r)
     r.add (makeProjectCommand ("fx.add",
         obj ({ { "track_id", strMin (1) },
                { "builtin", { { "type", "string" }, { "enum", { "equaliser", "compressor", "reverb", "delay", "chorus", "phaser", "lowpass", "fouroscillator",
-                                                                                      "rovox_eq", "rovox_comp", "rovox_gate", "rovox_limit", "rovox_delay", "rovox_verb" } } } },
+                                                                                      "rovox_eq", "rovox_comp", "rovox_gate", "rovox_limit", "rovox_delay", "rovox_verb", "rovox_drums", "rovox:drums" } } } },
                { "plugin", pluginDesc }, { "index", { { "type", "integer" }, { "minimum", 0 } } } }, { "track_id" }),
         obj ({ { "plugin_id", str() } }), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
@@ -473,7 +475,7 @@ void registerFxCommands (CommandRegistry& r)
                 {
                     // catalog entries are probed in a child process first: a plugin that crashes on load never reaches this process
                     if (! params["plugin"].contains ("plugin_uid") && ! params["plugin"].contains ("uid"))
-                        return makeError (errc::notFound, "no plugin named " + params["plugin"].value ("name", "") + " (plugin.catalog lists what is installed; Rovox stock effects: rovox:eq, rovox:comp, rovox:gate, rovox:limit, rovox:delay, rovox:verb)");
+                        return makeError (errc::notFound, "no plugin named " + params["plugin"].value ("name", "") + " (plugin.catalog lists what is installed; Rovox stock effects: rovox:eq, rovox:comp, rovox:gate, rovox:limit, rovox:delay, rovox:verb; Rovox instrument: rovox:drums)");
 
                     auto created = createExternalPlugin (p, params["plugin"], &probeInfo);
 
@@ -501,6 +503,9 @@ void registerFxCommands (CommandRegistry& r)
             plugin->initialiseFully();
             ChangeCollector::assignMissingIds (plugin->state);
             json out { { "plugin_id", Project::idOf (plugin->state) }, { "plugin", pluginJson (*plugin) } };
+
+            if (plugin->isSynth() && dynamic_cast<te::ExternalPlugin*> (plugin.get()) == nullptr)
+                out["plugin"]["is_instrument"] = true;
 
             if (auto* ext = dynamic_cast<te::ExternalPlugin*> (plugin.get()))
             {

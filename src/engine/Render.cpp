@@ -4,6 +4,7 @@
 #include "Render.h"
 
 #include "AudioSink.h"
+#include "DrumsPlugin.h"
 #include "JsfxPlugin.h"
 #include "Limiter.h"
 #include "Loudness.h"
@@ -278,6 +279,12 @@ PreflightReport runPreflight (te::Edit& edit, const RenderRequest& req, te::Time
                 addFinding (report, req, "plugin_not_loaded", "plugin '" + toStd (ext->getName()) + "' did not load (" + reason + "); the render would silently bypass it",
                             owner, json { { "plugin_id", Project::idOf (ext->state) }, { "plugin", toStd (ext->getName()) }, { "reason", reason } });
             }
+
+    // 2a. a drum sampler without its kit is silent
+    for (auto p : te::getAllPlugins (edit, false))
+        if (auto extras = drumsPluginExtras (*p, 60.0); extras.is_object() && p->isEnabled() && extras["status"] == "error")
+            addFinding (report, req, "plugin_not_loaded", "Rovox Drums has no kit (" + extras["error"].get<std::string>() + "); the track would be silent",
+                        p->getOwnerTrack(), json { { "plugin_id", Project::idOf (p->state) }, { "plugin", "rovox:drums" }, { "reason", extras["error"] } });
 
     // 2b. JSFX plugins whose file is missing under ROVOX_JSFX_PATH or does not compile pass the audio through unchanged
     for (auto p : te::getAllPlugins (edit, false))
@@ -1057,12 +1064,25 @@ Result<json> renderEdit (te::Edit& edit, const RenderContext& ctx, const RenderR
     return result;
 }
 
+void prepareEditForRender (te::Edit& edit)
+{
+    // A time-stretched clip would wait for its stretched proxy file, which is built by an asynchronous job (a render thread that blocks the message
+    // loop never sees it finish): an offline render stretches in the graph instead
+    for (auto* track : te::getAudioTracks (edit))
+        for (auto* clip : track->getClips())
+            if (auto* wc = dynamic_cast<te::WaveAudioClip*> (clip))
+                if (wc->getTimeStretchMode() != te::TimeStretcher::disabled || wc->getPitchChange() != 0.0f)
+                    wc->setUsesProxy (false);
+}
+
 std::unique_ptr<te::Edit> makeRenderSnapshot (Project& p)
 {
     p.collector().beginScope();
     p.edit().flushState();
     p.collector().endScope();
-    return createEditForProject (p.host().engine(), p.dir(), p.edit().state.createCopy(), te::Edit::EditRole::forRendering);
+    auto edit = createEditForProject (p.host().engine(), p.dir(), p.edit().state.createCopy(), te::Edit::EditRole::forRendering);
+    prepareEditForRender (*edit);
+    return edit;
 }
 
 Result<json> renderProject (Project& p, const RenderRequest& req)

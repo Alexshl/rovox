@@ -5,6 +5,8 @@ add_library(rovox_core STATIC
     ActivityLog.cpp
     Cgroup.cpp
     Delivery.cpp
+    DrumKit.cpp
+    DrumKitLibrary.cpp
     RemoteStorage.cpp
     S3ObjectStore.cpp
     Hmac.cpp

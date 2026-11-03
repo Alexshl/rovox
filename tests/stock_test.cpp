@@ -675,7 +675,11 @@ ROVOX_TEST (stock, catalog_lists_the_stock_effects_and_fx_add_takes_them_by_id_o
     for (const char* uid : { "rovox:eq", "rovox:comp", "rovox:gate", "rovox:limit", "rovox:delay", "rovox:verb" })
         CHECK (uids.count (uid) == 1);
 
-    CHECK (env.ok ("", "plugin.catalog", { { "kind", "instrument" }, { "query", "Rovox" } })["plugins"].empty());
+    // the only Rovox instrument is the drum sampler
+    auto instruments = env.ok ("", "plugin.catalog", { { "kind", "instrument" }, { "query", "Rovox" } })["plugins"];
+    REQUIRE (instruments.size() == 1);
+    CHECK (instruments[0]["plugin_uid"] == "rovox:drums");
+    CHECK (instruments[0]["io"]["midi_in"] == true);
     CHECK (env.ok ("", "plugin.probe", { { "plugin_uid", "rovox:verb" } })["probe"]["builtin"] == true);
 
     const auto id = sineTrackProject (env);

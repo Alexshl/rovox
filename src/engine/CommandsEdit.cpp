@@ -7,6 +7,7 @@
 
 #include "ParamsAction.h"
 #include "JsfxPlugin.h"
+#include "DrumsPlugin.h"
 #include "StockPlugins.h"
 #include "TimePos.h"
 
@@ -93,6 +94,17 @@ json pluginInfo (te::Plugin& p, bool withParams)
 
         if (withParams)
             j["meters"] = extras["meters"];
+    }
+
+    if (auto extras = drumsPluginExtras (p); extras.is_object())
+    {
+        j["is_instrument"] = true;
+        j["drums"] = extras;
+        j["units"] = { { "gain", "dB" } };
+        j["loaded"] = extras["status"] == "ready";
+
+        if (extras["status"] == "error")
+            j["load_error"] = extras["error"];
     }
 
     if (auto extras = jsfxPluginExtras (p); extras.is_object())

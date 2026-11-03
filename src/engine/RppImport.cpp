@@ -5,6 +5,8 @@
 
 #include "Command.h"
 #include "Ids.h"
+#include "PanLaw.h"
+#include "PanStage.h"
 #include "Import.h"
 #include "JsfxPlugin.h"
 #include "ReaperFx.h"
@@ -350,8 +352,10 @@ struct Importer
         if (item.blocks ("SOURCE").size() > 1)
             report.warnings.push_back ({ { "code", "TAKES_IGNORED" }, { "message", "item has several takes; only the first is imported" }, { "track_id", trackId } });
 
-        if (item.number ("PLAYRATE", 0, 1.0) != 1.0)
-            report.warnings.push_back ({ { "code", "PLAYRATE_IGNORED" }, { "message", "item play rate is not applied" }, { "track_id", trackId } });
+        // PLAYRATE rate preservePitch pitchSemitones ...: the source runs `rate` times faster, the item keeps its length on the timeline
+        const double rate = std::clamp (item.number ("PLAYRATE", 0, 1.0), 0.01, 100.0);
+        const bool preservePitch = item.number ("PLAYRATE", 1, 1.0) != 0.0;
+        const double pitchSemitones = item.number ("PLAYRATE", 2, 0.0);
 
         const auto kind = source->args.empty() ? std::string() : source->args[0];
         const auto start = te::TimePosition::fromSeconds (position);
@@ -368,6 +372,9 @@ struct Importer
 
             for (auto& n : notes)
                 clip->getSequence().addNote (n.note, te::BeatPosition::fromBeats (n.startBeats), te::BeatDuration::fromBeats (n.lengthBeats), n.velocity, 0, nullptr);
+
+            if (rate != 1.0)
+                report.warnings.push_back ({ { "code", "PLAYRATE_IGNORED" }, { "message", "play rate of a MIDI item is not applied" }, { "track_id", trackId } });
 
             if (soffs != 0.0)
                 report.warnings.push_back ({ { "code", "MIDI_OFFSET_IGNORED" }, { "message", "source offset of a MIDI item is not applied" }, { "track_id", trackId } });
@@ -391,10 +398,22 @@ struct Importer
 
         auto media = stage (fileTok, trackId);
         auto clip = te::insertWaveClip (track, toJuce (name.empty() ? fs::path (fileTok).stem().string() : name), toFile (media.file),
-                                        { .time = { start, start + len }, .offset = te::TimeDuration::fromSeconds (soffs) }, te::DeleteExistingClips::no);
+                                        { .time = { start, start + len }, .offset = te::TimeDuration::fromSeconds (soffs / rate) }, te::DeleteExistingClips::no);
 
         if (clip == nullptr)
             return;
+
+        if (std::abs (rate - 1.0) > 1e-9 || pitchSemitones != 0.0)
+        {
+            // the engine's offset is in timeline time (before the speed ratio), REAPER's SOFFS in source time
+            clip->setSpeedRatio (rate);
+
+            if (preservePitch || pitchSemitones != 0.0)
+                clip->setTimeStretchMode (te::TimeStretcher::signalsmithDefault);       // keeps the pitch while the speed changes; without it the clip is resampled (pitch follows speed)
+
+            if (pitchSemitones != 0.0)
+                clip->setPitchChange ((float) pitchSemitones);
+        }
 
         const double volume = item.number ("VOLPAN", 0, 1.0);
 
@@ -609,7 +628,13 @@ struct Importer
         json entry { { "kind", "fx" }, { "name", fxDisplayName (fx) }, { "format", fx.name }, { "track_id", trackId }, { "mapped_to", stock->name },
                      { "plugin_id", Project::idOf (plugin->state) }, { "status", "mapped (default params, original settings not translated)" } };
 
-        if (const json* side = sidecarFor (cfx, trackIndex, trackGuid, *stock))
+        if (isStockInstrument (*stock))
+        {
+            // MT-PowerDrumKit: the MIDI drum part (General MIDI notes) plays the Rovox drum kit unchanged; the original settings have no counterpart
+            entry["status"] = "mapped (MT-PowerDrumKit to the Rovox drum sampler; the kit's own mixer settings are not translated)";
+            entry["instrument"] = true;
+        }
+        else if (const json* side = sidecarFor (cfx, trackIndex, trackGuid, *stock))
         {
             const auto parsed = parseReaperFxEntry (*side);
             const auto result = translateReaperFx (stock->shortId, parsed);
@@ -734,6 +759,7 @@ struct Importer
         loadSidecar();
         finder = std::make_unique<MediaFinder> (rppFile.parent_path(), recordPath);
         importTempo (root, edit);
+        setProjectPan (edit, (int) root.number ("PANMODE", 0, pan::defaultReaperMode), pan::lawDbFromReaper (root.number ("PANLAW", 0, 1.0)));
 
         std::vector<te::Track*> folderStack;
         std::map<te::Track*, te::Track*> lastChild;
@@ -785,10 +811,17 @@ struct Importer
 
             if (auto* at = dynamic_cast<te::AudioTrack*> (track))
             {
+                installPanStage (*at);
+
                 if (auto* vp = at->getVolumePlugin())
                 {
                     vp->setVolumeDb ((float) linearToDbSafe (node.number ("VOLPAN", 0, 1.0)));
                     vp->setPan ((float) std::clamp (node.number ("VOLPAN", 1, 0.0), -1.0, 1.0));
+
+                    // per-track override of the project's pan mode / law (`PANMODE n` line, VOLPAN's third value = law as a linear gain, -1 = project)
+                    const double lawGain = node.number ("VOLPAN", 2, -1.0);
+                    setTrackPan (*at, node.line ("PANMODE") != nullptr ? (int) node.number ("PANMODE", 0, -1.0) : -1,
+                                 lawGain >= 0.0 ? pan::lawDbFromReaper (lawGain) : 1.0);
                 }
 
                 for (auto* item : node.blocks ("ITEM"))

@@ -422,6 +422,7 @@ int runRenderChild (const EngineConfig& cfg, const std::string& snapshotDir, con
     }
 
     auto edit = createEditForProject (host.engine(), snapshotDir, loaded.value().editState, te::Edit::EditRole::forRendering);
+    prepareEditForRender (*edit);
     auto req = requestFromJson (doc["request"]);
     RenderContext ctx;
     ctx.rendersDir = doc["context"].value ("renders_dir", "");
