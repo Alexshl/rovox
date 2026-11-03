@@ -1,0 +1,24 @@
+{
+ "name": "realimit_dense_rinf",
+ "kind": "limit",
+ "fx": "ReaLimit",
+ "signal": "dc_limit",
+ "channels": 1,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -12
+  },
+  {
+   "name": "Ceiling",
+   "value": -1
+  },
+  {
+   "name": "Release",
+   "value": {
+    "n": 0.0
+   }
+  }
+ ],
+ "description": "v2: release \"inf\" = 150 dB/s slow stage (spec-realimit.md v2)"
+}

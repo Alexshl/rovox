@@ -1,0 +1,22 @@
+{
+ "name": "realimit_dense_r6",
+ "kind": "limit",
+ "fx": "ReaLimit",
+ "signal": "dc_limit",
+ "channels": 1,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -12
+  },
+  {
+   "name": "Ceiling",
+   "value": -1
+  },
+  {
+   "name": "Release",
+   "value": 6
+  }
+ ],
+ "description": "v2: overshoot steps, 10 ms pairs, trains, pink; slow stage charges at 4x release, 10 ms hold window (spec-realimit.md v2)"
+}

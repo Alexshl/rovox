@@ -356,6 +356,40 @@ ROVOX_TEST (jsfx, pdc_delay_is_reported_and_the_audio_is_delayed_block_by_block)
     }
 }
 
+ROVOX_TEST (jsfx, an_item_at_zero_through_a_plugin_with_latency_renders_sample_exact_from_sample_zero)
+{
+    JsfxPath path;
+    test::Env env;
+    const auto id = sineProject (env, 330.0, 1.0);
+    const auto track = firstTrack (env, id);
+
+    auto render = [&] (const char* name)
+    {
+        RenderRequest req;
+        req.name = name;
+        req.tailS = 0.0;
+        auto r = renderProject (env.project (id), req);
+        REQUIRE (r.ok());
+        Planar ch;
+        double sr = 0;
+        REQUIRE (test::readWav (env.project (id).rendersDir() / (std::string (name) + ".wav"), ch, sr));
+        return ch;
+    };
+
+    const auto dry = render ("dry");
+    env.ok (id, "fx.add", { { "track_id", track }, { "plugin", { { "plugin_uid", "jsfx:rovox_test/latency" } } } });
+    const auto wet = render ("wet");
+    REQUIRE (dry.size() == wet.size());
+    REQUIRE (wet[0].size() == dry[0].size());
+    double worst = 0.0;
+
+    for (size_t c = 0; c < dry.size(); ++c)
+        for (size_t i = 0; i < dry[c].size(); ++i)
+            worst = std::max (worst, (double) std::abs (dry[c][i] - wet[c][i]));
+
+    CHECK (worst == 0.0);
+}
+
 ROVOX_TEST (jsfx, rpp_js_blocks_become_jsfx_plugins_with_the_slider_values_of_the_project)
 {
     JsfxPath path;

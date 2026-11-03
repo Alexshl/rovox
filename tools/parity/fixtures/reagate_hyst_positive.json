@@ -1,0 +1,30 @@
+{
+ "name": "reagate_hyst_positive",
+ "kind": "gate",
+ "fx": "ReaGate",
+ "signal": "dc_gate",
+ "channels": 1,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -30
+  },
+  {
+   "name": "Attack",
+   "value": 3
+  },
+  {
+   "name": "Hold",
+   "value": 5
+  },
+  {
+   "name": "Release",
+   "value": 50
+  },
+  {
+   "name": "Hysteresis",
+   "value": 3
+  }
+ ],
+ "description": "v2: positive hysteresis, threshold interpolated by gate gain (spec-reagate.md v2)"
+}

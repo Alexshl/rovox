@@ -397,6 +397,53 @@ bool needsSixtySecondWorkaround (double lengthS)
     return std::abs (lengthS - 60.0) < 1.0e-6;
 }
 
+/** Cuts the first `frames` frames off a float WAV in place (through a temporary file next to it). */
+Result<void> dropLeadingFrames (const juce::File& file, std::int64_t frames)
+{
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (file.createInputStream().release(), true));
+
+    if (reader == nullptr)
+        return makeError (errc::io, "cannot read the rendered file back");
+
+    const auto tmp = file.getSiblingFile (file.getFileName() + ".trim");
+    {
+        std::unique_ptr<juce::OutputStream> out (tmp.createOutputStream());
+
+        if (out == nullptr)
+            return makeError (errc::io, "cannot write the trimmed render");
+
+        const auto options = juce::AudioFormatWriterOptions {}.withSampleRate (reader->sampleRate)
+                                                              .withNumChannels ((int) reader->numChannels)
+                                                              .withBitsPerSample ((int) reader->bitsPerSample);
+        auto writerStream = std::move (out);
+        std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (writerStream, options));
+
+        if (writer == nullptr)
+            return makeError (errc::io, "cannot write the trimmed render");
+
+        juce::AudioBuffer<float> buffer ((int) reader->numChannels, 65536);
+
+        for (juce::int64 pos = std::min<juce::int64> (frames, reader->lengthInSamples); pos < reader->lengthInSamples;)
+        {
+            const int n = (int) std::min<juce::int64> (65536, reader->lengthInSamples - pos);
+            reader->read (&buffer, 0, n, pos, true, true);
+
+            if (! writer->writeFromAudioSampleBuffer (buffer, 0, n))
+                return makeError (errc::io, "cannot write the trimmed render");
+
+            pos += n;
+        }
+    }
+
+    reader.reset();
+
+    if (! tmp.moveFileTo (file))
+        return makeError (errc::io, "cannot replace the rendered file");
+
+    return {};
+}
+
 Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange range, double tailS, double sampleRate,
                            const juce::BigInteger& tracks, bool useMasterPlugins, double stallTimeoutS, bool applyWorkaround,
                            const RenderHooks* hooks, double progressFrom, double progressTo)
@@ -412,13 +459,24 @@ Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange r
     auto outFile = toFile (dest);
     outFile.deleteFile();
 
+    // Plugin delay compensation is exact from the first sample only if the graph has already run for the latency before the range
+    // starts: pre-roll (silence before 0, the material of the range after it), render it, and cut it off the file afterwards.
+    double latencyS = 0.0;
+
+    for (auto* plugin : te::getAllPlugins (edit, false))
+        latencyS += std::max (0.0, plugin->getLatencySeconds());
+
+    constexpr std::int64_t prerollBlock = 512;
+    const auto prerollSamples = ((std::int64_t) std::ceil (latencyS * sampleRate * 1.5) + 4096 + prerollBlock - 1) / prerollBlock * prerollBlock;
+    const auto renderRange = range.withStart (range.getStart() - te::TimeDuration::fromSamples (prerollSamples, sampleRate));
+
     te::Renderer::Parameters p (edit);
     p.destFile = outFile;
     p.audioFormat = edit.engine.getAudioFileFormatManager().getWavFormat();
     p.bitDepth = 32;                                // float WAV: no clipping inside the render, checks run on the float data
     p.blockSizeForAudio = 512;
     p.sampleRateForAudio = sampleRate;
-    p.time = range;
+    p.time = renderRange;
     p.endAllowance = te::TimeDuration::fromSeconds (tailS);
     p.canRenderInMono = false;
     p.usePlugins = true;
@@ -502,7 +560,7 @@ Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange r
     if (! outFile.existsAsFile())
         return makeError (errc::internal, "render produced no file");
 
-    return {};
+    return dropLeadingFrames (outFile, prerollSamples);
 }
 
 //==============================================================================

@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Rovox contributors
 #
 # Deterministic test signals for the REAPER/Rovox FX parity harness: 48 kHz float32 WAV, generated on the fly into a work directory.
-#   impulse, sine_{100,1k,10k}_{m20,m6}, sweep, pink, bursts, silence
+#   impulse, sine_{100,1k,10k}_{m20,m6}, sweep, pink, bursts, dc_gate, dc_limit, silence
 # `channels=2` gives a stereo version (right = left at -3 dB, or an independent noise for `pink`), `channels=1` is mono.
 import argparse
 import os
@@ -47,13 +47,43 @@ def _bursts():
     return np.concatenate(parts)
 
 
+def _dc_gate():
+    """DC bursts for gate timing (spec-reagate.md v2): -10 dBFS bursts of 2/20/200 ms on -40 dBFS (1 s apart), then a staircase
+    -19/-40/-17.5/-40/-15/-17.5/-18.5/-19.5/-21/-23/-25/-27/-40 (100 ms each) and a re-trigger -10 (100 ms) / -40 (30 ms) / -10 (20 ms)."""
+    parts = [np.full(SR // 2, db(-40))]
+    for ms in (2, 20, 200):
+        parts += [np.full(ms * SR // 1000, db(-10)), np.full(SR, db(-40))]
+    for lvl in (-19, -40, -17.5, -40, -15, -17.5, -18.5, -19.5, -21, -23, -25, -27, -40):
+        parts.append(np.full(SR // 10, db(lvl)))
+    parts += [np.full(SR // 10, db(-10)), np.full(3 * SR // 100, db(-40)), np.full(SR // 50, db(-10)), np.full(3 * SR // 10, db(-40))]
+    return np.concatenate(parts)
+
+
+def _dc_limit():
+    """DC overshoots for limiter release (spec-realimit.md v2), floor -40 dBFS: -3 dBFS steps of 10/30/100/300/1000 ms (1.6 s gaps),
+    10 ms pairs with 5/10.5/15 ms gaps, trains (2 s) of period 20 ms/duty 50 % and 100 ms/25 %, then 3 s of pink noise peaking at 0 dBFS."""
+    lo, hi = db(-40), db(-3)
+    gap = np.full(int(1.6 * SR), lo)
+    parts = [np.full(SR // 2, lo)]
+    for ms in (10, 30, 100, 300, 1000):
+        parts += [np.full(ms * SR // 1000, hi), gap]
+    for g in (5, 10.5, 15):
+        parts += [np.full(480, hi), np.full(int(g * SR / 1000), lo), np.full(480, hi), gap]
+    t = np.arange(2 * SR)
+    for per, duty in ((960, 0.5), (4800, 0.25)):
+        parts += [np.where((t % per) < int(duty * per), hi, lo), gap]
+    p = _pink(77, seconds=3.0)
+    parts += [p / np.max(np.abs(p)), gap]
+    return np.concatenate(parts)
+
+
 def _impulse():
     x = np.zeros(SR)
     x[SR // 10] = 1.0
     return x
 
 
-NAMES = (["impulse", "sweep", "pink", "bursts"]
+NAMES = (["impulse", "sweep", "pink", "bursts", "dc_gate", "dc_limit"]
          + ["sine_%s_%s" % (f, l) for f in ("100", "1k", "10k") for l in ("m20", "m6")])
 
 
@@ -67,6 +97,12 @@ def make(name, channels=1):
         right = None
     elif name == "bursts":
         left = _bursts()
+        right = None
+    elif name == "dc_gate":
+        left = _dc_gate()
+        right = None
+    elif name == "dc_limit":
+        left = _dc_limit()
         right = None
     elif name == "pink":
         left = _pink(1234)

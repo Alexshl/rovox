@@ -20,16 +20,16 @@ SR = 48000
 OUT = os.path.expanduser("~/.rovox-parity/spec")
 
 
-def render(name, x, fx=None, params=(), config=None, item_info=None, take_info=None, tail_ms=0, reuse=True, scan=None):
+def render(name, x, fx=None, params=(), config=None, item_info=None, take_info=None, tail_ms=0, reuse=True, scan=None, srate=None):
     """x: (frames,) or (frames, ch) float array at 48 kHz. Returns (y (frames, 2), log)."""
     os.makedirs(OUT, exist_ok=True)
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
         x = x[:, None]
-    h = hashlib.sha1(x.tobytes()).hexdigest()[:10]
+    h = hashlib.sha1(x.tobytes()).hexdigest()[:10] + ("" if not srate else "_%d" % srate)
     sig = os.path.join(OUT, "sig_%s.wav" % h)
     if not os.path.exists(sig):
-        sf.write(sig, x, SR, subtype="FLOAT")
+        sf.write(sig, x, srate or SR, subtype="FLOAT")
     work = os.path.join(OUT, name)
     wav = os.path.join(work, name + ".wav")
     logp = os.path.join(work, name + ".reaper.json")
@@ -39,6 +39,8 @@ def render(name, x, fx=None, params=(), config=None, item_info=None, take_info=N
     job = {"name": name, "out_dir": work, "signal": sig, "label": "spec", "tail_ms": tail_ms,
            "fx": fx, "params": [{"name": k, "value": v} for k, v in params], "config": config or {},
            "item_info": item_info or {}, "take_info": take_info or {}, "scan": scan}
+    if srate:
+        job["srate"] = srate
     r = reaper_driver.run_job(job)
     y, _ = sf.read(r["wav"], always_2d=True)
     return y, r["log"]

@@ -1,0 +1,26 @@
+{
+ "name": "reagate_attack_hold_sum",
+ "kind": "gate",
+ "fx": "ReaGate",
+ "signal": "dc_gate",
+ "channels": 1,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -30
+  },
+  {
+   "name": "Attack",
+   "value": 10
+  },
+  {
+   "name": "Hold",
+   "value": 20
+  },
+  {
+   "name": "Release",
+   "value": 100
+  }
+ ],
+ "description": "v2: hold + attack add before the release ramp (spec-reagate.md v2)"
+}

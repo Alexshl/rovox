@@ -1,0 +1,42 @@
+{
+ "name": "reacomp_legacy1_attack",
+ "kind": "comp",
+ "fx": "ReaComp",
+ "signal": "bursts",
+ "channels": 1,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -30
+  },
+  {
+   "name": "Ratio",
+   "value": {
+    "n": 1.0
+   }
+  },
+  {
+   "name": "Attack",
+   "value": 10
+  },
+  {
+   "name": "Release",
+   "value": 50
+  },
+  {
+   "name": "RMS size",
+   "value": 0
+  },
+  {
+   "name": "Knee",
+   "value": 0
+  },
+  {
+   "name": "Legacy Attack/Knee Options",
+   "value": {
+    "n": 1.0
+   }
+  }
+ ],
+ "description": "v2: legacy option 1.0, attack starts from the envelope, not the threshold (spec-reacomp.md v2)"
+}

@@ -190,7 +190,7 @@ local ok, err = pcall(function()
     for i = reaper.CountTracks(0) - 1, 0, -1 do reaper.DeleteTrack(reaper.GetTrack(0, i)) end
     local master = reaper.GetMasterTrack(0)
     for i = reaper.TrackFX_GetCount(master) - 1, 0, -1 do reaper.TrackFX_Delete(master, i) end
-    reaper.GetSetProjectInfo(proj, "PROJECT_SRATE", 48000, true)
+    reaper.GetSetProjectInfo(proj, "PROJECT_SRATE", J.srate or 48000, true)
     reaper.GetSetProjectInfo(proj, "PROJECT_SRATE_USE", 1, true)
 
     step("track + item")
@@ -267,7 +267,7 @@ local ok, err = pcall(function()
   step("render settings")
   local sr = reaper.GetSetProjectInfo
   sr(proj, "RENDER_SETTINGS", 0, true)
-  sr(proj, "RENDER_SRATE", 48000, true)
+  sr(proj, "RENDER_SRATE", J.srate or 48000, true)
   sr(proj, "RENDER_CHANNELS", 2, true)
   sr(proj, "RENDER_ADDTOPROJ", 0, true)
   sr(proj, "RENDER_DITHER", 0, true)
