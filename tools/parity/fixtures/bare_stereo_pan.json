@@ -1,0 +1,11 @@
+{
+ "name": "bare_stereo_pan",
+ "kind": "bare",
+ "fx": null,
+ "signal": "sine_1k_m6",
+ "channels": 2,
+ "params": [],
+ "track_vol_db": 0.0,
+ "track_pan": -0.7,
+ "description": "no FX: stereo item panned 70 % left (pan law / balance)"
+}

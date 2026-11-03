@@ -1,0 +1,27 @@
+{
+ "name": "readelay_feedback",
+ "kind": "delay",
+ "fx": "ReaDelay",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Wet",
+   "value": -6
+  },
+  {
+   "name": "Dry",
+   "value": 0
+  },
+  {
+   "name": "1: Length (time)",
+   "value": 300
+  },
+  {
+   "name": "1: Feedback",
+   "value": -6
+  }
+ ],
+ "tail_ms": 4000,
+ "description": "one tap, 300 ms, -6 dB feedback"
+}

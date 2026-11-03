@@ -1,0 +1,30 @@
+{
+ "name": "reagate_hyst",
+ "kind": "gate",
+ "fx": "ReaGate",
+ "signal": "bursts",
+ "channels": 1,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -30
+  },
+  {
+   "name": "Attack",
+   "value": 5
+  },
+  {
+   "name": "Hold",
+   "value": 20
+  },
+  {
+   "name": "Release",
+   "value": 50
+  },
+  {
+   "name": "Hysteresis",
+   "value": 6
+  }
+ ],
+ "description": "mono, hysteresis 6 dB"
+}

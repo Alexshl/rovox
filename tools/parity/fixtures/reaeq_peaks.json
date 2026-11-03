@@ -1,0 +1,34 @@
+{
+ "name": "reaeq_peaks",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "pink",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Band 2",
+   "value": 1000
+  },
+  {
+   "name": "Gain-Band 2",
+   "value": 8
+  },
+  {
+   "name": "BW-Band 2",
+   "value": 1.0
+  },
+  {
+   "name": "Freq-Band 3",
+   "value": 3500
+  },
+  {
+   "name": "Gain-Band 3",
+   "value": -6
+  },
+  {
+   "name": "BW-Band 3",
+   "value": 0.5
+  }
+ ],
+ "description": "two bell bands: +8 dB @1 kHz bw 1 oct, -6 dB @3.5 kHz bw 0.5 oct"
+}

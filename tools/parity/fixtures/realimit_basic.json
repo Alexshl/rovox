@@ -1,0 +1,22 @@
+{
+ "name": "realimit_basic",
+ "kind": "limit",
+ "fx": "ReaLimit",
+ "signal": "bursts",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -12
+  },
+  {
+   "name": "Ceiling",
+   "value": -1
+  },
+  {
+   "name": "Release",
+   "value": 100
+  }
+ ],
+ "description": "threshold -12, ceiling -1, release 100 ms"
+}

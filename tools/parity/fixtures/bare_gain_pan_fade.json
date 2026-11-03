@@ -1,0 +1,14 @@
+{
+ "name": "bare_gain_pan_fade",
+ "kind": "bare",
+ "fx": null,
+ "signal": "pink",
+ "channels": 1,
+ "params": [],
+ "track_vol_db": -3.0,
+ "track_pan": 0.5,
+ "item_vol_db": 2.0,
+ "fade_in": 0.5,
+ "fade_out": 0.8,
+ "description": "no FX: mono item, +2 dB item gain, 0.5 s fade in, 0.8 s fade out, track -3 dB, pan 50 % right"
+}

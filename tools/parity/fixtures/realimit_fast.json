@@ -1,0 +1,22 @@
+{
+ "name": "realimit_fast",
+ "kind": "limit",
+ "fx": "ReaLimit",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -6
+  },
+  {
+   "name": "Ceiling",
+   "value": -3
+  },
+  {
+   "name": "Release",
+   "value": 10
+  }
+ ],
+ "description": "threshold -6, ceiling -3, release 10 ms on a sweep"
+}

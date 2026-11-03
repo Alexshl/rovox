@@ -1,0 +1,30 @@
+{
+ "name": "reacomp_fast",
+ "kind": "comp",
+ "fx": "ReaComp",
+ "signal": "bursts",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -24
+  },
+  {
+   "name": "Ratio",
+   "value": 8
+  },
+  {
+   "name": "Attack",
+   "value": 1
+  },
+  {
+   "name": "Release",
+   "value": 20
+  },
+  {
+   "name": "Knee",
+   "value": 0
+  }
+ ],
+ "description": "fast: 1 ms / 20 ms, 8:1, hard knee"
+}

@@ -1,0 +1,27 @@
+{
+ "name": "reaverbate_pink",
+ "kind": "verb",
+ "fx": "ReaVerbate",
+ "signal": "pink",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Wet",
+   "value": -12
+  },
+  {
+   "name": "Dry",
+   "value": -3
+  },
+  {
+   "name": "Room size",
+   "value": 60
+  },
+  {
+   "name": "Dampening",
+   "value": 60
+  }
+ ],
+ "tail_ms": 3000,
+ "description": "pink noise, wet and dry"
+}

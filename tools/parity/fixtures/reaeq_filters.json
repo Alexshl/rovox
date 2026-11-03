@@ -1,0 +1,17 @@
+{
+ "name": "reaeq_filters",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-High Pass 5",
+   "value": 80
+  }
+ ],
+ "config": {
+  "BANDENABLED4": "1"
+ },
+ "description": "high pass 80 Hz (band 5 enabled) on a sweep"
+}

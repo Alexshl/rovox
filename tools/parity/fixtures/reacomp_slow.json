@@ -1,0 +1,30 @@
+{
+ "name": "reacomp_slow",
+ "kind": "comp",
+ "fx": "ReaComp",
+ "signal": "bursts",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -20
+  },
+  {
+   "name": "Ratio",
+   "value": 2.5
+  },
+  {
+   "name": "Attack",
+   "value": 50
+  },
+  {
+   "name": "Release",
+   "value": 500
+  },
+  {
+   "name": "Knee",
+   "value": 0
+  }
+ ],
+ "description": "slow: 50 ms / 500 ms, 2.5:1"
+}

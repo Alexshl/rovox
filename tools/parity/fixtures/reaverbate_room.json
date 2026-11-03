@@ -1,0 +1,28 @@
+{
+ "name": "reaverbate_room",
+ "kind": "verb",
+ "fx": "ReaVerbate",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Wet",
+   "value": -6
+  },
+  {
+   "name": "Dry",
+   "value": -120
+  },
+  {
+   "name": "Room size",
+   "value": 50
+  },
+  {
+   "name": "Dampening",
+   "value": 50
+  }
+ ],
+ "tail_ms": 4000,
+ "rt60": true,
+ "description": "medium room, impulse"
+}
