@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
+#include "FadeStage.h"
 #include "PanLaw.h"
 #include "PanStage.h"
 #include "ReaperFx.h"
@@ -204,10 +205,11 @@ ROVOX_TEST (rpp, synthetic_project_maps_to_tracks_items_markers_tempo_and_sends)
     // the Rovox effects sit in the chain before the fader and keep their original chunk
     {
         auto fx = env.ok (id, "fx.list", { { "target", Project::idOf (audio[0]->state) } })["fx"];
-        REQUIRE (fx.size() >= 3);
-        CHECK (fx[0]["name"] == "Rovox Comp");
-        CHECK (fx[1]["name"] == "Rovox EQ");
-        CHECK (fx[2]["is_fader"] == true);
+        REQUIRE (fx.size() >= 4);
+        CHECK (fx[0]["name"] == "Rovox Item Fades");      // the item has REAPER's default fade (a curve, not the engine's linear ramp): the stage applies it before the FX
+        CHECK (fx[1]["name"] == "Rovox Comp");
+        CHECK (fx[2]["name"] == "Rovox EQ");
+        CHECK (fx[3]["is_fader"] == true);
         auto* mapped = p.findPlugin (rep["mapped"][1]["plugin_id"].get<std::string>());
         REQUIRE (mapped != nullptr);
         CHECK (toStd (mapped->state["rovox:reaper_fx"].toString()).find ("reaeq.vst.dylib") != std::string::npos);
@@ -224,8 +226,8 @@ ROVOX_TEST (rpp, synthetic_project_maps_to_tracks_items_markers_tempo_and_sends)
     CHECK_NEAR (clip->getPosition().getStart().inSeconds(), 1.0, 1e-9);
     CHECK_NEAR (clip->getPosition().getLength().inSeconds(), 2.0, 1e-9);
     CHECK_NEAR (clip->getPosition().getOffset().inSeconds(), 0.5, 1e-9);
-    CHECK_NEAR (clip->getFadeIn().inSeconds(), 0.1, 1e-6);
-    CHECK_NEAR (clip->getFadeOut().inSeconds(), 0.2, 1e-6);
+    CHECK_NEAR (itemFadeSeconds (*clip, true), 0.1, 1e-6);
+    CHECK_NEAR (itemFadeSeconds (*clip, false), 0.2, 1e-6);
     CHECK_NEAR (clip->getGainDB(), -6.02, 0.05);
     CHECK (clip->getName() == "g1");
     CHECK (fs::exists (p.dir() / p.manifest().media.front().path));      // copied into media/ by default
@@ -416,7 +418,7 @@ json fxSidecar()
                          { p (0, "Wet", 0.5, "-6.0 dB"), p (1, "Dry", 0.5, "0.0 dB"),
                            p (2, "Tap 1 enabled", 1.0, "On"), p (3, "Length 1 (time)", 0.1, "375 ms"), p (4, "Feedback 1", 0.5, "-6.0 dB"),
                            p (5, "Lowpass 1", 0.5, "5.00 kHz"), p (6, "Volume 1", 0.5, "-2.0 dB"), p (7, "Pan 1", 0.4, "20% L"),
-                           p (8, "Tap 2 enabled", 1.0, "On"), p (9, "Length 2 (musical)", 0.1, "1/8"), p (10, "Volume 2", 0.5, "-3.0 dB") });
+                           p (8, "Tap 2 enabled", 1.0, "On"), p (9, "Length 2 (musical)", 0.00390625, "1.00"), p (10, "Volume 2", 0.5, "-3.0 dB") });
     // a JS effect (no Rovox counterpart); its text holds a Latin-1 byte, written below as a raw 0xE9
     auto jsfx = fxJson (6, "JS: De-esser", "{88888888-8888-8888-8888-888888888888}", true, json::array ({ p (0, "Time Constants", 0.5, "A: 3 LATIN1s - R: 50 ms") }));
     return { { "version", 1 }, { "tracks", json::array ({ { { "index", 0 }, { "name", "Vox" }, { "guid", "{AAAAAAAA-0000-0000-0000-0000000000F1}" },
@@ -592,17 +594,16 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK_NEAR (valueOf (env, id, verb, "low_cut"), 120.0, 1e-2);
     CHECK (verb["untranslated"].empty());
 
-    // ReaDelay: tap 1 in ms with feedback (-6 dB = 50.1 %), tap 2 musical (1/8 = 0.5 beats, synced), taps 3 and 4 off
+    // ReaDelay (tap loops as ReaDelay does): tap 1 in ms with feedback -6 dB, tap 2 musical (1 eighth note), taps 3 and 4 off
+    CHECK_NEAR (valueOf (env, id, delay, "reaper_compat"), 1.0, 1e-6);
     CHECK_NEAR (valueOf (env, id, delay, "t1_time"), 375.0, 1e-2);
     CHECK_NEAR (valueOf (env, id, delay, "t1_on"), 1.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, delay, "t1_sync"), 0.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, delay, "feedback"), 50.12, 0.05);
-    CHECK_NEAR (valueOf (env, id, delay, "lowpass"), 5000.0, 1e-1);
+    CHECK_NEAR (valueOf (env, id, delay, "t1_fb"), -6.0, 1e-3);
+    CHECK_NEAR (valueOf (env, id, delay, "t1_lp"), 5000.0, 1e-1);
     CHECK_NEAR (valueOf (env, id, delay, "t1_gain"), -2.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, delay, "t1_pan"), -0.2, 1e-3);
     CHECK_NEAR (valueOf (env, id, delay, "t2_on"), 1.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, delay, "t2_sync"), 1.0, 1e-6);
-    CHECK_NEAR (valueOf (env, id, delay, "t2_beats"), 0.5, 1e-3);
+    CHECK_NEAR (valueOf (env, id, delay, "t2_musical"), 1.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, delay, "t2_gain"), -3.0, 1e-3);
     CHECK_NEAR (valueOf (env, id, delay, "t3_on"), 0.0, 1e-6);
     CHECK_NEAR (valueOf (env, id, delay, "wet"), -6.0, 1e-3);
@@ -644,14 +645,14 @@ ROVOX_TEST (rpp, generic_block_and_units_of_the_real_reaper_shape)
     REQUIRE (g.untranslated.size() == 1);
     CHECK (g.untranslated[0].from == "Wet");
 
-    // ReaEQ: the band name decides the type, BANDTYPE is only cross-checked
+    // ReaEQ: BANDTYPE decides the type (it tells the kinds of "Band" apart), the band name is the fallback and is cross-checked
     auto eqEntry = parseReaperFxEntry ({ { "name", "ReaEQ" }, { "config", { { "BANDTYPE0", "1" }, { "BANDENABLED0", "1" } } },
                                          { "params", json::array ({ p (0, "Freq-Low Shelf", 0, "200.0"), p (1, "Gain-Low Shelf", 0, "3.0"), p (2, "BW-Low Shelf", 0, "0.80") }) } });
     auto e = translateReaperFx ("eq", eqEntry);
     bool typeOk = false;
 
     for (auto& t : e.translated)
-        typeOk = typeOk || (t.to == "b1_type" && t.value == 0.0 && t.note.find ("disagrees") != std::string::npos);
+        typeOk = typeOk || (t.to == "b1_type" && t.value == 1.0 && t.note.find ("disagrees") != std::string::npos);
 
     CHECK (typeOk);
 

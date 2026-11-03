@@ -4,12 +4,15 @@
 #include "StockPlugins.h"
 
 #include "DrumsPlugin.h"
+#include "FadeStage.h"
 #include "PanStage.h"
 #include "Limiter.h"
 #include "StockFx.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <memory>
 
 namespace rovox
@@ -168,6 +171,30 @@ protected:
     virtual json meters() const                             { return json::object(); }
     virtual int latencySamples() const                      { return 0; }
 
+    /** The input of the effect, kept for the generic Wet / Delta of an imported REAPER FX (see mixDry). */
+    void saveDry (float* const* io, int numChannels, int numSamples)
+    {
+        for (int c = 0; c < numChannels; ++c)
+        {
+            if ((int) dry_[(size_t) c].size() < numSamples)
+                dry_[(size_t) c].resize ((size_t) numSamples);
+
+            std::copy (io[c], io[c] + numSamples, dry_[(size_t) c].begin());
+        }
+    }
+
+    /** Wet: out = wet * processed + (1 - wet) * input (linear crossfade); delta: out = processed - input, whatever the wet. */
+    void mixDry (float* const* io, int numChannels, int numSamples, double wet, bool delta)
+    {
+        for (int c = 0; c < numChannels; ++c)
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double processed = io[c][i], in = dry_[(size_t) c][(size_t) i];
+                io[c][i] = (float) (delta ? processed - in : wet * processed + (1.0 - wet) * in);
+            }
+    }
+
+    std::array<std::vector<float>, 2> dry_;
     std::vector<ParamDef> defs_;
     std::vector<std::unique_ptr<juce::CachedValue<float>>> values_;
     std::vector<te::AutomatableParameter::Ptr> params_;
@@ -188,7 +215,8 @@ public:
 private:
     static std::vector<ParamDef> definitions()
     {
-        static const std::vector<std::string> types { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass" };
+        static const std::vector<std::string> types { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass",
+                                                       "all_pass", "peak_alt2", "parallel_band_pass" };
         struct Default { int type; float freq, bw; bool on; };
         static const Default d[8] = { { 0, 100, 2, true }, { 2, 400, 1, true }, { 2, 2500, 1, true }, { 1, 8000, 2, true },
                                       { 4, 30, 1, false }, { 2, 800, 1, false }, { 2, 5000, 1, false }, { 3, 18000, 1, false } };
@@ -206,6 +234,9 @@ private:
         }
 
         out.push_back (num ("out_gain", "Output gain", -24.0f, 24.0f, 0.0f, "dB", 2));
+        out.push_back (toggle ("reaper_compat", "ReaEQ filter design", false));      // imported ReaEQ: filters designed as ReaEQ does (src/core/StockFx.h)
+        out.push_back (num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1));  // generic Wet / Delta of an imported REAPER FX
+        out.push_back (toggle ("fx_delta", "FX delta (processed - input)", false));
         return out;
     }
 
@@ -222,11 +253,21 @@ private:
         }
 
         p.outputGainDb = value (40);
+        p.reaperCompat = flag (41);
 
         if (! (p == eq_.params()))
             eq_.setParams (p);
 
+        const double wet = std::clamp ((double) value (42) / 100.0, 0.0, 1.0);
+        const bool delta = flag (43), mix = delta || wet < 1.0;
+
+        if (mix)
+            saveDry (io, n, count);
+
         eq_.process (io, n, count);
+
+        if (mix)
+            mixDry (io, n, count, wet, delta);
     }
 
     fx::Eq eq_;
@@ -371,10 +412,13 @@ public:
     juce::String getName() const override           { return "Rovox Delay"; }
     juce::String getPluginType() override           { return xmlTypeName; }
     bool noTail() override                          { return false; }
-    double getTailLength() const override           { return fx::Delay::tailSeconds (readParams (bpm_.load())); }
+    double getTailLength() const override           { return compat() ? fx::ReaDelay::tailSeconds (readReaParams (bpm_.load())) : fx::Delay::tailSeconds (readParams (bpm_.load())); }
 
 private:
-    static constexpr size_t perTap = 6, shared = 4 * perTap;
+    // parameter order: 4 x (on, sync, time, beats, gain, pan), feedback, lowpass, highpass, wet, dry, then the ReaDelay mode:
+    // reaper_compat, fx_wet, fx_delta, and per tap (musical, fb, lp, hp, bits, width)
+    static constexpr size_t perTap = 6, shared = 4 * perTap, compatFlag = shared + 5, fxWet = compatFlag + 1, fxDelta = compatFlag + 2,
+                            extra = compatFlag + 3, perTapExtra = 6;
 
     static std::vector<ParamDef> definitions()
     {
@@ -387,7 +431,7 @@ private:
             const auto n = "Tap " + std::to_string (t + 1) + " ";
             out.push_back (toggle (p + "on", n + "enabled", t == 0));
             out.push_back (toggle (p + "sync", n + "tempo sync", false));
-            out.push_back (num (p + "time", n + "time", 1.0f, 8000.0f, times[t], "ms", 2, 500.0f));
+            out.push_back (num (p + "time", n + "time", 0.0f, 10000.0f, times[t], "ms", 2, 500.0f));
             out.push_back (num (p + "beats", n + "length", 0.0625f, 16.0f, 0.5f * (float) (t + 1), "beats", 4, 1.0f));
             out.push_back (num (p + "gain", n + "gain", -60.0f, 12.0f, 0.0f, "dB", 1));
             out.push_back (num (p + "pan", n + "pan", -1.0f, 1.0f, t == 1 ? -0.5f : t == 2 ? 0.5f : 0.0f, "", 2));
@@ -398,8 +442,26 @@ private:
         out.push_back (num ("highpass", "Feedback high-pass", 20.0f, 2000.0f, 20.0f, "Hz", 0, 200.0f));
         out.push_back (num ("wet", "Wet", -96.0f, 12.0f, -6.0f, "dB", 1));
         out.push_back (num ("dry", "Dry", -96.0f, 12.0f, 0.0f, "dB", 1));
+        out.push_back (toggle ("reaper_compat", "ReaDelay mode", false));      // imported ReaDelay: separate loop per tap, whole-sample delay (src/core/StockFx.h)
+        out.push_back (num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1));      // generic Wet / Delta of an imported REAPER FX
+        out.push_back (toggle ("fx_delta", "FX delta (processed - input)", false));
+
+        for (int t = 0; t < 4; ++t)
+        {
+            const auto p = "t" + std::to_string (t + 1) + "_";
+            const auto n = "Tap " + std::to_string (t + 1) + " ";
+            out.push_back (num (p + "musical", n + "length (1/8 notes, ReaDelay mode)", 0.0f, 256.0f, 0.0f, "1/8", 3, 8.0f));
+            out.push_back (num (p + "fb", n + "feedback (ReaDelay mode)", -150.0f, 12.0f, -150.0f, "dB", 2));
+            out.push_back (num (p + "lp", n + "low-pass (ReaDelay mode)", 0.0f, 20000.0f, 20000.0f, "Hz", 0));
+            out.push_back (num (p + "hp", n + "high-pass (ReaDelay mode)", 0.0f, 20000.0f, 0.0f, "Hz", 0));
+            out.push_back (num (p + "bits", n + "resolution (ReaDelay mode)", 2.0f, 24.0f, 24.0f, "bits", 0));
+            out.push_back (num (p + "width", n + "stereo width (ReaDelay mode)", -1.0f, 1.0f, 1.0f, "", 2));
+        }
+
         return out;
     }
+
+    bool compat() const                         { return flag (compatFlag); }
 
     fx::DelayParams readParams (double bpm) const
     {
@@ -417,11 +479,75 @@ private:
         return p;
     }
 
-    void prepareDsp (double sr) override        { sr_ = sr; delay_.prepare (sr); delay_.setParams (readParams (bpm_.load())); }
-    void resetDsp() override                    { delay_.reset(); }
+    fx::ReaDelayParams readReaParams (double bpm) const
+    {
+        fx::ReaDelayParams p;
+
+        for (size_t t = 0; t < 4; ++t)
+        {
+            const size_t e = extra + t * perTapExtra;
+            auto& tap = p.taps[t];
+            tap.enabled = flag (t * perTap);
+            tap.timeMs = value (t * perTap + 2);
+            tap.musical = value (e);
+            tap.feedback = value (e + 1) <= -149.0f ? 0.0 : std::pow (10.0, (double) value (e + 1) / 20.0);
+            tap.lowPassHz = value (e + 2);
+            tap.highPassHz = value (e + 3);
+            tap.bits = (int) std::lround (value (e + 4));
+            tap.width = value (e + 5);
+            tap.volume = value (t * perTap + 4) <= -59.9f ? 0.0 : std::pow (10.0, (double) value (t * perTap + 4) / 20.0);
+            tap.pan = value (t * perTap + 5);
+        }
+
+        p.wet = value (shared + 3) <= -95.9f ? 0.0 : std::pow (10.0, (double) value (shared + 3) / 20.0);
+        p.dry = value (shared + 4) <= -95.9f ? 0.0 : std::pow (10.0, (double) value (shared + 4) / 20.0);
+        p.bpm = bpm;
+        return p;
+    }
+
+    void prepareDsp (double sr) override
+    {
+        sr_ = sr;
+        delay_.prepare (sr);
+        delay_.setParams (readParams (bpm_.load()));
+
+        if (compat())
+            prepareRea();
+    }
+
+    void prepareRea()
+    {
+        reaDelay_.prepare (sr_);
+        reaDelay_.setParams (readReaParams (bpm_.load()));
+        reaReady_ = true;
+    }
+
+    void resetDsp() override                    { delay_.reset(); if (reaReady_) reaDelay_.reset(); }
 
     void run (float* const* io, int n, int count, const te::PluginRenderContext& fc) override
     {
+        if (compat())
+        {
+            bpm_ = edit.tempoSequence.getBpmAt (fc.editTime.getStart());
+
+            if (! reaReady_)
+                prepareRea();
+
+            const double wet = std::clamp ((double) value (fxWet) / 100.0, 0.0, 1.0);
+            const bool delta = flag (fxDelta), mix = delta || wet < 1.0;
+
+            if (mix)
+                saveDry (io, n, count);
+
+            reaDelay_.setParams (readReaParams (bpm_.load()));
+            reaDelay_.process (io, n, count);
+
+            if (mix)
+                mixDry (io, n, count, wet, delta);
+
+            return;
+        }
+
         bool synced = false;
 
         for (size_t t = 0; t < 4; ++t)
@@ -435,6 +561,8 @@ private:
     }
 
     fx::Delay delay_;
+    fx::ReaDelay reaDelay_;
+    bool reaReady_ = false;
     std::atomic<double> bpm_ { 120.0 };
 };
 
@@ -559,6 +687,7 @@ void registerStockPlugins (te::Engine& engine)
     pm.createBuiltInType<RovoxVerb>();
     registerDrumsPlugin (engine);
     registerPanStage (engine);
+    registerFadeStage (engine);
 }
 
 json stockPluginExtras (te::Plugin& p)

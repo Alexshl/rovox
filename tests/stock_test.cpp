@@ -709,7 +709,7 @@ ROVOX_TEST (stock, catalog_lists_the_stock_effects_and_fx_add_takes_them_by_id_o
     CHECK (info["units"]["b2_freq"] == "Hz");
     CHECK (info["units"]["b2_gain"] == "dB");
     CHECK (info["units"]["b2_bw"] == "oct");
-    CHECK (info["params"].size() == 41);
+    CHECK (info["params"].size() == 44);
     CHECK_NEAR (findParam (info, "b2_freq")["value"].get<double>(), 400.0, 1e-3);
     CHECK (findParam (info, "b1_type")["display"] == "low_shelf");
     CHECK (findParam (info, "b4_type")["display"] == "high_shelf");

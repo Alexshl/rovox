@@ -1,0 +1,29 @@
+{
+ "name": "reaeq_type_notch",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Notch 1",
+   "value": 1000
+  },
+  {
+   "name": "Gain-Notch 1",
+   "value": 0
+  },
+  {
+   "name": "BW-Notch 1",
+   "value": 0.5
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "6"
+ },
+ "description": "ReaEQ band 1 as BANDTYPE 6 (Notch 1) 1000 Hz 0 dB BW 0.5 oct, other bands off (spec-reaeq.md)"
+}

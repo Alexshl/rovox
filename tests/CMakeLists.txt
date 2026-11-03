@@ -28,12 +28,13 @@ target_sources(rovox_engine_tests PRIVATE
     plugin_test.cpp
     jsfx_test.cpp
     stock_test.cpp
+    parity_test.cpp
     drums_test.cpp
     transport_test.cpp)
 
 target_link_libraries(rovox_engine_tests PRIVATE rovox_mcp)
 
-foreach(suite core engine project import render rpp upload cli mcp transport web stock drums jsfx plugins midi routing fx templates projects delivery storage)
+foreach(suite core engine project import render rpp upload cli mcp transport web stock drums jsfx plugins midi routing fx templates projects delivery storage parity)
     add_test(NAME ${suite} COMMAND rovox_engine_tests ${suite})
 endforeach()
 

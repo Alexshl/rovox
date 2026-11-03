@@ -283,6 +283,19 @@ struct EqBandIn
     const ReaperFxParam* enable = nullptr;
 };
 
+/** ReaEQ gain knob: amplitude 2n up to n = 0.5, then 1 + 6 (n - 0.5) (-inf .. +12.04 dB). */
+double reaEqGainDb (double n)
+{
+    const double amp = n <= 0.5 ? 2.0 * n : 1.0 + 6.0 * (n - 0.5);
+    return amp <= 1.0e-7 ? minusInfDb : 20.0 * std::log10 (amp);
+}
+
+/** The value implied by the normalized parameter when it agrees with the displayed text (which is rounded) within `tolerance`, else the text's value. */
+double exactOrText (double fromText, double fromNormalized, double tolerance)
+{
+    return std::abs (fromText - fromNormalized) <= tolerance ? fromNormalized : fromText;
+}
+
 void translateEq (const ReaperFxEntry& fx, Sink& s)
 {
     std::vector<EqBandIn> bands;
@@ -356,48 +369,46 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
         const auto n = "b" + std::to_string (i + 1) + "_";
         const auto idx = std::to_string (i);
 
-        // band type: the band's name wins ("Low Shelf", "Band 2", "High Pass 5"); BANDTYPE<n> serves as the fallback and as a cross-check.
-        // ReaEQ's BANDTYPE: 0 low shelf, 1 high shelf, 2 band, 3 low pass, 4 high pass, 5 all pass, 6 notch, 7 band pass, 8 and 9 band
+        // band type: BANDTYPE<n> (ReaEQ's own code, which tells the three "Band" kinds apart) wins, the band's name serves as the fallback.
+        // ReaEQ's BANDTYPE: 0 low shelf, 1 high shelf, 2 band (alt 2), 3 low pass, 4 high pass, 5 all pass, 6 notch, 7 band pass, 8 band,
+        // 9 band (alt), 10 parallel band pass. The Rovox type indices: StockPlugins.cpp (RovoxEq, "type" choices).
         int type = -1, cfgType = -1;
         std::string typeNote;
         const auto has = [&] (const char* x) { return b.key.find (x) != std::string::npos; };
 
-        if (has ("low shelf") || has ("lowshelf"))              type = 0;
+        if (has ("parallel"))                                   type = 9;
+        else if (has ("low shelf") || has ("lowshelf"))         type = 0;
         else if (has ("high shelf") || has ("highshelf"))       type = 1;
         else if (has ("low pass") || has ("lowpass"))           type = 3;
         else if (has ("high pass") || has ("highpass"))         type = 4;
         else if (has ("notch"))                                 type = 5;
         else if (has ("band pass") || has ("bandpass"))         type = 6;
-        else if (has ("all pass") || has ("allpass"))           { type = 2; typeNote = "; all-pass has no Rovox equivalent, the band is a flat peak"; }
+        else if (has ("all pass") || has ("allpass"))           type = 7;
         else if (has ("band") || has ("peak"))                  type = 2;
 
         const auto cfgKey = "BANDTYPE" + idx;
 
         if (auto it = fx.config.find (cfgKey); it != fx.config.end())
         {
-            static const int map[] = { 0, 1, 2, 3, 4, 2, 5, 6, 2, 2 };
+            static const int map[] = { 0, 1, 8, 3, 4, 7, 5, 6, 2, 2, 9 };
             const int reaType = std::atoi (it->second.c_str());
 
-            if (reaType >= 0 && reaType < 10)
+            if (reaType >= 0 && reaType < 11)
                 cfgType = map[reaType];
 
-            if (type < 0 && cfgType >= 0)
+            if (cfgType >= 0)
             {
-                type = cfgType;
+                if (type >= 0 && type != cfgType && ! (type == 2 && (cfgType == 8 || cfgType == 2)))
+                    typeNote += "; " + cfgKey + "=" + it->second + " disagrees with the band name, the code is used";
 
-                if (reaType == 5)
-                    typeNote = "; all-pass has no Rovox equivalent, the band is a flat peak";
-            }
-            else if (type >= 0 && cfgType >= 0 && type != cfgType)
-            {
-                typeNote += "; " + cfgKey + "=" + it->second + " disagrees with the band name, the name is used";
+                type = cfgType;
             }
         }
 
         if (type < 0)
             type = 2;
 
-        static const char* const typeNames[] = { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass" };
+        static const char* const typeNames[] = { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass", "all_pass", "peak_alt2", "parallel_band_pass" };
         s.out.translated.push_back ({ "band type (" + b.key + ")", fx.config.count (cfgKey) ? cfgKey + "=" + fx.config.at (cfgKey) : "from the band name",
                                       n + "type", (double) type, std::string (typeNames[type]) + typeNote });
 
@@ -425,7 +436,7 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
 
         if (b.gain != nullptr)
         {
-            if (auto db = asDb (parseReaperValue (b.gain->formatted)))      s.set (*b.gain, n + "gain", *db);
+            if (auto db = asDb (parseReaperValue (b.gain->formatted)))      s.set (*b.gain, n + "gain", exactOrText (*db, reaEqGainDb (b.gain->normalized), 0.12), "exact value of the knob");
             else                                                            s.unparsed (*b.gain);
         }
 
@@ -446,7 +457,7 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
             if (bwp == b.q && v.unit != "oct")
                 s.set (*bwp, n + "bw", bandwidthOctForQ (v.value), "Q " + std::to_string (v.value) + " converted to octaves");
             else
-                s.set (*bwp, n + "bw", v.value);
+                s.set (*bwp, n + "bw", exactOrText (v.value, 4.0 * bwp->normalized, 0.011), "ReaEQ bandwidth = 4 n octaves");
         }
     }
 
@@ -456,9 +467,12 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
 
     if (outGain != nullptr)
     {
-        if (auto db = asDb (parseReaperValue (outGain->formatted)))     s.set (*outGain, "out_gain", *db);
+        if (auto db = asDb (parseReaperValue (outGain->formatted)))     s.set (*outGain, "out_gain", exactOrText (*db, reaEqGainDb (outGain->normalized), 0.12), "exact value of the knob");
         else                                                            s.unparsed (*outGain);
     }
+
+    // ReaEQ's filter design (shelf slope, bandwidth alpha, band types) instead of the Rovox one
+    s.out.translated.push_back ({ "(ReaEQ)", "", "reaper_compat", 1.0, "filters designed as ReaEQ does" });
 }
 
 //------------------------------------------------------------------------------ ReaComp
@@ -767,47 +781,22 @@ void translateVerb (const ReaperFxEntry& fx, Sink& s)
 }
 
 //------------------------------------------------------------------------------ ReaDelay
-/** A beat length from "1/8", "1/4T", "1/16 dotted", "0.5 beats". */
-std::optional<double> beatsOf (const std::string& formatted)
+/** ReaDelay's amplitude knobs (Wet, Dry, Feedback, Volume): amplitude = 2 n, in dB (-inf at 0). */
+double reaDelayGainDb (double n)
 {
-    const auto t = lowerOf (trim (formatted));
-    const auto slash = t.find ('/');
-
-    if (slash != std::string::npos)
-    {
-        const double num = std::atof (t.substr (0, slash).c_str()), den = std::atof (t.c_str() + slash + 1);
-
-        if (num > 0.0 && den > 0.0)
-        {
-            double beats = 4.0 * num / den;
-            const auto tail = t.substr (slash + 1);
-
-            if (tail.find ('t') != std::string::npos)   beats *= 2.0 / 3.0;
-            if (tail.find ('d') != std::string::npos || tail.find ('.') != std::string::npos)   beats *= 1.5;
-            return beats;
-        }
-    }
-
-    if (t.find ("beat") != std::string::npos)
-    {
-        const double v = std::atof (t.c_str());
-
-        if (v > 0.0)
-            return v;
-    }
-
-    return std::nullopt;
+    return n <= 1.0e-7 ? minusInfDb : 20.0 * std::log10 (2.0 * n);
 }
 
 void translateDelay (const ReaperFxEntry& fx, Sink& s)
 {
-    struct Tap { bool seen = false, hasTime = false, hasBeats = false, hasEnabled = false; };
+    struct Tap { bool seen = false, hasEnabled = false; };
     std::array<Tap, 4> taps {};
 
     for (auto& p : fx.params)
     {
         const auto w = words (p.name);
         const auto v = parseReaperValue (p.formatted);
+        const double n = p.normalized;
         int tap = 0;
 
         for (auto& x : w)
@@ -819,11 +808,11 @@ void translateDelay (const ReaperFxEntry& fx, Sink& s)
 
         const bool isFeedback = hasWord (w, "feedback") || hasWord (w, "fb");
         const bool isLowpass = hasWord (w, "lowpass") || hasWord (w, "lp") || (hasWord (w, "low") && hasWord (w, "pass"));
-        const bool isHighpass = hasWord (w, "highpass") || hasWord (w, "hp") || (hasWord (w, "high") && hasWord (w, "pass"));
+        const bool isHighpass = hasWord (w, "highpass") || hasWord (w, "hipass") || hasWord (w, "hp") || (hasWord (w, "high") && hasWord (w, "pass"));
 
         if (tap == 0 && w.size() == 1 && (w[0] == "wet" || w[0] == "dry"))
         {
-            if (auto db = asDb (v))     s.set (p, w[0], *db);
+            if (auto db = asDb (v))     s.set (p, w[0], exactOrText (*db, reaDelayGainDb (n), 0.12), "amplitude 2 n");
             else                        s.unparsed (p);
 
             continue;
@@ -835,38 +824,6 @@ void translateDelay (const ReaperFxEntry& fx, Sink& s)
             continue;
         }
 
-        if (isFeedback)
-        {
-            if (tap > 1)
-            {
-                s.skip (p, "the Rovox Delay feeds back tap 1 only");
-                continue;
-            }
-
-            if (v.ok && ! v.infinite && v.unit == "%")
-                s.set (p, "feedback", v.value);
-            else if (auto db = asDb (v); db && (v.infinite || v.unit == "db"))
-                s.set (p, "feedback", 100.0 * dbToLin (*db), "from dB");
-            else
-                s.unparsed (p);
-
-            continue;
-        }
-
-        if (isLowpass || isHighpass)
-        {
-            if (tap > 1)
-            {
-                s.skip (p, "the Rovox Delay filters the feedback path once");
-                continue;
-            }
-
-            if (auto hz = asHz (v))     s.set (p, isLowpass ? "lowpass" : "highpass", *hz);
-            else                        s.unparsed (p);
-
-            continue;
-        }
-
         if (tap == 0)
         {
             s.skip (p, "no equivalent in the Rovox Delay");
@@ -875,33 +832,47 @@ void translateDelay (const ReaperFxEntry& fx, Sink& s)
 
         auto& t = taps[(size_t) tap - 1];
         t.seen = true;
-        const auto n = "t" + std::to_string (tap) + "_";
+        const auto id = "t" + std::to_string (tap) + "_";
 
-        if (hasWord (w, "enabled") || hasWord (w, "enable") || hasWord (w, "on"))
+        if (isFeedback)
+        {
+            if (auto db = asDb (v))     s.set (p, id + "fb", exactOrText (*db, reaDelayGainDb (n), 0.12), "amplitude 2 n");
+            else                        s.unparsed (p);
+        }
+        else if (isLowpass || isHighpass)
+        {
+            if (auto hz = asHz (v))     s.set (p, id + (isLowpass ? "lp" : "hp"), exactOrText (*hz, 20000.0 * n, 1.0));
+            else                        s.unparsed (p);
+        }
+        else if (hasWord (w, "enabled") || hasWord (w, "enable") || hasWord (w, "on"))
         {
             t.hasEnabled = true;
-            s.set (p, n + "on", asFlag (p) ? 1.0 : 0.0);
+            s.set (p, id + "on", asFlag (p) ? 1.0 : 0.0);
         }
-        else if (hasWord (w, "length") || hasWord (w, "time") || hasWord (w, "musical"))
+        else if (hasWord (w, "musical"))
         {
-            if (auto beats = beatsOf (p.formatted); beats && (hasWord (w, "musical") || v.unit.empty() || v.unit == "oct"))
-            {
-                t.hasBeats = true;
-                s.set (p, n + "beats", *beats);
-            }
-            else if (auto ms = asMs (v))
-            {
-                t.hasTime = true;
-                s.set (p, n + "time", *ms);
-            }
-            else
-            {
-                s.unparsed (p);
-            }
+            // in 1/8 notes (ReaDelay shows the plain number)
+            if (v.ok && ! v.infinite)   s.set (p, id + "musical", exactOrText (v.value, 256.0 * n, 0.006), "1/8 notes");
+            else                        s.unparsed (p);
+        }
+        else if (hasWord (w, "length") || hasWord (w, "time"))
+        {
+            if (auto ms = asMs (v))     s.set (p, id + "time", exactOrText (*ms, 10000.0 * n, 0.06));
+            else                        s.unparsed (p);
+        }
+        else if (hasWord (w, "resolution"))
+        {
+            if (v.ok && ! v.infinite)   s.set (p, id + "bits", v.value);
+            else                        s.unparsed (p);
+        }
+        else if (hasWord (w, "width"))
+        {
+            if (v.ok && ! v.infinite)   s.set (p, id + "width", exactOrText (v.value, 2.0 * n - 1.0, 0.011));
+            else                        s.unparsed (p);
         }
         else if (hasWord (w, "volume") || hasWord (w, "gain") || hasWord (w, "level"))
         {
-            if (auto db = asDb (v))     s.set (p, n + "gain", *db);
+            if (auto db = asDb (v))     s.set (p, id + "gain", exactOrText (*db, reaDelayGainDb (n), 0.12), "amplitude 2 n");
             else                        s.unparsed (p);
         }
         else if (hasWord (w, "pan"))
@@ -916,11 +887,11 @@ void translateDelay (const ReaperFxEntry& fx, Sink& s)
                 if (text.find ('l') != std::string::npos && pan > 0.0)
                     pan = -pan;
 
-                s.set (p, n + "pan", std::clamp (pan, -1.0, 1.0));
+                s.set (p, id + "pan", exactOrText (std::clamp (pan, -1.0, 1.0), 2.0 * n - 1.0, 0.0011));
             }
             else if (text == "center" || text == "c")
             {
-                s.set (p, n + "pan", 0.0);
+                s.set (p, id + "pan", 0.0);
             }
             else
             {
@@ -935,16 +906,16 @@ void translateDelay (const ReaperFxEntry& fx, Sink& s)
 
     for (size_t i = 0; i < taps.size(); ++i)
     {
-        const auto n = "t" + std::to_string (i + 1) + "_";
+        const auto id = "t" + std::to_string (i + 1) + "_";
 
         if (taps[i].seen && ! taps[i].hasEnabled)
-            s.out.translated.push_back ({ "(tap " + std::to_string (i + 1) + ")", "", n + "on", 1.0, "tap present in the REAPER delay" });
+            s.out.translated.push_back ({ "(tap " + std::to_string (i + 1) + ")", "", id + "on", 1.0, "tap present in the REAPER delay" });
         else if (! taps[i].seen)
-            s.out.translated.push_back ({ "(no tap " + std::to_string (i + 1) + ")", "", n + "on", 0.0, "not present in the REAPER delay" });
-
-        if (taps[i].hasBeats && ! taps[i].hasTime)
-            s.out.translated.push_back ({ "(tap " + std::to_string (i + 1) + " length)", "", n + "sync", 1.0, "length is musical" });
+            s.out.translated.push_back ({ "(no tap " + std::to_string (i + 1) + ")", "", id + "on", 0.0, "not present in the REAPER delay" });
     }
+
+    // ReaDelay's behaviour (a loop per tap, whole-sample delay, 12 dB/oct loop filters) instead of the Rovox delay
+    s.out.translated.push_back ({ "(ReaDelay)", "", "reaper_compat", 1.0, "tap loops as ReaDelay does" });
 }
 } // namespace
 
@@ -992,10 +963,23 @@ FxTranslation translateReaperFx (const std::string& id, const ReaperFxEntry& ent
     else if (id == "verb")      translateVerb (fx, s);
     else if (id == "delay")     translateDelay (fx, s);
 
+    // the Rovox EQ and Delay carry the generic Wet (linear crossfade) and Delta (processed - input, the Wet is ignored) themselves
+    const bool hasMix = id == "eq" || id == "delay";
+    const bool deltaOn = delta != nullptr && lowerOf (trim (delta->formatted)) != "normal" && delta->normalized >= 0.5;
+
+    if (hasMix && genericWet != nullptr)
+    {
+        s.out.translated.push_back ({ genericWet->name, genericWet->formatted, "fx_wet", s.overallWet * 100.0, "linear crossfade with the input" });
+        s.overallWetApplied = true;
+    }
+
+    if (hasMix && deltaOn)
+        s.out.translated.push_back ({ delta->name, delta->formatted, "fx_delta", 1.0, "processed minus input" });
+
     if (genericWet != nullptr && s.overallWet < 1.0 - 1.0e-6 && ! s.overallWetApplied)
         s.skip (*genericWet, "the FX-wide wet mix other than 100 % has no equivalent in this Rovox effect");
 
-    if (delta != nullptr && lowerOf (trim (delta->formatted)) != "normal" && delta->normalized >= 0.5)
+    if (deltaOn && ! hasMix)
         s.skip (*delta, "delta (difference) monitoring has no equivalent in Rovox");
 
     return s.out;

@@ -1,0 +1,15 @@
+{
+ "name": "fade_s3_implicit",
+ "kind": "bare",
+ "fx": null,
+ "signal": "pink",
+ "channels": 1,
+ "params": [],
+ "fade_in": 0.5,
+ "fade_out": 0.8,
+ "item_info": {
+  "C_FADEINSHAPE": 3,
+  "C_FADEOUTSHAPE": 3
+ },
+ "description": "item fades shape 3 without explicit curve (= shape 0 curve +1) (spec-fades.md)"
+}

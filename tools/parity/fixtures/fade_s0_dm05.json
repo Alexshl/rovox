@@ -1,0 +1,17 @@
+{
+ "name": "fade_s0_dm05",
+ "kind": "bare",
+ "fx": null,
+ "signal": "pink",
+ "channels": 1,
+ "params": [],
+ "fade_in": 0.5,
+ "fade_out": 0.8,
+ "item_info": {
+  "C_FADEINSHAPE": 0,
+  "C_FADEOUTSHAPE": 0,
+  "D_FADEINDIR": -0.5,
+  "D_FADEOUTDIR": -0.5
+ },
+ "description": "item fades 0.5 s / 0.8 s, shape 0 curve -0.5 (spec-fades.md)"
+}

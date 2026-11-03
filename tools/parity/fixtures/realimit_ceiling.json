@@ -1,0 +1,22 @@
+{
+ "name": "realimit_ceiling",
+ "kind": "limit",
+ "fx": "ReaLimit",
+ "signal": "pink",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -10
+  },
+  {
+   "name": "Ceiling",
+   "value": -3
+  },
+  {
+   "name": "Release",
+   "value": 6
+  }
+ ],
+ "description": "threshold -10 (input boost), ceiling -3, release 6 dB/s (spec-realimit.md)"
+}

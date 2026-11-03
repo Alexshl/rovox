@@ -4,6 +4,7 @@
 #include "RppImport.h"
 
 #include "Command.h"
+#include "FadeStage.h"
 #include "Ids.h"
 #include "PanLaw.h"
 #include "PanStage.h"
@@ -420,8 +421,13 @@ struct Importer
         if (std::abs (volume - 1.0) > 1e-6)
             clip->setGainDB ((float) linearToDbSafe (volume));
 
-        if (const double fi = toDouble (item.line ("FADEIN"), 1, 0.0); fi > 0.0)    clip->setFadeIn (te::TimeDuration::fromSeconds (fi));
-        if (const double fo = toDouble (item.line ("FADEOUT"), 1, 0.0); fo > 0.0)   clip->setFadeOut (te::TimeDuration::fromSeconds (fo));
+        for (const bool fadeIn : { true, false })
+        {
+            const auto* l = item.line (fadeIn ? "FADEIN" : "FADEOUT");
+
+            if (const double len = toDouble (l, 1, 0.0); len > 0.0)
+                setItemFade (*clip, fadeIn, len, fades::fromProjectFields (toDouble (l, 0, 0.0), toDouble (l, 5, 0.0), toDouble (l, 7, 1.0), toDouble (l, 8, 0.0), toDouble (l, 9, 0.0)));
+        }
 
         clip->setMuted (muted);
         ChangeCollector::assignMissingIds (clip->state);

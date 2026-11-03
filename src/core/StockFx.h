@@ -15,7 +15,9 @@ namespace rovox::fx
 {
 
 //==============================================================================
-enum class BandType : int { LowShelf = 0, HighShelf, Peak, LowPass, HighPass, Notch, BandPass };
+enum class BandType : int { LowShelf = 0, HighShelf, Peak, LowPass, HighPass, Notch, BandPass,
+                            // the ReaEQ band types that have no counterpart above (always designed the ReaEQ way)
+                            AllPass, PeakAlt2, ParallelBandPass };
 
 struct BiquadCoeffs
 {
@@ -34,11 +36,17 @@ struct EqBand
     bool operator== (const EqBand&) const = default;
 };
 
+/** ReaEQ filter design (reaperCompat): the bandwidth turns into the RBJ alpha as alpha = sin(w0) * sinh(ln2/2 * BW * w0 / sin(w0)), the shelves use the
+    shelf slope S = min(1 / BW^2, 1.2), the pass / notch / band-pass / all-pass types ignore the gain, "Band (alt 2)" keeps its poles at the BW
+    alpha whatever the gain is, and all ParallelBandPass bands are summed in parallel (the sum then goes through the other bands in series). */
+BiquadCoeffs designReaperBiquad (BandType, double sampleRate, double freqHz, double gainDb, double bandwidthOct);
+
 struct EqParams
 {
     static constexpr int maxBands = 8;
     std::array<EqBand, maxBands> bands;
     double outputGainDb = 0.0;
+    bool reaperCompat = false;      // design the bands the ReaEQ way (designReaperBiquad); false: the Rovox design, same as before
     bool operator== (const EqParams&) const = default;
 };
 
@@ -56,6 +64,8 @@ public:
 
 private:
     struct State { double z1 = 0.0, z2 = 0.0; };
+    static bool isParallel (const EqBand& b)    { return b.type == BandType::ParallelBandPass; }
+
     double sampleRate_ = 44100.0, outGain_ = 1.0;
     EqParams params_;
     std::array<BiquadCoeffs, EqParams::maxBands> coeffs_;
@@ -167,6 +177,64 @@ private:
     size_t writePos_ = 0;
     struct Filter { double lp = 0.0, hpLp = 0.0; };
     std::array<Filter, 2> filter_;
+};
+
+//==============================================================================
+/** ReaDelay behaviour: every tap is its own delay line with its own feedback loop (so the taps do not share a line, unlike Delay). A tap's
+    signal is the delayed input run through the loop filters (low-pass then high-pass, 12 dB/oct, 0 dB at the corner), the repeat n is
+    feedback^(n-1) * filter^n * input. Resolution, width, pan and volume come after the loop; the wet gain after the sum of the taps.
+    The delay is a whole number of samples: round((timeMs + musical * 1/8 note) * fs / 1000). */
+struct ReaDelayTap
+{
+    bool enabled = true;
+    double timeMs = 0.0;
+    double musical = 2.0;           // in 1/8 notes at the project tempo
+    double feedback = 0.0;          // amplitude (0 = -inf dB)
+    double lowPassHz = 20000.0;     // >= 20000: no filter
+    double highPassHz = 0.0;        // <= 0: no filter
+    int bits = 24;                  // 24: no truncation
+    double width = 1.0;             // -1 .. 1
+    double volume = 1.0;            // amplitude
+    double pan = 0.0;               // -1 .. 1, balance law
+    bool operator== (const ReaDelayTap&) const = default;
+};
+
+struct ReaDelayParams
+{
+    static constexpr int maxTaps = 4;
+    std::array<ReaDelayTap, maxTaps> taps;
+    double wet = 0.5, dry = 1.0;    // amplitudes
+    double bpm = 120.0;
+    bool operator== (const ReaDelayParams&) const = default;
+};
+
+class ReaDelay
+{
+public:
+    static constexpr double maxSeconds = 12.0;
+
+    void prepare (double sampleRate);       // allocates
+    void reset();
+    void setParams (const ReaDelayParams&);
+    void process (float* const* io, int numChannels, int numSamples);
+    static double tailSeconds (const ReaDelayParams&);
+
+    /** Delay of a tap in whole samples, at least 1. */
+    static long delaySamples (const ReaDelayTap&, double bpm, double sampleRate);
+
+private:
+    struct Biquad { double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0; double run (double x) noexcept; };
+    struct Loop
+    {
+        std::vector<float> line;
+        Biquad lp, hp;
+    };
+
+    double sampleRate_ = 44100.0;
+    ReaDelayParams params_;
+    std::array<std::array<Loop, 2>, ReaDelayParams::maxTaps> loop_;
+    std::array<long, ReaDelayParams::maxTaps> delay_ {};
+    size_t writePos_ = 0;
 };
 
 //==============================================================================

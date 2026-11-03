@@ -8,6 +8,7 @@
 #include "ParamsAction.h"
 #include "JsfxPlugin.h"
 #include "DrumsPlugin.h"
+#include "FadeStage.h"
 #include "StockPlugins.h"
 #include "TimePos.h"
 
@@ -58,8 +59,8 @@ json clipJson (Project& p, te::Clip& c)
     if (auto* a = dynamic_cast<te::AudioClipBase*> (&c))
     {
         j["file"] = toStd (a->getOriginalFile().getFileName());
-        j["fade_in_s"] = a->getFadeIn().inSeconds();
-        j["fade_out_s"] = a->getFadeOut().inSeconds();
+        j["fade_in_s"] = itemFadeSeconds (*a, true);
+        j["fade_out_s"] = itemFadeSeconds (*a, false);
         j["gain_db"] = (double) a->getGainDB();
     }
 
@@ -371,6 +372,12 @@ void registerItemCommands (CommandRegistry& r)
                     audio->setGainDB (params["gain_db"].get<float>());
 
                 const double lengthNow = audio->getPosition().getLength().inSeconds();
+
+                if (params.contains ("fade_in_s"))
+                    clearItemFadeCurve (*audio, true);
+
+                if (params.contains ("fade_out_s"))
+                    clearItemFadeCurve (*audio, false);
 
                 if (params.contains ("fade_in_s"))
                     audio->setFadeIn (te::TimeDuration::fromSeconds (std::min (params["fade_in_s"].get<double>(), lengthNow)));

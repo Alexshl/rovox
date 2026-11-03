@@ -1,0 +1,29 @@
+{
+ "name": "reaeq_type_bandalt",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Band (alt) 1",
+   "value": 2000
+  },
+  {
+   "name": "Gain-Band (alt) 1",
+   "value": 9
+  },
+  {
+   "name": "BW-Band (alt) 1",
+   "value": 0.7
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "9"
+ },
+ "description": "ReaEQ band 1 as BANDTYPE 9 (Band (alt) 1) 2000 Hz 9 dB BW 0.7 oct, other bands off (spec-reaeq.md)"
+}

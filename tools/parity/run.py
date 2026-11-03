@@ -63,7 +63,8 @@ def run_fixture(fx, out, reuse_reaper, reuse_rovox):
     else:
         job = {"name": name, "out_dir": work, "signal": sig, "fx": fx.get("fx"), "params": fx.get("params", []), "config": fx.get("config"),
                "tail_ms": fx.get("tail_ms", 0), "track_vol_db": fx.get("track_vol_db"), "track_pan": fx.get("track_pan"),
-               "item_vol_db": fx.get("item_vol_db"), "fade_in": fx.get("fade_in"), "fade_out": fx.get("fade_out"), "label": name}
+               "item_vol_db": fx.get("item_vol_db"), "fade_in": fx.get("fade_in"), "fade_out": fx.get("fade_out"), "label": name,
+               "item_info": fx.get("item_info")}
         log = reaper_driver.run_job(job)["log"]
     rpp = os.path.join(work, name + ".tab.RPP")
     rovox_wav = os.path.join(work, name + ".rovox.wav")

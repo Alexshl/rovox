@@ -72,17 +72,101 @@ BiquadCoeffs designBiquad (BandType type, double sr, double freqHz, double gainD
             b0 = alpha;  b1 = 0.0;  b2 = -alpha;
             a0 = 1.0 + alpha;  a1 = -2.0 * cosw;  a2 = 1.0 - alpha;
             break;
+        case BandType::AllPass:
+        case BandType::PeakAlt2:
+        case BandType::ParallelBandPass:
+            return designReaperBiquad (type, sr, freqHz, gainDb, bwOct);       // only exist as ReaEQ types
     }
 
     return { b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0 };
 }
 
-double biquadMagnitudeDb (const BiquadCoeffs& c, double sr, double freqHz)
+BiquadCoeffs designReaperBiquad (BandType type, double sr, double freqHz, double gainDb, double bwOct)
+{
+    const double f = std::clamp (freqHz, 5.0, 0.49 * sr);
+    const double bw = std::max (bwOct, 1.0e-3);
+    const double w0 = 2.0 * pi * f / sr, c = std::cos (w0), s = std::sin (w0);
+    const double alpha = s * std::sinh (0.5 * std::log (2.0) * bw * w0 / s);
+    const double A = std::pow (10.0, gainDb / 40.0);
+    double b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
+
+    switch (type)
+    {
+        case BandType::Peak:
+            b0 = 1.0 + alpha * A;  b1 = -2.0 * c;  b2 = 1.0 - alpha * A;
+            a0 = 1.0 + alpha / A;  a1 = -2.0 * c;  a2 = 1.0 - alpha / A;
+            break;
+        case BandType::PeakAlt2:
+            b0 = 1.0 + alpha * A * A;  b1 = -2.0 * c;  b2 = 1.0 - alpha * A * A;
+            a0 = 1.0 + alpha;          a1 = -2.0 * c;  a2 = 1.0 - alpha;
+            break;
+        case BandType::LowShelf:
+        case BandType::HighShelf:
+        {
+            const double slope = std::min (1.0 / (bw * bw), 1.2);
+            const double as = 0.5 * s * std::sqrt (std::max (0.0, (A + 1.0 / A) * (1.0 / slope - 1.0) + 2.0));
+            const double beta = 2.0 * std::sqrt (A) * as;
+
+            if (type == BandType::LowShelf)
+            {
+                b0 = A * ((A + 1.0) - (A - 1.0) * c + beta);
+                b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * c);
+                b2 = A * ((A + 1.0) - (A - 1.0) * c - beta);
+                a0 = (A + 1.0) + (A - 1.0) * c + beta;
+                a1 = -2.0 * ((A - 1.0) + (A + 1.0) * c);
+                a2 = (A + 1.0) + (A - 1.0) * c - beta;
+            }
+            else
+            {
+                b0 = A * ((A + 1.0) + (A - 1.0) * c + beta);
+                b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * c);
+                b2 = A * ((A + 1.0) + (A - 1.0) * c - beta);
+                a0 = (A + 1.0) - (A - 1.0) * c + beta;
+                a1 = 2.0 * ((A - 1.0) - (A + 1.0) * c);
+                a2 = (A + 1.0) - (A - 1.0) * c - beta;
+            }
+
+            break;
+        }
+        case BandType::LowPass:
+            b0 = (1.0 - c) / 2.0;  b1 = 1.0 - c;  b2 = b0;
+            a0 = 1.0 + alpha;  a1 = -2.0 * c;  a2 = 1.0 - alpha;
+            break;
+        case BandType::HighPass:
+            b0 = (1.0 + c) / 2.0;  b1 = -(1.0 + c);  b2 = b0;
+            a0 = 1.0 + alpha;  a1 = -2.0 * c;  a2 = 1.0 - alpha;
+            break;
+        case BandType::AllPass:
+            b0 = 1.0 - alpha;  b1 = -2.0 * c;  b2 = 1.0 + alpha;
+            a0 = 1.0 + alpha;  a1 = -2.0 * c;  a2 = 1.0 - alpha;
+            break;
+        case BandType::Notch:
+            b0 = 1.0;  b1 = -2.0 * c;  b2 = 1.0;
+            a0 = 1.0 + alpha;  a1 = -2.0 * c;  a2 = 1.0 - alpha;
+            break;
+        case BandType::BandPass:
+        case BandType::ParallelBandPass:
+            b0 = alpha;  b1 = 0.0;  b2 = -alpha;
+            a0 = 1.0 + alpha;  a1 = -2.0 * c;  a2 = 1.0 - alpha;
+            break;
+    }
+
+    return { b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0 };
+}
+
+namespace
+{
+std::complex<double> biquadResponse (const BiquadCoeffs& c, double sr, double freqHz)
 {
     const double w = 2.0 * pi * freqHz / sr;
     const std::complex<double> z1 = std::polar (1.0, -w), z2 = std::polar (1.0, -2.0 * w);
-    const auto h = (c.b0 + c.b1 * z1 + c.b2 * z2) / (1.0 + c.a1 * z1 + c.a2 * z2);
-    return 20.0 * std::log10 (std::max (std::abs (h), 1.0e-12));
+    return (c.b0 + c.b1 * z1 + c.b2 * z2) / (1.0 + c.a1 * z1 + c.a2 * z2);
+}
+} // namespace
+
+double biquadMagnitudeDb (const BiquadCoeffs& c, double sr, double freqHz)
+{
+    return 20.0 * std::log10 (std::max (std::abs (biquadResponse (c, sr, freqHz)), 1.0e-12));
 }
 
 //==============================================================================
@@ -108,19 +192,37 @@ void Eq::setParams (const EqParams& p)
     for (size_t i = 0; i < EqParams::maxBands; ++i)
     {
         const auto& b = p.bands[i];
-        const bool gainType = b.type == BandType::Peak || b.type == BandType::LowShelf || b.type == BandType::HighShelf;
+        const bool gainType = b.type == BandType::Peak || b.type == BandType::LowShelf || b.type == BandType::HighShelf || b.type == BandType::PeakAlt2;
         active_[i] = b.enabled && ! (gainType && std::abs (b.gainDb) < 1.0e-9);
-        coeffs_[i] = designBiquad (b.type, sampleRate_, b.freqHz, b.gainDb, b.bandwidthOct);
+        coeffs_[i] = p.reaperCompat ? designReaperBiquad (b.type, sampleRate_, b.freqHz, b.gainDb, b.bandwidthOct)
+                                    : designBiquad (b.type, sampleRate_, b.freqHz, b.gainDb, b.bandwidthOct);
     }
 }
 
 double Eq::magnitudeDb (double freqHz) const
 {
     double sum = 0.0;
+    std::complex<double> parallel (0.0, 0.0);
+    bool anyParallel = false;
 
     for (size_t i = 0; i < EqParams::maxBands; ++i)
-        if (active_[i])
+    {
+        if (! active_[i])
+            continue;
+
+        if (isParallel (params_.bands[i]))
+        {
+            parallel += biquadResponse (coeffs_[i], sampleRate_, freqHz);
+            anyParallel = true;
+        }
+        else
+        {
             sum += biquadMagnitudeDb (coeffs_[i], sampleRate_, freqHz);
+        }
+    }
+
+    if (anyParallel)
+        sum += 20.0 * std::log10 (std::max (std::abs (parallel), 1.0e-12));
 
     return sum;
 }
@@ -128,14 +230,57 @@ double Eq::magnitudeDb (double freqHz) const
 void Eq::process (float* const* io, int numChannels, int numSamples)
 {
     const int nch = std::min(numChannels, 2);
+    bool anyParallel = false;
+
+    for (size_t b = 0; b < EqParams::maxBands; ++b)
+        anyParallel = anyParallel || (active_[b] && isParallel (params_.bands[b]));
 
     for (int c = 0; c < nch; ++c)
     {
         float* x = io[c];
 
+        if (anyParallel)
+        {
+            // the parallel band-pass bands all see the input; their sum is the signal that goes on (in chunks, so that nothing is allocated)
+            constexpr int chunk = 256;
+            float in[chunk];
+
+            for (int start = 0; start < numSamples; start += chunk)
+            {
+                const int len = std::min (chunk, numSamples - start);
+                double sum[chunk] = {};
+                std::copy (x + start, x + start + len, in);
+
+                for (size_t b = 0; b < EqParams::maxBands; ++b)
+                {
+                    if (! active_[b] || ! isParallel (params_.bands[b]))
+                        continue;
+
+                    const auto k = coeffs_[b];
+                    auto& s = state_[b][(size_t) c];
+                    double z1 = s.z1, z2 = s.z2;
+
+                    for (int i = 0; i < len; ++i)
+                    {
+                        const double v = in[i];
+                        const double out = k.b0 * v + z1;
+                        z1 = k.b1 * v - k.a1 * out + z2;
+                        z2 = k.b2 * v - k.a2 * out;
+                        sum[i] += toFloat (out);
+                    }
+
+                    s.z1 = z1;
+                    s.z2 = z2;
+                }
+
+                for (int i = 0; i < len; ++i)
+                    x[start + i] = toFloat (sum[i]);
+            }
+        }
+
         for (size_t b = 0; b < EqParams::maxBands; ++b)
         {
-            if (! active_[b])
+            if (! active_[b] || isParallel (params_.bands[b]))
                 continue;
 
             const auto k = coeffs_[b];
@@ -493,6 +638,162 @@ void Delay::process (float* const* io, int numChannels, int numSamples)
     }
 
     snap_ = false;      // the delay times glide from now on
+}
+
+//==============================================================================
+double ReaDelay::Biquad::run (double x) noexcept
+{
+    const double out = b0 * x + z1;
+    z1 = flush (b1 * x - a1 * out + z2);
+    z2 = flush (b2 * x - a2 * out);
+    return out;
+}
+
+namespace
+{
+/** RBJ low-pass / high-pass with Q = 1 (0 dB at the corner frequency). */
+void designLoopFilter (bool lowPass, double sr, double hz, double& b0, double& b1, double& b2, double& a1, double& a2)
+{
+    const double w0 = 2.0 * pi * std::clamp (hz, 1.0, 0.49 * sr) / sr, c = std::cos (w0), alpha = std::sin (w0) / 2.0;
+    const double a0 = 1.0 + alpha;
+    b0 = (lowPass ? (1.0 - c) : (1.0 + c)) / 2.0 / a0;
+    b1 = (lowPass ? (1.0 - c) : -(1.0 + c)) / a0;
+    b2 = b0;
+    a1 = -2.0 * c / a0;
+    a2 = (1.0 - alpha) / a0;
+}
+} // namespace
+
+void ReaDelay::prepare (double sampleRate)
+{
+    sampleRate_ = sampleRate;
+
+    for (auto& tap : loop_)
+        for (auto& l : tap)
+            l.line.assign ((size_t) std::ceil (maxSeconds * sampleRate) + 4, 0.0f);
+
+    reset();
+    setParams (params_);
+}
+
+void ReaDelay::reset()
+{
+    for (auto& tap : loop_)
+        for (auto& l : tap)
+        {
+            std::fill (l.line.begin(), l.line.end(), 0.0f);
+            l.lp.z1 = l.lp.z2 = l.hp.z1 = l.hp.z2 = 0.0;
+        }
+
+    writePos_ = 0;
+}
+
+long ReaDelay::delaySamples (const ReaDelayTap& tap, double bpm, double sampleRate)
+{
+    const double eighthMs = 30000.0 / std::max (20.0, bpm);
+    const double ms = std::max (0.0, tap.timeMs) + std::max (0.0, tap.musical) * eighthMs;
+    return std::max (1L, std::lround (ms * sampleRate / 1000.0));
+}
+
+void ReaDelay::setParams (const ReaDelayParams& p)
+{
+    params_ = p;
+
+    for (size_t t = 0; t < (size_t) ReaDelayParams::maxTaps; ++t)
+    {
+        const auto& tap = p.taps[t];
+        const long cap = loop_[t][0].line.empty() ? 0 : (long) loop_[t][0].line.size() - 2;
+        delay_[t] = cap > 0 ? std::min (delaySamples (tap, p.bpm, sampleRate_), cap) : 1;
+
+        for (auto& l : loop_[t])
+        {
+            if (tap.lowPassHz < 20000.0)
+                designLoopFilter (true, sampleRate_, tap.lowPassHz, l.lp.b0, l.lp.b1, l.lp.b2, l.lp.a1, l.lp.a2);
+            else
+                l.lp = { 1, 0, 0, 0, 0, l.lp.z1, l.lp.z2 };
+
+            if (tap.highPassHz > 0.0)
+                designLoopFilter (false, sampleRate_, tap.highPassHz, l.hp.b0, l.hp.b1, l.hp.b2, l.hp.a1, l.hp.a2);
+            else
+                l.hp = { 1, 0, 0, 0, 0, l.hp.z1, l.hp.z2 };
+        }
+    }
+}
+
+double ReaDelay::tailSeconds (const ReaDelayParams& p)
+{
+    double longest = 0.0;
+
+    for (const auto& tap : p.taps)
+    {
+        if (! tap.enabled)
+            continue;
+
+        const double d = (double) delaySamples (tap, p.bpm, 48000.0) / 48000.0;
+        const double fb = std::min (0.999, tap.feedback);
+        const double repeats = fb > 0.001 ? std::min (60.0, std::ceil (60.0 / (-20.0 * std::log10 (fb)))) : 0.0;
+        longest = std::max (longest, d * (1.0 + repeats));
+    }
+
+    return std::min (60.0, longest);
+}
+
+void ReaDelay::process (float* const* io, int numChannels, int numSamples)
+{
+    const int nch = std::min (numChannels, 2);
+
+    if (loop_[0][0].line.empty())
+        return;
+
+    const size_t cap = loop_[0][0].line.size();
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        double x[2] = { io[0][i], nch > 1 ? (double) io[1][i] : 0.0 };
+        double sum[2] = { 0.0, 0.0 };
+
+        for (size_t t = 0; t < (size_t) ReaDelayParams::maxTaps; ++t)
+        {
+            const auto& tap = params_.taps[t];
+
+            if (! tap.enabled)
+                continue;
+
+            double p[2] = { 0.0, 0.0 };
+            const size_t readPos = (writePos_ + cap - (size_t) delay_[t]) % cap;
+
+            for (int c = 0; c < nch; ++c)
+            {
+                auto& l = loop_[t][(size_t) c];
+                double v = l.hp.run (l.lp.run ((double) l.line[readPos]));
+                l.line[writePos_] = toFloat (flush (x[c] + tap.feedback * v));
+                p[c] = v;
+            }
+
+            if (tap.bits < 24)
+            {
+                const double step = std::ldexp (1.0, tap.bits);
+                p[0] = std::trunc (p[0] * step) / step;
+                p[1] = std::trunc (p[1] * step) / step;
+            }
+
+            if (nch > 1)
+            {
+                const double mid = 0.5 * (p[0] + p[1]), side = 0.5 * (p[0] - p[1]);
+                p[0] = mid + tap.width * side;
+                p[1] = mid - tap.width * side;
+            }
+
+            sum[0] += p[0] * tap.volume * (tap.pan > 0.0 ? 1.0 - tap.pan : 1.0);
+            sum[1] += p[1] * tap.volume * (tap.pan < 0.0 ? 1.0 + tap.pan : 1.0);
+        }
+
+        for (int c = 0; c < nch; ++c)
+            io[c][i] = toFloat (x[c] * params_.dry + sum[c] * params_.wet);
+
+        if (++writePos_ >= cap)
+            writePos_ = 0;
+    }
 }
 
 //==============================================================================

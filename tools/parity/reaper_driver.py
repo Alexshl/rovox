@@ -211,6 +211,13 @@ local ok, err = pcall(function()
     reaper.SetMediaItemInfo_Value(item, "D_VOL", 10 ^ ((J.item_vol_db or 0) / 20))
     reaper.SetMediaItemInfo_Value(item, "D_FADEINLEN", J.fade_in or 0)
     reaper.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", J.fade_out or 0)
+    -- item properties in sorted key order (C_FADE*SHAPE before D_FADE*DIR: setting a shape can reset the curve), read back into the log
+    local keys = {} for key in pairs(J.item_info or {}) do keys[#keys+1] = key end
+    table.sort(keys)
+    LOG.item_info = {}
+    for _, key in ipairs(keys) do reaper.SetMediaItemInfo_Value(item, key, J.item_info[key]) end
+    for _, key in ipairs(keys) do LOG.item_info[key] = reaper.GetMediaItemInfo_Value(item, key) end
+    for key, value in pairs(J.take_info or {}) do reaper.SetMediaItemTakeInfo_Value(take, key, value) end
     LOG.source_length = len
 
     if J.fx then
@@ -240,6 +247,18 @@ local ok, err = pcall(function()
         reaper.TrackFX_SetParamNormalized(tr, fx, p, n)
         local _, got = reaper.TrackFX_GetFormattedParamValue(tr, fx, p, "")
         LOG.settings[#LOG.settings+1] = { name = s.name, index = p, requested = type(s.value) == "table" and s.value.n or s.value, how = how, normalized = n, got = got }
+      end
+      if J.scan and fx then
+        -- formatted text of every parameter at J.scan+1 evenly spaced normalized values (restores the value afterwards)
+        LOG.scan = {}
+        for p = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do
+          local keep = reaper.TrackFX_GetParamNormalized(tr, fx, p)
+          local _, pn = reaper.TrackFX_GetParamName(tr, fx, p, "")
+          local col = arr()
+          for i = 0, J.scan do col[#col+1] = fxtext(tr, fx, p, i / J.scan) or "" end
+          reaper.TrackFX_SetParamNormalized(tr, fx, p, keep)
+          LOG.scan[#LOG.scan+1] = { index = p, name = pn, text = col }
+        end
       end
     end
     LOG.fx = export_project()
@@ -278,8 +297,13 @@ if not ok then LOG.errors[#LOG.errors+1] = tostring(err) end
 pcall(function()
   if opened and proj and reaper.EnumProjects(-1) == proj then
     -- save our own copy last, so the project is not dirty and closing the tab shows no "save changes?" question
-    if reaper.Main_SaveProjectEx then reaper.Main_SaveProjectEx(proj, J.copy_rpp or (J.out_dir .. "/" .. J.name .. ".tab.RPP"), 0) end
-    if reaper.IsProjectDirty(proj) ~= 0 then step("still dirty, tab left open") return end
+    -- Main_SaveProjectEx writes a copy but leaves the tab dirty (and, in rpp mode, still pointing at the user's file), so closing it
+    -- would ask "save changes?". Reload our own saved copy into this same tab ("noprompt:"), which leaves it clean, then close it.
+    local copy = J.copy_rpp or (J.out_dir .. "/" .. J.name .. ".tab.RPP")
+    if reaper.Main_SaveProjectEx then reaper.Main_SaveProjectEx(proj, copy, 0) end
+    if reaper.IsProjectDirty(proj) ~= 0 then reaper.Main_openProject("noprompt:" .. copy) end
+    local cur, curfn = reaper.EnumProjects(-1)
+    if reaper.IsProjectDirty(cur) ~= 0 or (curfn ~= copy and cur ~= proj) then step("still dirty, tab left open") return end
     reaper.Main_OnCommand(40860, 0)
     step("tab closed")
   end

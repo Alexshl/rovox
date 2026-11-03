@@ -1,0 +1,31 @@
+{
+ "name": "readelay_bits_width_pan",
+ "kind": "delay",
+ "fx": "ReaDelay",
+ "signal": "sine_1k_m20",
+ "channels": 2,
+ "params": [
+  {
+   "name": "1: Length (musical)",
+   "value": 0
+  },
+  {
+   "name": "1: Length (time)",
+   "value": 30
+  },
+  {
+   "name": "1: Resolution",
+   "value": 8
+  },
+  {
+   "name": "1: Stereo width",
+   "value": 0.3
+  },
+  {
+   "name": "1: Pan",
+   "value": -0.4
+  }
+ ],
+ "tail_ms": 200,
+ "description": "8-bit tap, width 0.3, pan -0.4 (spec-readelay.md)"
+}

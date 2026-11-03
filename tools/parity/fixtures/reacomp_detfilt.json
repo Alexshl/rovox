@@ -1,0 +1,30 @@
+{
+ "name": "reacomp_detfilt",
+ "kind": "comp",
+ "fx": "ReaComp",
+ "signal": "pink",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -30
+  },
+  {
+   "name": "Ratio",
+   "value": 4
+  },
+  {
+   "name": "Attack",
+   "value": 3
+  },
+  {
+   "name": "Release",
+   "value": 100
+  },
+  {
+   "name": "Hipass",
+   "value": 1000
+  }
+ ],
+ "description": "detector high-pass 1 kHz (spec-reacomp.md)"
+}

@@ -1,0 +1,27 @@
+{
+ "name": "readelay_fb_lp",
+ "kind": "delay",
+ "fx": "ReaDelay",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "1: Length (musical)",
+   "value": 0
+  },
+  {
+   "name": "1: Length (time)",
+   "value": 50
+  },
+  {
+   "name": "1: Feedback",
+   "value": -6
+  },
+  {
+   "name": "1: Lowpass",
+   "value": 3000
+  }
+ ],
+ "tail_ms": 1000,
+ "description": "50 ms tap, feedback -6 dB, 3 kHz LP in loop (spec-readelay.md)"
+}

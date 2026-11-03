@@ -1,0 +1,29 @@
+{
+ "name": "reaeq_type_highshelf_bw05",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-High Shelf 1",
+   "value": 5000
+  },
+  {
+   "name": "Gain-High Shelf 1",
+   "value": -6
+  },
+  {
+   "name": "BW-High Shelf 1",
+   "value": 0.5
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "1"
+ },
+ "description": "ReaEQ band 1 as BANDTYPE 1 (High Shelf 1) 5000 Hz -6 dB BW 0.5 oct, other bands off (spec-reaeq.md)"
+}

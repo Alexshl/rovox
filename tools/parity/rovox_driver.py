@@ -92,6 +92,11 @@ def render(rpp, sidecar, work, name, tail_s=0.0, start=None, end=None, mcp=None)
         imp = mcp.ok("import.rpp", project_id=pid, **args)
         rargs = {"project_id": pid, "name": name, "scope": "master", "tail_s": tail_s, "wait_s": 60,
                  "format": {"container": "wav", "bit_depth": 32, "channels": 2, "sample_rate": 48000}}
+        if tail_s > 0 and start is None:
+            # Rovox cuts a render tail at the first silent block (echoes with gaps would be lost); REAPER renders the whole tail, so the
+            # window is made explicit: project length + tail, no engine tail
+            length = mcp.ok("project.get", project_id=pid, include=["items"])["length_s"]
+            start, end, rargs["tail_s"] = 0.0, length + tail_s, 0.0
         if start is not None:
             rargs["range"] = {"start": {"s": start}, "end": {"s": end}}
         res = mcp.ok("render.start", **rargs)

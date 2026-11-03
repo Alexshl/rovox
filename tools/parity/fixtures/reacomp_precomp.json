@@ -1,0 +1,32 @@
+{
+ "name": "reacomp_precomp",
+ "kind": "comp",
+ "fx": "ReaComp",
+ "signal": "bursts",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -24
+  },
+  {
+   "name": "Ratio",
+   "value": {
+    "n": 1.0
+   }
+  },
+  {
+   "name": "Attack",
+   "value": 0
+  },
+  {
+   "name": "Release",
+   "value": 50
+  },
+  {
+   "name": "Pre-comp",
+   "value": 10
+  }
+ ],
+ "description": "10 ms pre-comp lookahead, ratio inf (spec-reacomp.md)"
+}

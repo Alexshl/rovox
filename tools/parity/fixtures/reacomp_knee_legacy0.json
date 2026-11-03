@@ -1,0 +1,36 @@
+{
+ "name": "reacomp_knee_legacy0",
+ "kind": "comp",
+ "fx": "ReaComp",
+ "signal": "bursts",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -20
+  },
+  {
+   "name": "Ratio",
+   "value": 4
+  },
+  {
+   "name": "Attack",
+   "value": 1
+  },
+  {
+   "name": "Release",
+   "value": 50
+  },
+  {
+   "name": "Knee",
+   "value": 12
+  },
+  {
+   "name": "Legacy Attack/Knee Options",
+   "value": {
+    "n": 0.0
+   }
+  }
+ ],
+ "description": "knee 12 dB with 'Legacy Attack/Knee Options' = 0 (spec-reacomp.md)"
+}

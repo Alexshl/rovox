@@ -1,0 +1,34 @@
+{
+ "name": "reaverbate_damp0_w05",
+ "kind": "verb",
+ "fx": "ReaVerbate",
+ "signal": "impulse",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Room size",
+   "value": 80
+  },
+  {
+   "name": "Dampening",
+   "value": 0
+  },
+  {
+   "name": "Width",
+   "value": 0.5
+  },
+  {
+   "name": "Wet",
+   "value": 0
+  },
+  {
+   "name": "Dry",
+   "value": {
+    "n": 0.0
+   }
+  }
+ ],
+ "tail_ms": 4000,
+ "rt60": true,
+ "description": "room 80, damp 0, width 0.5, wet only (statistical, spec-reaverbate.md)"
+}

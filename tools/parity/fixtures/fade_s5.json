@@ -1,0 +1,15 @@
+{
+ "name": "fade_s5",
+ "kind": "bare",
+ "fx": null,
+ "signal": "pink",
+ "channels": 1,
+ "params": [],
+ "fade_in": 0.5,
+ "fade_out": 0.8,
+ "item_info": {
+  "C_FADEINSHAPE": 5,
+  "C_FADEOUTSHAPE": 5
+ },
+ "description": "item fades 0.5 s / 0.8 s, shape 5 curve 0 (spec-fades.md)"
+}

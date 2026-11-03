@@ -1,0 +1,36 @@
+{
+ "name": "reacomp_rms_makeup",
+ "kind": "comp",
+ "fx": "ReaComp",
+ "signal": "bursts",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold",
+   "value": -24
+  },
+  {
+   "name": "Ratio",
+   "value": 4
+  },
+  {
+   "name": "Attack",
+   "value": 5
+  },
+  {
+   "name": "Release",
+   "value": 80
+  },
+  {
+   "name": "RMS size",
+   "value": 10
+  },
+  {
+   "name": "Auto Make Up Gain",
+   "value": {
+    "n": 1.0
+   }
+  }
+ ],
+ "description": "RMS detector 10 ms + auto make-up (spec-reacomp.md)"
+}

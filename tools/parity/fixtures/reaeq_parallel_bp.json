@@ -1,0 +1,34 @@
+{
+ "name": "reaeq_parallel_bp",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Parallel Band Pass 1",
+   "value": 300
+  },
+  {
+   "name": "BW-Parallel Band Pass 1",
+   "value": 1
+  },
+  {
+   "name": "Freq-Parallel Band Pass 2",
+   "value": 3000
+  },
+  {
+   "name": "BW-Parallel Band Pass 2",
+   "value": 1
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "1",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "10",
+  "BANDTYPE1": "10"
+ },
+ "description": "two parallel band-pass bands (BANDTYPE 10) summed (spec-reaeq.md)"
+}

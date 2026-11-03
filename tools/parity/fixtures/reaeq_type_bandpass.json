@@ -1,0 +1,29 @@
+{
+ "name": "reaeq_type_bandpass",
+ "kind": "eq",
+ "fx": "ReaEQ",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Freq-Band Pass 1",
+   "value": 1000
+  },
+  {
+   "name": "Gain-Band Pass 1",
+   "value": 0
+  },
+  {
+   "name": "BW-Band Pass 1",
+   "value": 1.0
+  }
+ ],
+ "config": {
+  "BANDENABLED1": "0",
+  "BANDENABLED2": "0",
+  "BANDENABLED3": "0",
+  "BANDENABLED4": "0",
+  "BANDTYPE0": "7"
+ },
+ "description": "ReaEQ band 1 as BANDTYPE 7 (Band Pass 1) 1000 Hz 0 dB BW 1 oct, other bands off (spec-reaeq.md)"
+}
