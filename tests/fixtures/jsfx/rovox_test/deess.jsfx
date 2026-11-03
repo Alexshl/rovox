@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Rovox contributors
+// Test fixture written for Rovox: a small de-esser built like a published split-band JSFX one. It exercises what such effects need from the host:
+// srate in @slider, an enum slider, @slider before @block before @sample, per-block coefficient interpolation with samplesblock, a mono and a
+// stereo path on spl0/spl1, ext_tail_size, a state that persists across blocks.
+// Linkwitz-Riley (LR2) split at the frequency, the band above it is compressed, the sum is the output.
+desc:Rovox test de-esser
+slider1:0<0,1,1{Stereo,Mono}>Processing
+slider2:4000<1500,12000,1>Frequency (Hz)
+slider3:-25<-80,0,0.01>Threshold (dB)
+slider4:4<1,20,0.01>Ratio
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+ext_tail_size = -1;
+cdenorm = 10^-30;
+e10 = 10^-10;
+
+@slider
+mono = slider1;
+thr = pow(10, 2 * (slider3/80+1) - 2);
+rat = (slider4-1)/19;
+att = pow(10, -0.002);
+rel = pow(10, -3.5);
+fpi = $pi*slider2;
+wc = 2*fpi;
+wc2 = wc*wc;
+wc22 = 2*wc2;
+k = wc/tan(fpi/srate);
+k2 = k*k;
+k22 = 2*k2;
+wck2 = 2*wc*k;
+tmpk = k2+wc2+wck2;
+tgt_b1 = (-k22+wc22)/tmpk;
+tgt_b2 = (-wck2+k2+wc2)/tmpk;
+tgt_lp0 = wc2/tmpk;
+tgt_lp1 = wc22/tmpk;
+tgt_lp2 = wc2/tmpk;
+tgt_hp0 = k2/tmpk;
+tgt_hp1 = -k22/tmpk;
+tgt_hp2 = k2/tmpk;
+
+@block
+d_b1 = (tgt_b1-src_b1)/samplesblock; b1 = src_b1; src_b1 = tgt_b1;
+d_b2 = (tgt_b2-src_b2)/samplesblock; b2 = src_b2; src_b2 = tgt_b2;
+d_lp0 = (tgt_lp0-src_lp0)/samplesblock; lp0 = src_lp0; src_lp0 = tgt_lp0;
+d_lp1 = (tgt_lp1-src_lp1)/samplesblock; lp1 = src_lp1; src_lp1 = tgt_lp1;
+d_lp2 = (tgt_lp2-src_lp2)/samplesblock; lp2 = src_lp2; src_lp2 = tgt_lp2;
+d_hp0 = (tgt_hp0-src_hp0)/samplesblock; hp0 = src_hp0; src_hp0 = tgt_hp0;
+d_hp1 = (tgt_hp1-src_hp1)/samplesblock; hp1 = src_hp1; src_hp1 = tgt_hp1;
+d_hp2 = (tgt_hp2-src_hp2)/samplesblock; hp2 = src_hp2; src_hp2 = tgt_hp2;
+
+@sample
+b1 += d_b1; b2 += d_b2;
+lp0 += d_lp0; lp1 += d_lp1; lp2 += d_lp2;
+hp0 += d_hp0; hp1 += d_hp1; hp2 += d_hp2;
+
+inl = mono ? (spl0+spl1)/2 : spl0;
+lo_l = lp0*inl + lx0_l;
+lx0_l = lp1*inl - b1*lo_l + lx1_l;
+lx1_l = lp2*inl - b2*lo_l;
+hi_l = hp0*inl + hx0_l;
+hx0_l = hp1*inl - b1*hi_l + hx1_l;
+hx1_l = hp2*inl - b2*hi_l;
+hi_l *= -1;
+
+mono ? (
+  det = abs(hi_l);
+) : (
+  inr = spl1;
+  lo_r = lp0*inr + lx0_r;
+  lx0_r = lp1*inr - b1*lo_r + lx1_r;
+  lx1_r = lp2*inr - b2*lo_r;
+  hi_r = hp0*inr + hx0_r;
+  hx0_r = hp1*inr - b1*hi_r + hx1_r;
+  hx1_r = hp2*inr - b2*hi_r;
+  hi_r *= -1;
+  det = max(abs(hi_l), abs(hi_r));
+);
+
+det > env ? env = env + att*(det - env) : env = env*(1 - rel);
+env > thr ? cgain = 1+(rat*((env/thr)-1)) : cgain = 1;
+env < e10 ? env = 0;
+
+mono ? (
+  spl0 = spl1 = lo_l + hi_l/cgain + cdenorm;
+) : (
+  spl0 = lo_l + hi_l/cgain + cdenorm;
+  spl1 = lo_r + hi_r/cgain + cdenorm;
+);

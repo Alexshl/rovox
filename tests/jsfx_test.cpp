@@ -139,7 +139,7 @@ ROVOX_TEST (jsfx, catalog_lists_the_effects_and_fx_add_params_and_update_work)
     JsfxPath path;
     test::Env env;
     auto cat = env.ok ("", "plugin.catalog", { { "format", "JSFX" }, { "limit", 50 } });
-    REQUIRE (cat["total"].get<int>() == 3);
+    REQUIRE (cat["total"].get<int>() == 4);
     bool sawGain = false;
 
     for (auto& p : cat["plugins"])
@@ -454,4 +454,167 @@ ROVOX_TEST (jsfx, rpp_js_blocks_become_jsfx_plugins_with_the_slider_values_of_th
     CHECK (r2.data["mapped"].empty());
     REQUIRE (r2.data["unsupported"].size() == 3);
     CHECK (r2.data["unsupported"][0]["reason"] == "JSFX file not found under ROVOX_JSFX_PATH");
+}
+
+//==============================================================================
+// A de-esser JSFX (rovox_test/deess, built like the published split-band ones) on a vocal-like signal: its output must be what its own code defines.
+// The reference below is the same algorithm in C++; the JSFX code is the specification, so a host problem (sample rate, slider values reaching
+// @slider, @block/samplesblock, spl0/spl1 routing, state across blocks) shows up as a difference.
+namespace
+{
+struct DeessSettings
+{
+    int mono = 0;
+    double freq = 4000.0, thresholdDb = -25.0, ratio = 4.0;
+};
+
+std::vector<std::vector<double>> deessReference (const std::vector<std::vector<float>>& in, double fs, const DeessSettings& s)
+{
+    const double thr = std::pow (10.0, 2.0 * (s.thresholdDb / 80.0 + 1.0) - 2.0), rat = (s.ratio - 1.0) / 19.0;
+    const double att = std::pow (10.0, -0.002), rel = std::pow (10.0, -3.5);
+    const double fpi = pi * s.freq, wc = 2.0 * fpi, wc2 = wc * wc, wc22 = 2.0 * wc2, k = wc / std::tan (fpi / fs), k2 = k * k, k22 = 2.0 * k2, wck2 = 2.0 * wc * k;
+    const double tmpk = k2 + wc2 + wck2;
+    const double b1 = (-k22 + wc22) / tmpk, b2 = (-wck2 + k2 + wc2) / tmpk;
+    const double lp0 = wc2 / tmpk, lp1 = wc22 / tmpk, lp2 = wc2 / tmpk, hp0 = k2 / tmpk, hp1 = -k22 / tmpk, hp2 = k2 / tmpk;
+
+    struct Biquad { double x0 = 0, x1 = 0; double run (double a0, double a1, double a2, double b1_, double b2_, double in)
+    { const double o = a0 * in + x0; x0 = a1 * in - b1_ * o + x1; x1 = a2 * in - b2_ * o; return o; } };
+
+    const size_t n = in[0].size();
+    std::vector<std::vector<double>> out (2, std::vector<double> (n));
+    Biquad lo[2], hi[2];
+    double env = 0.0;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double l = in[0][i], r = in[1][i];
+        double band[2], low[2];
+        const int chans = s.mono ? 1 : 2;
+
+        for (int c = 0; c < chans; ++c)
+        {
+            const double x = s.mono ? (l + r) / 2.0 : (c == 0 ? l : r);
+            low[c] = lo[c].run (lp0, lp1, lp2, b1, b2, x);
+            band[c] = -hi[c].run (hp0, hp1, hp2, b1, b2, x);
+        }
+
+        const double det = s.mono ? std::abs (band[0]) : std::max (std::abs (band[0]), std::abs (band[1]));
+        env = det > env ? env + att * (det - env) : env * (1.0 - rel);
+        const double cgain = env > thr ? 1.0 + rat * (env / thr - 1.0) : 1.0;
+
+        if (env < 1.0e-10)
+            env = 0.0;
+
+        for (int c = 0; c < 2; ++c)
+        {
+            const int src = s.mono ? 0 : c;
+            out[(size_t) c][i] = low[src] + band[src] / cgain;
+        }
+    }
+
+    return out;
+}
+
+double rmsOf (const std::vector<double>& v, size_t from, size_t to)
+{
+    double sum = 0.0;
+
+    for (size_t i = from; i < to; ++i)
+        sum += v[i] * v[i];
+
+    return std::sqrt (sum / (double) (to - from));
+}
+} // namespace
+
+ROVOX_TEST (jsfx, a_de_esser_jsfx_reduces_sibilance_exactly_as_its_code_defines_in_mono_and_stereo)
+{
+    JsfxPath path;
+    test::Env env;
+    const double fs = 44100.0;
+    const size_t n = (size_t) (3.0 * fs);
+
+    // a voiced tone (harmonics of 200 Hz, nothing above the split) with two loud sibilant bursts (5 to 9 kHz) after a quiet first second
+    std::vector<std::vector<float>> signal (2, std::vector<float> (n));
+    const double sib[] = { 5100.0, 6300.0, 7000.0, 7900.0, 8800.0 };
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double t = (double) i / fs;
+        double v = 0.0;
+
+        for (int h = 1; h <= 8; ++h)
+            v += 0.06 / h * std::sin (2.0 * pi * 200.0 * h * t);
+
+        for (double start : { 1.0, 2.0 })
+            if (t >= start && t < start + 0.3)
+            {
+                const double w = 0.5 - 0.5 * std::cos (2.0 * pi * (t - start) / 0.3);
+
+                for (size_t k = 0; k < 5; ++k)
+                    v += 0.16 * w * std::sin (2.0 * pi * sib[k] * t + 0.7 * (double) k);
+            }
+
+        signal[0][i] = (float) v;
+        signal[1][i] = (float) (0.5 * v);
+    }
+
+    const auto dir = test::makeTempDir ("jsfx-deess");
+    test::writeWav (dir / "vocal.wav", signal, fs, 32);
+
+    for (const int mono : { 1, 0 })
+    {
+        // Threshold -50 dB and ratio 20: the band above 4 kHz is pressed hard; the slider line is a REAPER one ("-" = default).
+        std::ofstream (dir / "deess.RPP") << "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  SAMPLERATE 44100 0 0\n  TEMPO 120 4 4 0\n"
+            "  <TRACK {AAAAAAAA-0000-0000-0000-0000000000B1}\n    NAME \"vox\"\n    ISBUS 0 0\n    <FXCHAIN\n      BYPASS 0 0 0\n"
+            "      <JS rovox_test/deess \"\"\n        " << mono << " - -50 20\n      >\n      FXID {44444444-4444-4444-4444-444444444444}\n    >\n"
+            "    <ITEM\n      POSITION 0\n      LENGTH 3\n      NAME \"vocal.wav\"\n      VOLPAN 1 0 1 -1\n      SOFFS 0\n      PLAYRATE 1 1 0 -1 0 0.0025\n"
+            "      <SOURCE WAVE\n        FILE \"" << (dir / "vocal.wav").string() << "\"\n      >\n    >\n  >\n>\n";
+
+        const auto id = env.newProject ("deess");
+        auto imp = env.run (id, "import.rpp", { { "path", (dir / "deess.RPP").string() } });
+        REQUIRE (imp.ok);
+        REQUIRE (imp.data["mapped"].size() == 1);
+        const auto fxId = imp.data["mapped"][0]["plugin_id"].get<std::string>();
+
+        // the project's slider values arrive as they are in the file, "-" stays the default of the effect
+        CHECK_NEAR (paramValue (env, id, fxId, "s1"), (double) mono, 1e-6);
+        CHECK_NEAR (paramValue (env, id, fxId, "s2"), 4000.0, 1e-3);
+        CHECK_NEAR (paramValue (env, id, fxId, "s3"), -50.0, 1e-4);
+        CHECK_NEAR (paramValue (env, id, fxId, "s4"), 20.0, 1e-4);
+
+        RenderRequest req;
+        req.name = "deess";
+        req.tailS = 0.0;
+        auto r = renderProject (env.project (id), req);
+        REQUIRE (r.ok());
+        Planar wet;
+        double rate = 0;
+        REQUIRE (test::readWav (env.project (id).rendersDir() / "deess.wav", wet, rate));
+        REQUIRE (wet.size() == 2);
+        REQUIRE (rate == fs);
+        REQUIRE (wet[0].size() >= n);
+
+        DeessSettings s;
+        s.mono = mono;
+        s.thresholdDb = -50.0;
+        s.ratio = 20.0;
+        const auto ref = deessReference (signal, fs, s);
+        const size_t from = (size_t) (0.8 * fs);       // after the first block, where @block ramps the coefficients up from zero
+        double worst = 0.0;
+
+        for (size_t c = 0; c < 2; ++c)
+            for (size_t i = from; i < n; ++i)
+                worst = std::max (worst, std::abs ((double) wet[c][i] - ref[c][i]));
+
+        CHECK (worst < 1.0e-4);
+
+        // the sibilance is really pressed: the burst is quieter than the uncompressed sum, the voiced part before it is untouched
+        std::vector<double> dryBurst, wetBurst, dryVoiced, wetVoiced;
+        const size_t b0 = (size_t) (1.0 * fs), b1 = (size_t) (1.3 * fs), v0 = (size_t) (0.5 * fs), v1 = (size_t) (0.9 * fs);
+        auto dryD = deessReference (signal, fs, [&] { auto d = s; d.thresholdDb = 0.0; d.ratio = 1.0; return d; }());        // ratio 1: no gain change
+        std::vector<double> wet0 (wet[0].begin(), wet[0].end());
+        const double burstRatio = rmsOf (wet0, b0, b1) / rmsOf (dryD[0], b0, b1);
+        CHECK (burstRatio < 0.6);
+        CHECK_NEAR (rmsOf (wet0, v0, v1) / rmsOf (dryD[0], v0, v1), 1.0, 0.01);
+    }
 }
