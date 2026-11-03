@@ -984,16 +984,22 @@ double DetectorFilter::run (double x) noexcept
 
 namespace
 {
-/** The 0.5 ms (24 samples at 48 kHz) offset of the ReaGate timings. Measured at 48 kHz only; at other rates it is scaled with time (unmeasured). */
-double gateOffsetSamples (double sampleRate)            { return 0.0005 * sampleRate; }
+/** The 0.5 ms offset of the ReaGate timings: 24 samples at 48 kHz, fractional at other rates (measured at 44.1, 48 and 96 kHz). */
+double gateOffsetSamples (double sampleRate)            { return sampleRate / 2000.0; }
 long roundSamples (double v)                            { return v > 0.0 ? std::lround (v) : 0L; }
+/** A time in ms as a (fractional) sample count minus the offset; 0 when the time does not exceed the offset. */
+double gateSamples (double ms, double sampleRate)
+{
+    const double v = ms * sampleRate / 1000.0;
+    return v > gateOffsetSamples (sampleRate) ? v - gateOffsetSamples (sampleRate) : 0.0;
+}
 }
 
 //==============================================================================
 int ReaGate::latencySamples (const ReaGateParams& p, double sampleRate)
 {
     const double ms = std::clamp (p.preOpenMs, 0.0, maxPreOpenMs);
-    return (int) roundSamples (ms * sampleRate / 1000.0 - gateOffsetSamples (sampleRate));
+    return (int) std::floor (gateSamples (ms, sampleRate));
 }
 
 void ReaGate::prepare (double sampleRate)
@@ -1034,13 +1040,15 @@ void ReaGate::setParams (const ReaGateParams& p)
     const double d = gateOffsetSamples (sampleRate_), ms = sampleRate_ / 1000.0;
     look_ = latencySamples (p, sampleRate_);
     openLin_ = p.thresholdDb <= -149.0 ? 0.0 : dbToLin (p.thresholdDb);
-    closeLin_ = p.hysteresisDb <= -99.0 ? 0.0 : openLin_ * dbToLin (p.hysteresisDb);
+    closeLin_ = p.thresholdDb <= -149.0 || p.hysteresisDb <= -99.0 ? 0.0 : dbToLin (p.thresholdDb + p.hysteresisDb);
 
-    const long attack = roundSamples (p.attackMs * ms - d), release = roundSamples (p.releaseMs * ms - d);
-    attackStep_ = attack > 0 ? 1.0 / (double) attack : 1.0;
-    releaseStep_ = release > 0 ? 1.0 / (double) release : 1.0;
-    const long hold = std::max (roundSamples (p.holdMs * ms - d), roundSamples (p.attackMs * ms - d) - 1);
-    holdSamples_ = hold + look_;        // closing stays on the audio when the audio is delayed for the pre-open
+    const double attack = gateSamples (p.attackMs, sampleRate_), release = gateSamples (p.releaseMs, sampleRate_), hold = gateSamples (p.holdMs, sampleRate_);
+    instantAttack_ = attack <= 0.0;
+    instantRelease_ = release <= 0.0;
+    attackStep_ = instantAttack_ ? 1.0 : 1.0 / attack;
+    releaseStep_ = instantRelease_ ? 1.0 : 1.0 / release;
+    // the attack time is added to the hold
+    holdSamples_ = (long) std::floor (hold) + std::max ((long) std::floor (attack) - 1, 0L) + look_;       // closing stays on the audio when the audio is delayed for the pre-open
 
     const int n = p.rmsMs > 0.0 ? (int) std::clamp (roundSamples (std::min (p.rmsMs, maxRmsMs) * ms - d), 1L, (long) rmsRing_[0].size() - 1) : 0;
 
@@ -1092,20 +1100,29 @@ void ReaGate::process (float* const* io, int numChannels, int numSamples)
         if (rmsN_ > 0 && ++rmsPos_ >= (size_t) rmsN_)
             rmsPos_ = 0;
 
-        if (level >= (open_ ? closeLin_ : openLin_))
+        // the level is compared with a threshold that moves from the open to the close level with the gain (linear in amplitude)
+        const double threshold = openLin_ + (closeLin_ - openLin_) * gain_;
+
+        if (! open_ && level >= threshold)
         {
             open_ = true;
-            holdLeft_ = holdSamples_;
-            gain_ = std::min (1.0, gain_ + attackStep_);
         }
-        else if (holdLeft_ > 0)
+        else if (open_ && level < threshold)
         {
-            --holdLeft_;
+            open_ = false;
+            holdLeft_ = holdSamples_;
+        }
+
+        if (open_ || holdLeft_ > 0)
+        {
+            if (! open_)
+                --holdLeft_;
+
+            gain_ = instantAttack_ ? 1.0 : std::min (1.0, gain_ + attackStep_);     // an attack that has started always completes
         }
         else
         {
-            open_ = false;
-            gain_ = gain_ - releaseStep_ < 1.0e-9 ? 0.0 : gain_ - releaseStep_;
+            gain_ = instantRelease_ ? 0.0 : std::max (0.0, gain_ - releaseStep_);
         }
 
         double delayed[2] = { x[0], x[1] };
@@ -1345,7 +1362,7 @@ void ReaComp::setParams (const ReaCompParams& p)
     const double ms = sampleRate_ / 1000.0;
     attackCoef_ = p.attackMs <= 0.0 ? 0.0 : std::exp (-1.0 / (p.attackMs * ms));
     releaseCoef_ = p.releaseMs <= 0.0 ? 0.0 : std::exp (-1.0 / (p.releaseMs * ms));
-    thresholdLin_ = dbToLin (p.thresholdDb);
+    thresholdLin_ = dbToLin (p.thresholdDb - knee_.kneeDb());       // an attack starts from the start of the knee (the threshold for a hard knee)
     slope_ = 1.0 - (p.ratio >= ReaCompParams::infiniteRatio ? 0.0 : 1.0 / std::max (1.0, p.ratio));
     makeup_ = dbToLin (makeupDb (p));
     look_ = std::min (latencySamples (p, sampleRate_), (int) line_[0].size() - 2);
@@ -1402,10 +1419,15 @@ void ReaComp::process (float* const* io, int numChannels, int numSamples)
         if (rmsN_ > 0 && ++rmsPos_ >= (size_t) rmsN_)
             rmsPos_ = 0;
 
-        // the envelope starts an attack from the threshold level and releases toward the input level
+        // the envelope starts an attack from the threshold level (Legacy Attack/Knee Options n <= 0.5; from the current envelope above that) and releases
+        // toward the input level. Measured only at n = 0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 0.9, 1: the rules floor (4 n) odd = default knee and
+        // n > 0.5 = no threshold clamp are inferred, the exact boundaries between the sampled values are unmeasured.
         if (level > env_)
         {
-            env_ = std::max (env_, thresholdLin_);
+            if (! params_.attackFromEnvelope)
+                env_ = std::max (env_, thresholdLin_);
+
+
             env_ = level + attackCoef_ * (env_ - level);
         }
         else
@@ -1466,20 +1488,20 @@ void ReaComp::process (float* const* io, int numChannels, int numSamples)
 //==============================================================================
 namespace
 {
-constexpr double limitMargin = 0.99839;        // 0.014 dB below 0 dBFS: where the measured limiter settles
-constexpr double slowChargeFactor = 4.0;        // slow-stage charge rate / release rate (fitted)
+constexpr double limitMarginDb = -0.009;        // where the measured limiter settles, before the ceiling
+constexpr double slowChargeFactor = 4.0;        // slow-stage charge rate / release rate (measured fit optimum)
 }
 
 void ReaLimit::prepare (double sampleRate)
 {
     sampleRate_ = sampleRate;
     lookahead_ = std::max (2, (int) std::lround (0.002 * sampleRate));
-    fastSamples_ = std::max (1, (int) std::lround (0.010 * sampleRate));
+    window_ = std::max (lookahead_, (int) std::lround (0.010 * sampleRate));
 
     for (auto& a : audio_)
-        a.assign ((size_t) lookahead_, 0.0f);
+        a.assign ((size_t) window_ + 1, 0.0f);
 
-    required_.assign ((size_t) lookahead_, 1.0);
+    required_.assign ((size_t) window_ + 1, 1.0);
     reset();
     setParams (params_);
 }
@@ -1492,7 +1514,9 @@ void ReaLimit::reset()
     std::fill (required_.begin(), required_.end(), 1.0);
     pos_ = 0;
     fast_ = 1.0;
-    up_ = 0.0;
+    releasing_ = false;
+    index_ = 0;
+    lastOver_ = -1;
     slowDb_ = 0.0;
     lastReductionDb_ = 0.0;
 }
@@ -1507,13 +1531,14 @@ void ReaLimit::setParams (const ReaLimitParams& p)
 void ReaLimit::process (float* const* io, int numChannels, int numSamples)
 {
     const int nch = std::min (numChannels, 2);
-    const size_t window = (size_t) lookahead_;
+    const size_t ring = required_.size();
 
     if (audio_[0].empty() || nch < 1)
         return;
 
-    const bool slowStage = params_.releaseDbPerSec < ReaLimitParams::infiniteRelease;
+    const double margin = dbToLin (limitMarginDb);
     const double release = std::max (params_.releaseDbPerSec, 0.0) / sampleRate_, charge = slowChargeFactor * release;
+    const int window = window_, lookahead = lookahead_;
     double worst = 0.0;
 
     for (int i = 0; i < numSamples; ++i)
@@ -1528,41 +1553,69 @@ void ReaLimit::process (float* const* io, int numChannels, int numSamples)
         }
 
         peak *= boost_;
-        required_[pos_] = peak > limitMargin ? limitMargin / peak : 1.0;
+        required_[pos_] = peak > margin ? margin / peak : 1.0;
 
-        if (++pos_ >= window)
+        if (++pos_ >= ring)
             pos_ = 0;
 
-        // the oldest entry (at pos_) is the audio sample the gain is computed for. Its gain is held under a line from 1 (window samples ahead) down to the
-        // level each of the next samples needs, and under the fast-stage release of the previous gain.
-        const double released = std::min (1.0, fast_ + up_);
-        double now = released, lowest = 1.0;
+        // the oldest entry (at pos_) is the audio sample the gain is computed for; the window ahead of it holds the next `window` requirements
+        const long long n = index_++;
+        auto ahead = [&] (int k) { return required_[(pos_ + (size_t) k) % ring]; };
 
-        for (double r : required_)
-            lowest = std::min (lowest, r);
+        if (! releasing_)
+        {
+            // idle: a straight line from the current gain that reaches a requirement exactly on its own sample, the first reduced sample being
+            // `lookahead` samples before the peak
+            double need = fast_;
 
-        if (lowest < 1.0)
-            for (size_t k = 0; k < window; ++k)
+            for (int k = 0; k < lookahead; ++k)
             {
-                const double r = required_[(pos_ + k) % window];
-                now = std::min (now, r + (1.0 - r) * (double) k / (double) window);
+                const double a = ahead (k);
+
+                if (a < 1.0)
+                    need = std::min (need, fast_ - (fast_ - a) / (k + 1.0));
             }
 
-        if (now < released - 1.0e-15 || now < fast_ - 1.0e-15)
-            up_ = (1.0 - now) / (double) fastSamples_;
+            if (need < fast_)
+            {
+                fast_ = need;
+                releasing_ = true;
+                lastOver_ = n;
+            }
+        }
+        else
+        {
+            if (ahead (0) < 1.0)
+                lastOver_ = n;
 
-        fast_ = now;
+            // a line back to 1 that is reached `window` samples after the last over-threshold sample, kept under the line to every requirement inside the window
+            const long long d = lastOver_ + window - n;
+            double slope = d > 0 ? (1.0 - fast_) / (double) d : 1.0 - fast_;
 
+            for (int k = 0; k <= window; ++k)
+            {
+                const double a = ahead (k);
+
+                if (a < 1.0)
+                    slope = std::min (slope, (a - fast_) / (k + 1.0));
+            }
+
+            fast_ += slope;
+
+            if (fast_ >= 1.0 - 1.0e-12)
+            {
+                fast_ = 1.0;
+                releasing_ = false;
+            }
+        }
+
+        // slow stage in dB: charges at 4 x the release rate while the fast stage reduces more, never beyond it; releases linearly
+        const double fastDb = fast_ < 1.0 ? -20.0 * std::log10 (fast_) : 0.0;
+        slowDb_ = fastDb > slowDb_ ? std::min (fastDb, slowDb_ + charge) : std::max (0.0, slowDb_ - release);
         double gain = fast_;
 
-        if (slowStage)
-        {
-            const double d = fast_ < 1.0 ? -20.0 * std::log10 (fast_) : 0.0;
-            slowDb_ = d > slowDb_ ? std::min (d, slowDb_ + charge) : std::max (0.0, slowDb_ - release);
-
-            if (slowDb_ > 0.0)
-                gain = std::min (gain, dbToLin (-slowDb_));
-        }
+        if (slowDb_ > 0.0)
+            gain = std::min (gain, dbToLin (-slowDb_));
 
         if (gain < 1.0)
             worst = std::max (worst, -20.0 * std::log10 (gain));

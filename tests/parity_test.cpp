@@ -823,13 +823,13 @@ ROVOX_TEST (parity, reagate_closed_gain_is_zero_attack_and_release_are_linear_ra
     CHECK (r.gain (3, 0) == 0.0);                                   // -23 dB is below the threshold of the closed gate
 }
 
-ROVOX_TEST (parity, reagate_hold_is_the_longer_of_hold_and_attack_less_the_offset)
+ROVOX_TEST (parity, reagate_hold_and_attack_add_up_and_the_release_starts_after_them)
 {
     const auto a10 = runGate (gateParams (10.0, 100.0));
     CHECK_NEAR (a10.gain (1, 0), 0.002193, 1e-6);                   // 1 / 456
     CHECK_NEAR (a10.gain (1, 100), 0.221491, 1e-6);
     CHECK_NEAR (a10.gain (1, 455), 1.0, 1e-6);
-    CHECK_NEAR (a10.gain (2, 454), 1.0, 1e-9);                      // hold 480 - 24 - 1 samples
+    CHECK_NEAR (a10.gain (2, 454), 1.0, 1e-9);                      // hold floor (456) - 1 samples (the attack time is added to the zero hold)
     CHECK_NEAR (a10.gain (2, 455), 0.999791, 1e-6);
     CHECK_NEAR (a10.gain (2, 4776), 0.095059, 1e-6);                // release ramp 1 / 4776
 
@@ -933,6 +933,364 @@ ROVOX_TEST (parity, reagate_invert_wet_dry_and_detector_filters)
     const auto hp = runGate (p);
     CHECK (hp.gain (1, 20000) == 0.0);
     CHECK_NEAR (hp.out[hp.starts[1] + 100], hp.in[hp.starts[1] + 100] * hp.gain (1, 100), 1e-9);
+}
+
+namespace
+{
+/** Timings of a gate run on a DC burst (-40 dBFS 0.3 s, -10 dBFS `burstMs`, -40 dBFS 0.8 s); all relative to the onset or the drop of the burst. */
+struct BurstGate
+{
+    long firstOpen = 0, firstFull = -1, lastFull = -1, firstZero = -1;
+};
+
+BurstGate runBurst (const fx::ReaGateParams& p, double burstMs, double fs)
+{
+    std::vector<size_t> starts;
+    const auto in = dcSegments ({ { -40, 0.3 }, { -10, burstMs / 1000.0 }, { -40, 0.8 } }, fs, &starts);
+    fx::ReaGate g;
+    g.prepare (fs);
+    g.setParams (p);
+    const auto out = runMono (g, in, g.latencySamples());
+    const long onset = (long) starts[1], drop = (long) starts[2];
+    BurstGate r;
+
+    for (long i = 0; i < drop; ++i)
+        if (out[(size_t) i] != 0.0f)
+        {
+            r.firstOpen = i - onset;
+            break;
+        }
+
+    for (long i = onset; i < (long) in.size(); ++i)
+    {
+        const bool full = (double) out[(size_t) i] / (double) in[(size_t) i] >= 1.0 - 1.0e-6;
+
+        if (full && r.firstFull < 0 && i < drop)
+            r.firstFull = i - onset;
+
+        if (full && i >= drop)
+            r.lastFull = i - drop;
+
+        if (i >= drop && r.firstZero < 0 && std::abs ((double) out[(size_t) i] / (double) in[(size_t) i]) < 1.0e-9)
+            r.firstZero = i - drop;
+    }
+
+    return r;
+}
+
+struct GateStairCase { double hy, attack, release, hold; double g[18][4]; };
+const GateStairCase gateStairCases[] = {
+    { -6.0, 0.0, 0.0, 0.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+    } },
+    { -6.0, 3.0, 50.0, 5.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.534933 },
+        { 0.543266, 0.551599, 0.559933, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+    } },
+    { -3.0, 0.0, 0.0, 0.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+    } },
+    { -0.0, 0.0, 0.0, 0.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+    } },
+    { -0.0, 3.0, 50.0, 5.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.534933 },
+        { 0.543266, 0.551599, 0.559933, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+    } },
+    { 3.0, 0.0, 0.0, 0.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 1.0, 0.0, 1.0 },
+        { 0.0, 1.0, 0.0, 1.0 },
+        { 0.0, 1.0, 0.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+    } },
+    { 3.0, 3.0, 50.0, 5.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 0.785354 },
+        { 0.784933, 0.784512, 0.784091, 0.0 },
+        { 0.008333, 0.016667, 0.025, 0.951599 },
+        { 0.951178, 0.950758, 0.950337, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.90867 },
+        { 0.908249, 0.907828, 0.907407, 0.864478 },
+        { 0.864057, 0.863636, 0.863215, 0.803872 },
+        { 0.803451, 0.80303, 0.802609, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.534933 },
+        { 0.543266, 0.551599, 0.559933, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+    } },
+    { 6.0, 0.0, 0.0, 0.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 1.0, 0.0, 1.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+    } },
+    { 6.0, 3.0, 50.0, 5.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 0.138468 },
+        { 0.138047, 0.137626, 0.137205, 0.0 },
+        { 0.008333, 0.016667, 0.025, 0.727694 },
+        { 0.727273, 0.726852, 0.726431, 0.0 },
+        { 0.008333, 0.016667, 0.025, 0.861953 },
+        { 0.861532, 0.861111, 0.86069, 0.430976 },
+        { 0.430556, 0.430135, 0.429714, 0.297138 },
+        { 0.296717, 0.296296, 0.295875, 0.427609 },
+        { 0.427189, 0.426768, 0.426347, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.008333, 0.016667, 0.025, 1.0 },
+        { 1.0, 1.0, 1.0, 0.534933 },
+        { 0.543266, 0.551599, 0.559933, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+    } },
+    { 0.0, 10.0, 100.0, 0.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.002193, 0.004386, 0.006579, 1.0 },
+        { 1.0, 1.0, 1.0, 0.090243 },
+        { 0.092436, 0.094629, 0.096822, 1.0 },
+        { 1.0, 1.0, 1.0, 0.090243 },
+        { 0.092436, 0.094629, 0.096822, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 0.090243 },
+        { 0.090034, 0.089824, 0.089615, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.002193, 0.004386, 0.006579, 1.0 },
+        { 1.0, 1.0, 1.0, 0.79376 },
+        { 0.795953, 0.798146, 0.800339, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+    } },
+    { 0.0, 30.0, 100.0, 0.0, {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.000706, 0.001412, 0.002119, 1.0 },
+        { 1.0, 1.0, 1.0, 0.291248 },
+        { 0.291954, 0.29266, 0.293367, 1.0 },
+        { 1.0, 1.0, 1.0, 0.291248 },
+        { 0.291954, 0.29266, 0.293367, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 0.291248 },
+        { 0.291039, 0.290829, 0.29062, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 0.000706, 0.001412, 0.002119, 1.0 },
+        { 1.0, 1.0, 1.0, 0.994765 },
+        { 0.995472, 0.996178, 0.996884, 1.0 },
+        { 1.0, 1.0, 1.0, 0.0 },
+    } },
+};
+} // namespace
+
+ROVOX_TEST (parity, reagate_v2_attack_is_added_to_the_hold_and_the_release_follows)
+{
+    // attack, hold, release (ms) -> last full-gain sample after the drop, first zero sample after the drop (measured: gate2_* DC bursts, 48 kHz)
+    const struct { double a, h, r; long lastFull, zero; } rows[] = {
+        { 0, 0, 100, -1, 4776 },    { 0, 5, 100, 215, 4992 },     { 0, 20, 100, 935, 5712 },     { 0, 50, 100, 2375, 7152 },
+        { 1, 0, 100, 22, 4799 },    { 1, 5, 100, 238, 5015 },     { 1, 20, 100, 958, 5735 },     { 1, 50, 100, 2398, 7175 },
+        { 3, 0, 100, 118, 4895 },   { 3, 5, 100, 334, 5111 },     { 3, 20, 100, 1054, 5831 },    { 3, 50, 100, 2494, 7271 },
+        { 10, 0, 100, 454, 5231 },  { 10, 5, 100, 670, 5447 },    { 10, 20, 100, 1390, 6167 },   { 10, 50, 100, 2830, 7607 },
+        { 30, 0, 100, 1414, 6191 }, { 30, 20, 100, 2350, 7127 },  { 30, 50, 100, 3790, 8567 },
+        { 3, 20, 1, 1054, 1079 },   { 3, 20, 10, 1054, 1511 },    { 3, 20, 50, 1054, 3431 },     { 3, 20, 300, 1054, 15431 } };
+
+    for (auto& row : rows)
+        for (double burst : { 2.0, 200.0 })
+        {
+            auto p = gateParams (row.a, row.r);
+            p.holdMs = row.h;
+            const auto b = runBurst (p, burst, 48000.0);
+            CHECK (b.firstOpen == 0);
+            CHECK (b.lastFull == row.lastFull);
+            CHECK (std::abs (b.firstZero - row.zero) <= 1);      // the last step of the ramp leaves a rounding residue (REAPER: exactly zero one sample later)
+        }
+
+    // the attack ramp starts at the onset: g[n] = (n + 1) / Na, and an attack that has started completes during a short burst
+    for (double a : { 3.0, 10.0, 30.0 })
+    {
+        const double Na = a * 48.0 - 24.0;
+        const auto r = runGate (gateParams (a, 100.0));
+
+        for (long n : { 0L, 1L, 2L, 10L, 100L })
+            CHECK_NEAR (r.gain (1, n), std::min (1.0, (double) (n + 1) / Na), 2e-6);
+    }
+}
+
+ROVOX_TEST (parity, reagate_v2_times_are_milliseconds_at_every_sample_rate)
+{
+    // first full-gain sample after the onset, first sample below full after the drop, first zero after the drop, pre-open start (measured: sr*_gate_*)
+    const struct { double fs; long full1, below1, zero1, full10, below10, zero10, preOpen; } rows[] = {
+        { 44100.0, 22, 21, 2203, 418, 1276, 5663, -418 },
+        { 48000.0, 23, 23, 2399, 455, 1391, 6167, -456 },
+        { 96000.0, 47, 47, 4799, 911, 2783, 12335, -912 } };
+
+    for (auto& row : rows)
+    {
+        const auto a1 = runBurst (gateParams (1.0, 50.0), 200.0, row.fs);
+        CHECK (a1.firstFull == row.full1);
+        CHECK (a1.lastFull + 1 == row.below1);
+        CHECK (std::abs (a1.firstZero - row.zero1) <= 1);
+
+        auto p = gateParams (10.0, 100.0);
+        p.holdMs = 20.0;
+        const auto a10 = runBurst (p, 200.0, row.fs);
+        CHECK (a10.firstFull == row.full10);
+        CHECK (a10.lastFull + 1 == row.below10);
+        CHECK (std::abs (a10.firstZero - row.zero10) <= 1);
+
+        p = gateParams (0.0, 0.0);
+        p.preOpenMs = 10.0;
+        const auto pre = runBurst (p, 200.0, row.fs);
+        CHECK (pre.firstOpen == row.preOpen);
+        CHECK (pre.lastFull == -1);                                 // closing is not advanced
+    }
+}
+
+ROVOX_TEST (parity, reagate_v2_threshold_moves_with_the_gain_hysteresis_staircase_and_retrigger)
+{
+    const double levels[] = { -40, -19, -40, -17.5, -40, -15, -17.5, -18.5, -19.5, -21, -23, -25, -27, -40, -10, -40, -10, -40 };
+    const double lengthMs[] = { 200, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 200, 100, 30, 20, 300 };
+    std::vector<Seg> segs;
+
+    for (size_t s = 0; s < 18; ++s)
+        segs.push_back ({ levels[s], lengthMs[s] / 1000.0 });
+
+    // first three samples and the last sample of every segment; a positive hysteresis chatters (the gate flips every sample)
+    for (auto& c : gateStairCases)
+    {
+        auto p = gateParams (c.attack, c.release);
+        p.holdMs = c.hold;
+        p.hysteresisDb = c.hy != 0.0 ? c.hy - 0.05 : 0.0;       // the knob shows -0.05 dB less than its text, as the threshold does
+        const auto r = runGate (p, segs);
+
+        for (size_t s = 0; s < 18; ++s)
+        {
+            const long last = std::lround (lengthMs[s] * 48.0) - 1;
+
+            for (int k = 0; k < 4; ++k)
+                CHECK_NEAR (r.gain (s, k < 3 ? k : last), c.g[s][k], 2e-6);
+        }
+    }
 }
 
 //------------------------------------------------------------------------------ ReaComp
@@ -1065,6 +1423,50 @@ ROVOX_TEST (parity, reacomp_envelope_attacks_from_the_threshold_and_releases_tow
     const double a = std::exp (-1.0 / 48.0), T = std::pow (10.0, -30.05 / 20.0), v = std::pow (10.0, -6.0 / 20.0);
     const double e0 = v + a * (T - v);
     CHECK_NEAR (r.up (0), -(20.0 * std::log10 (e0) + 30.05), 1e-3);
+}
+
+ROVOX_TEST (parity, reacomp_v2_legacy_option_selects_the_knee_and_where_the_attack_starts)
+{
+    // DC -40 -> -6 dBFS, threshold -30.05, ratio inf: gain (dB) at 0.5 / 1 / 2 / 5 / 10 ms after the onset (measured: comp6_*_leg*)
+    const struct { double attack, release; bool fromEnvelope; long n[5]; double db[5]; } rows[] = {
+        { 50, 200, false, { 24, 48, 96, 240, 480 }, { -1.251333, -2.293592, -4.040546, -7.706919, -11.399879 } },
+        { 50, 200, true, { 24, 48, 96, 240, 480 }, { 0.0, 0.0, 0.0, -5.162718, -9.986667 } },
+        { 10, 50, false, { 24, 48, 96, 240, 480 }, { -4.919338, -7.806696, -11.470409, -16.80075, -20.407786 } },
+        { 10, 50, true, { 24, 48, 96, 240, 480 }, { -0.943637, -5.3023, -10.073399, -16.268025, -20.198926 } },
+        { 1, 50, true, { 24, 48, 96, 240, 480 }, { -16.531547, -20.313135, -22.865254, -23.994038, -24.047252 } } };
+
+    for (auto& row : rows)
+    {
+        auto p = compParams (-30.05, row.attack, row.release);
+        p.attackFromEnvelope = row.fromEnvelope;
+        const auto r = runComp (p);
+        for (int k = 0; k < 5; ++k)
+            CHECK_NEAR (r.up (row.n[k]), row.db[k], 0.15);
+    }
+
+    // with a soft knee the attack starts from the start of the knee (threshold - W), default knee 6 dB, attack 10 ms (measured: comp6_a10_r50_k6_leg0.25;
+    // the legacy knee has only a 12 dB table, its shape at 6 dB is scaled from that and not checked)
+    auto kp = compParams (-30.05, 10.0, 50.0);
+    kp.kneeDb = 6.0;
+    const auto kr = runComp (kp);
+    CHECK_NEAR (kr.up (0), -0.184462, 0.1);
+    CHECK_NEAR (kr.up (24), -3.655902, 0.15);
+    CHECK_NEAR (kr.up (48), -6.060116, 0.15);
+
+    // the release is the same for both: 50 ms release after the drop (measured: gain_db_after_drop_ms, all four classes)
+    auto p = compParams (-30.05, 10.0, 50.0);
+    p.attackFromEnvelope = true;
+    const auto r = runComp (p);
+    CHECK_NEAR (r.down (48 * 10), -22.328186, 0.2);
+    CHECK_NEAR (r.down (48 * 50), -15.568775, 0.2);
+
+    // the legacy knee (K_12 (0) = 2.410 dB) goes with floor (4 n) even, the default knee with odd; here only the knee flag
+    fx::ReaCompParams k;
+    k.ratio = 100.0;
+    k.kneeDb = 12.0;
+    CHECK_NEAR (-fx::ReaComp::staticGainDb (k, 0.0), 4.0637, 0.05);
+    k.legacyKnee = true;
+    CHECK_NEAR (-fx::ReaComp::staticGainDb (k, 0.0), 2.4099, 0.05);
 }
 
 ROVOX_TEST (parity, reacomp_rms_detector_pre_comp_make_up_and_mix)
@@ -1229,7 +1631,7 @@ ROVOX_TEST (parity, realimit_threshold_boosts_the_ceiling_scales_and_peaks_stay_
     p.releaseDbPerSec = 6.0;
     const auto r = runLimit (p, limiterStep());
     CHECK_NEAR (dbOf (r.out[10000] / (double) r.in[10000]), 10.0 - 6.0, 1e-3);          // -30 dBFS comes out at -26 dBFS
-    CHECK_NEAR (dbOf (r.out[36000]), -6.014, 0.01);                                       // a -3 dBFS DC would be +7: -6.01 dBFS (measured)
+    CHECK_NEAR (dbOf (r.out[36000]), -6.009, 0.01);                                       // a -3 dBFS DC would be +7: -6.01 dBFS (measured)
     double peak = 0.0;
 
     for (float v : r.out)
@@ -1238,7 +1640,7 @@ ROVOX_TEST (parity, realimit_threshold_boosts_the_ceiling_scales_and_peaks_stay_
     CHECK (dbOf (peak) < -6.0);
     CHECK (dbOf (peak) > -6.1);
 
-    // below 0 dBFS nothing happens, a boosted peak settles 0.014 dB below the ceiling (measured -0.014 dBFS)
+    // below 0 dBFS nothing happens, a boosted peak settles 0.009 dB below the ceiling (the 0.014 dB of the first measurement was the gain model)
     p.thresholdDb = 0.0;
     p.ceilingDb = 0.0;
     const auto q = runLimit (p, limiterStep());
@@ -1246,7 +1648,7 @@ ROVOX_TEST (parity, realimit_threshold_boosts_the_ceiling_scales_and_peaks_stay_
     CHECK_NEAR (q.out[36000], q.in[36000], 1e-7);
     p.thresholdDb = -10.0;
     const auto t = runLimit (p, limiterStep());
-    CHECK_NEAR (dbOf (t.out[36000]), -0.014, 0.005);
+    CHECK_NEAR (dbOf (t.out[36000]), -0.009, 0.005);
 }
 
 ROVOX_TEST (parity, realimit_gain_ramps_linearly_over_two_ms_ending_on_the_peak)
@@ -1256,7 +1658,7 @@ ROVOX_TEST (parity, realimit_gain_ramps_linearly_over_two_ms_ending_on_the_peak)
     p.releaseDbPerSec = 6.0;
     const auto r = runLimit (p, limiterStep());
     const size_t step = 24000;
-    const double end = 0.44598;                                                            // 0.99839 / (10^(7/20))
+    const double end = std::pow (10.0, -0.009 / 20.0) / std::pow (10.0, 7.0 / 20.0);
 
     for (long k = -100; k <= 0; k += 4)
     {
@@ -1264,14 +1666,14 @@ ROVOX_TEST (parity, realimit_gain_ramps_linearly_over_two_ms_ending_on_the_peak)
         CHECK_NEAR (r.gain ((size_t) ((long) step + k)), want, 2e-4);
     }
 
-    CHECK_NEAR (r.gain (step - 92), 0.976916, 2e-4);                                       // measured
-    CHECK_NEAR (r.gain (step - 48), 0.72299, 2e-4);
-    CHECK_NEAR (r.gain (step), 0.44598, 2e-4);
+    CHECK_NEAR (r.gain (step - 92), 1.0 - (1.0 - end) * 4.0 / 96.0, 2e-4);
+    CHECK_NEAR (r.gain (step - 48), 1.0 - (1.0 - end) * 0.5, 2e-4);
+    CHECK_NEAR (r.gain (step), end, 2e-4);
 
     // -20 dB threshold: slope 0.9 / 96
     p.thresholdDb = -20.0;
     const auto s = runLimit (p, limiterStep());
-    CHECK_NEAR (s.gain (step - 48), 0.570515, 2e-4);
+    CHECK_NEAR (s.gain (step - 48), 1.0 - (1.0 - std::pow (10.0, -0.009 / 20.0) / std::pow (10.0, 17.0 / 20.0)) * 0.5, 2e-4);
 }
 
 ROVOX_TEST (parity, realimit_release_has_a_fast_linear_stage_and_a_slow_stage_in_db_per_second)
@@ -1316,32 +1718,137 @@ ROVOX_TEST (parity, realimit_release_has_a_fast_linear_stage_and_a_slow_stage_in
     CHECK_NEAR (r20.gain (at + 460), 0.926396, 1.5e-3);
 }
 
-ROVOX_TEST (parity, realimit_slow_stage_charges_with_the_length_of_a_burst)
+namespace
 {
-    // measured residual gain reduction 10 ms after a burst that needs 7 dB (T = -10, 6 dB/s): the charge law is a fit (low confidence)
-    const struct { double ms, gr; } bursts[] = { { 1, 0.29 }, { 5, 0.38 }, { 20, 0.72 }, { 100, 2.55 }, { 300, 6.95 } };
+struct LimStep { const char* rate; double over, ms; std::vector<std::pair<double, double>> gr; };
+const LimStep limSteps[] = {
+    { "6", 3, 10, { { 0, -3.006197 }, { 1, -2.653505 }, { 5, -1.370581 }, { 10, -0.471877 }, { 20, -0.411878 }, { 50, -0.23188 }, { 100, -2e-06 }, { 200, -2e-06 }, { 500, -2e-06 } } },
+    { "6", 3, 100, { { 0, -3.006197 }, { 1, -2.653505 }, { 5, -2.462502 }, { 10, -2.432503 }, { 20, -2.372503 }, { 50, -2.192506 }, { 100, -1.892511 }, { 200, -1.292519 }, { 500, -2e-06 } } },
+    { "6", 9, 300, { { 0, -8.980776 }, { 1, -7.531415 }, { 5, -7.253752 }, { 10, -7.223753 }, { 20, -7.163754 }, { 50, -6.983756 }, { 100, -6.683761 }, { 200, -6.083769 }, { 500, -4.283795 } } },
+    { "6", 9, 1000, { { 0, -9.013574 }, { 1, -9.007574 }, { 5, -8.983574 }, { 10, -8.953575 }, { 20, -8.893576 }, { 50, -8.713578 }, { 100, -8.413583 }, { 200, -7.813592 }, { 500, -6.013617 } } },
+    { "20", 3, 30, { { 0, -3.006197 }, { 1, -2.653505 }, { 5, -2.558178 }, { 10, -2.458432 }, { 20, -2.258942 }, { 50, -1.66047 }, { 100, -0.663018 }, { 200, -2e-06 }, { 500, -2e-06 } } },
+    { "20", 9, 100, { { 0, -8.980776 }, { 1, -8.172021 }, { 5, -8.092225 }, { 10, -7.99248 }, { 20, -7.79299 }, { 50, -7.194518 }, { 100, -6.197066 }, { 200, -4.202161 }, { 500, -2e-06 } } },
+    { "20", 9, 1000, { { 0, -9.013283 }, { 1, -8.993334 }, { 5, -8.913538 }, { 10, -8.813793 }, { 20, -8.614303 }, { 50, -8.015831 }, { 100, -7.018378 }, { 200, -5.023474 }, { 500, -2e-06 } } },
+    { "inf", 3, 30, { { 0, -3.010576 }, { 1, -2.860629 }, { 5, -2.260845 }, { 10, -1.511115 }, { 20, -0.011655 }, { 50, -2e-06 }, { 100, -2e-06 }, { 200, -2e-06 }, { 500, -2e-06 } } },
+    { "inf", 9, 100, { { 0, -9.010575 }, { 1, -8.860629 }, { 5, -8.260845 }, { 10, -7.511115 }, { 20, -6.011654 }, { 50, -1.513273 }, { 100, -2e-06 }, { 200, -2e-06 }, { 500, -2e-06 } } },
+    { "inf", 9, 1000, { { 0, -9.010575 }, { 1, -8.860629 }, { 5, -8.260845 }, { 10, -7.511115 }, { 20, -6.011654 }, { 50, -1.513273 }, { 100, -2e-06 }, { 200, -2e-06 }, { 500, -2e-06 } } },
+};
+struct LimTrain { const char* rate; double period, duty; std::vector<double> gr; };
+const LimTrain limTrains[] = {
+    { "6", 100, 0.25, { -0.471758, -0.911764, -1.328644, -1.7249, -2.10178, -2.461161, -2.804292, -3.133048, -3.448054, -3.75056, -4.041191, -4.320572, -4.589953, -4.850585, -5.101841, -5.344972, -5.579978, -5.807485, -6.028116, -6.241872 } },
+    { "6", 100, 0.5, { -1.19488, -2.323634, -3.401763, -4.436766, -5.435521, -6.4024, -7.341779, -8.257408, -8.731703, -8.731578, -8.731578, -8.731578, -8.731578, -8.731578, -8.731578, -8.731578, -8.731578, -8.731578, -8.731578, -8.731578 } },
+    { "6", 20, 0.5, { -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -8.971575 } },
+    { "inf", 100, 0.25, { -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06, -2e-06 } },
+    { "inf", 100, 0.5, { -1.963111, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234, -1.966234 } },
+};
+struct LimPair { const char* rate; bool impulse; double over, gapMs; std::vector<double> gr; };
+const LimPair limPairs[] = {
+    { "6", false, 9, 1, { -9.013699, -9.013699, -9.013699 } },
+    { "6", false, 9, 8, { -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699 } },
+    { "6", false, 9, 12, { -8.980776, -8.2259, -7.531415, -6.88837, -6.318633, -6.435264, -6.553483, -6.673333, -6.794861, -6.918112, -7.043138, -7.16999, -7.298721, -7.42939, -7.562054, -7.696776, -7.83362, -7.972656, -8.113952, -8.257586, -8.403634, -8.552181, -8.703312, -8.857119, -9.013699 } },
+    { "6", false, 3, 3, { -8.995745, -8.58612, -8.213602, -7.873472, -7.561824, -7.275392, -7.011388 } },
+    { "6", false, 3, 9.5, { -8.995745, -8.58612, -8.213602, -7.873472, -7.561824, -7.275392, -7.011411, -6.767526, -6.54171, -6.332211, -6.137503, -5.956246, -5.787262, -5.629505, -5.482047, -5.34406, -5.2148, -5.093597, -4.979848, -4.872998 } },
+    { "6", false, 3, 20, { -8.980776, -8.2259, -7.531415, -6.88837, -6.289668, -5.729586, -5.203441, -4.707355, -4.238079, -3.792862, -3.369357, -2.965545, -2.579676, -2.210222, -1.855843, -1.515359, -1.187718, -0.87199, -0.567335, -0.503627, -0.500627, -0.497628, -0.494627, -0.491627, -0.488627, -0.485627, -0.482627, -0.479627, -0.476628, -0.473627, -0.470628, -0.467628, -0.464628, -0.461627, -0.458628, -0.455628, -0.452628, -0.661147, -1.376795, -2.156744, -3.013699 } },
+    { "6", true, 9, 15, { -8.980776, -8.2259, -7.531415, -6.88837, -6.289668, -5.729586, -5.203441, -4.707355, -4.238079, -3.792862, -3.421072, -3.630179, -3.844445, -4.064131, -4.289517, -4.520908, -4.758632, -5.003046, -5.254538, -5.513528, -5.780479, -6.055895, -6.340332, -6.634399, -6.938772, -7.254198, -7.581514, -7.921647, -8.275645, -8.644686, -8.980776 } },
+    { "inf", false, 9, 5, { -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699 } },
+    { "inf", false, 9, 10.5, { -8.980776, -8.257586, -8.293868, -8.330303, -8.366891, -8.403634, -8.440533, -8.47759, -8.514805, -8.552181, -8.589718, -8.627417, -8.665281, -8.703312, -8.741509, -8.779875, -8.818411, -8.857119, -8.896, -8.935056, -8.974289, -9.013699 } },
+    { "inf", false, 3, 8, { -8.995745, -8.58612, -8.213602, -7.962511, -7.887538, -7.812565, -7.737592, -7.662619, -7.587646, -7.512673, -7.4377, -7.362727, -7.287754, -7.21278, -7.137807, -7.062835, -6.987861 } },
+    { "inf", false, 3, 12, { -8.980776, -8.2259, -7.693759, -7.618785, -7.543812, -7.468839, -7.393867, -7.318893, -7.243921, -7.168947, -7.093975, -7.019001, -6.944028, -6.869055, -6.794082, -6.719109, -6.644136, -6.569163, -6.49419, -6.419218, -6.344244, -6.269271, -6.194298, -6.119325, -6.044352 } },
+    { "inf", true, 9, 9, { -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -9.013699, -8.980776 } },
+};
 
-    for (auto& b : bursts)
+double limitRate (const std::string& setting)
+{
+    return setting == "inf" ? fx::ReaLimitParams::infiniteRelease : setting == "6" ? 6.0 : setting == "20" ? 19.95 : 39.95;      // the shown value is 6 - 20 log10 n
+}
+
+fx::ReaLimitParams limitV2 (const std::string& rate)
+{
+    fx::ReaLimitParams p;
+    p.thresholdDb = -12.005;
+    p.ceilingDb = -0.005;
+    p.releaseDbPerSec = limitRate (rate);
+    return p;
+}
+
+/** Gain reduction in dB at sample i (relative to the boosted input, ceiling included). */
+double reductionDb (const LimitRun& r, size_t i)        { return dbOf (r.gain (i)); }
+} // namespace
+
+ROVOX_TEST (parity, realimit_v2_slow_stage_follows_the_fast_gain_reduction_after_overshoot_steps)
+{
+    // DC overshoot of `over` dB (threshold -12) for `ms` on a -40 dBFS floor: gain reduction 0 / 1 / 5 / 10 / ... ms after its end (measured: lim4_t-12_r*)
+    for (auto& s : limSteps)
     {
-        auto x = dcSegments ({ { -30, 0.1 }, { -30, 0.9 } }, 48000.0);
-        const size_t a = 4800, len = (size_t) std::lround (b.ms * 48.0);
+        const double floorLin = std::pow (10.0, -40.0 / 20.0), level = std::pow (10.0, (-12.0 + s.over) / 20.0);
+        const size_t len = (size_t) std::lround (s.ms * 48.0), start = 24000;
+        std::vector<float> x (start + len + 72000, (float) floorLin);
+        std::fill (x.begin() + (long) start, x.begin() + (long) (start + len), (float) level);
+        const auto r = runLimit (limitV2 (s.rate), x);
 
-        for (size_t i = a; i < a + len; ++i)
-            x[i] = (float) std::pow (10.0, -3.0 / 20.0);
+        for (auto& pt : s.gr)
+            CHECK_NEAR (reductionDb (r, start + len + (size_t) std::lround (pt.first * 48.0)), pt.second, 0.03);
+    }
+}
 
-        fx::ReaLimitParams p;
-        p.thresholdDb = -10.0;
-        p.releaseDbPerSec = 6.0;
-        const auto r = runLimit (p, x);
-        CHECK_NEAR (-dbOf (r.gain (a + len + 480)), b.gr, 0.04);
+ROVOX_TEST (parity, realimit_v2_burst_trains_and_gap_pairs_use_the_ten_ms_hold_window)
+{
+    const double floorLin = std::pow (10.0, -40.0 / 20.0), hot = std::pow (10.0, (-12.0 + 9.0) / 20.0);
+
+    // 9 dB bursts for 2 s: the gain reduction 3 ms before the 2nd, 3rd, ... burst (measured: lim4 trains)
+    for (auto& t : limTrains)
+    {
+        const size_t period = (size_t) std::lround (t.period * 48.0), on = (size_t) (t.duty * (double) period), start = 24000;
+        std::vector<float> x (start + 96000 + 24000, (float) floorLin);
+
+        for (size_t i = 0; i < 96000; ++i)
+            if (i % period < on)
+                x[start + i] = (float) hot;
+
+        const auto r = runLimit (limitV2 (t.rate), x);
+
+        for (size_t k = 0; k < t.gr.size(); ++k)
+            CHECK_NEAR (reductionDb (r, start + (k + 1) * period - 144), t.gr[k], 0.05);
     }
 
-    // a release of "inf" has no slow stage: the gain is back after the fast stage
+    // two 10 ms overshoots (the second `over` dB, or a single sample peak) with a gap: a same-or-deeper second one within 10 ms means no release at all
+    for (auto& pr : limPairs)
+    {
+        const size_t gap = (size_t) std::lround (pr.gapMs * 48.0), start = 24000;
+        const double second = std::pow (10.0, (-12.0 + pr.over) / 20.0);
+        std::vector<float> x (start + 480 + gap + 480 + 80000, (float) floorLin);
+        size_t from;
+
+        if (pr.impulse)
+        {
+            x[start] = (float) hot;
+            x[start + gap + 1] = (float) hot;
+            from = start + 1;
+        }
+        else
+        {
+            std::fill (x.begin() + (long) start, x.begin() + (long) (start + 480), (float) hot);
+            std::fill (x.begin() + (long) (start + 480 + gap), x.begin() + (long) (start + 960 + gap), (float) second);
+            from = start + 480;
+        }
+
+        const auto r = runLimit (limitV2 (pr.rate), x);
+
+        for (size_t j = 0; j < pr.gr.size(); ++j)
+            CHECK_NEAR (reductionDb (r, from + 24 * j), pr.gr[j], 0.05);
+    }
+}
+
+ROVOX_TEST (parity, realimit_v2_release_knob_inf_is_150_db_per_second)
+{
+    // after a long step the slow stage releases at the shown rate; "inf" is 150 dB/s (measured slope 3.124e-3 dB per sample)
     fx::ReaLimitParams p;
     p.thresholdDb = -10.0;
     p.releaseDbPerSec = fx::ReaLimitParams::infiniteRelease;
+    CHECK_NEAR (p.releaseDbPerSec, 150.0, 1e-12);
     const auto r = runLimit (p, limiterStep());
-    CHECK_NEAR (r.gain (48000 + 480), 1.0, 1e-6);
+    CHECK_NEAR (reductionDb (r, 48000 + 480), -(7.0 + 0.009 - 150.0 * 0.01), 0.03);
+    CHECK_NEAR (reductionDb (r, 48000 + 960) - reductionDb (r, 48000 + 480), 150.0 * 0.01, 0.03);
 }
 
 //------------------------------------------------------------------------------ translation
@@ -1414,7 +1921,7 @@ ROVOX_TEST (parity, reagate_and_realimit_translation_read_the_knobs_exactly)
     CHECK (l.untranslated.empty());
 
     const json infinite = { { "name", "ReaLimit" }, { "params", json::array ({ prm (2, "Release", 0.0, "inf") }) } };
-    CHECK_NEAR (translatedValue (translateReaperFx ("limit", parseReaperFxEntry (infinite)), "release_rate"), 1000.0, 1e-9);
+    CHECK_NEAR (translatedValue (translateReaperFx ("limit", parseReaperFxEntry (infinite)), "release_rate"), 150.0, 1e-9);
 }
 
 //------------------------------------------------------------------------------ the hidden fade stage

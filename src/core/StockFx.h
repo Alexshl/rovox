@@ -255,11 +255,13 @@ private:
 };
 
 //==============================================================================
-/** ReaGate behaviour. Amplitudes (dry, wet) are linear. The closed gate is exactly silent. The timing offset D is 24 samples at 48 kHz (measured at
-    48 kHz only); at other rates it is taken as the same time, 0.5 ms. Attack: the gain rises by 1 / (attack - D) per sample. Hold (after the level
-    fell below the close threshold): max(hold - D, attack - D - 1) samples at gain 1. Release: the gain falls by 1 / (release - D) per sample. Pre-open
-    delays the audio by (pre-open - D) samples (reported as latency) while the detector and the gain run on the undelayed input, so the gate opens
-    that much before the audio; the hold is lengthened by the same amount so that closing stays on the audio. */
+/** ReaGate behaviour. Amplitudes (dry, wet) are linear. The closed gate is exactly silent. All times are milliseconds: the offset D is 0.5 ms
+    (fractional samples at any rate). Attack: the gain rises by 1 / (attack - D) per sample and an attack that has started always completes. The gate
+    stays held for floor(hold - D) + max(floor(attack - D) - 1, 0) samples after the level fell below the close threshold (the attack time is added to
+    the hold), then the gain falls by 1 / (release - D) per sample. The level is compared with a threshold that moves from the open to the close
+    threshold, linearly in amplitude, with the current gain. Pre-open delays the audio by floor(pre-open - D) samples (reported as latency) while
+    the detector and the gain run on the undelayed input, so the gate opens that much before the audio; the hold is lengthened by the same amount so
+    that closing stays on the audio. */
 struct ReaGateParams
 {
     double thresholdDb = -150.0, attackMs = 3.0, releaseMs = 100.0, preOpenMs = 0.0, holdMs = 0.0, lowPassHz = 20000.0, highPassHz = 0.0;
@@ -286,6 +288,7 @@ public:
 
 private:
     double sampleRate_ = 44100.0, gain_ = 0.0, openLin_ = 0.0, closeLin_ = 0.0, attackStep_ = 1.0, releaseStep_ = 1.0, rmsSum_[2] = { 0.0, 0.0 };
+    bool instantAttack_ = true, instantRelease_ = true;
     long holdSamples_ = 0, holdLeft_ = 0;
     int look_ = 0, rmsN_ = 0;
     size_t writePos_ = 0, rmsPos_ = 0;
@@ -321,7 +324,8 @@ struct ReaCompParams
 {
     double thresholdDb = 0.0, ratio = 4.0, attackMs = 3.0, releaseMs = 100.0, preCompMs = 0.0, lowPassHz = 20000.0, highPassHz = 0.0;
     double rmsMs = 5.0, kneeDb = 0.0;
-    bool legacyKnee = false;        // Legacy Attack/Knee Options other than the default 0.25
+    bool legacyKnee = false;        // Legacy Attack/Knee Options: the legacy knee (floor (4 n) even)
+    bool attackFromEnvelope = false;    // Legacy Attack/Knee Options n > 0.5: an attack starts from the current envelope, not from the threshold
     bool autoMakeup = false;        // make-up gain -threshold * (1 - 1 / ratio) / 2
     double dry = 0.0, wet = 1.0;    // amplitudes
     bool operator== (const ReaCompParams&) const = default;
@@ -364,16 +368,17 @@ private:
 };
 
 //==============================================================================
-/** ReaLimit behaviour: the input is boosted by -threshold, limited so that sample peaks stay just below 0 dBFS (0.014 dB below), then scaled by the
-    ceiling. Before every peak the gain is held under a line that falls linearly (in amplitude) over 2 ms to the level the peak needs (lookahead,
-    reported as latency), after it the gain returns linearly over 10 ms (fast stage). A second, slow stage accumulates the gain reduction while the fast stage limits and releases at `releaseDbPerSec` dB per second;
-    the applied gain is the lower of the two stages. The charge rate of the slow stage (4 x the release rate) is a fit to the measurements, the
-    law itself is not known. */
+/** ReaLimit behaviour: the input is boosted by -threshold, limited so that sample peaks stay just below 0 dBFS (0.009 dB below), then scaled by the
+    ceiling. The fast stage (linear amplitude) falls along a line that reaches the level each peak needs on the peak sample, 2 ms after it starts, and
+    releases along a line back to 1 that ends 10 ms after the last over-threshold sample; it never releases in a gap if a peak needing as much (or
+    more) reduction follows within 10 ms. The slow stage (dB) charges at 4 x the release rate while the fast stage reduces more than it does and
+    releases linearly at `releaseDbPerSec` dB per second; the applied gain is the lower of the two stages. All times are milliseconds. The audio is
+    delayed by the 10 ms window (reported as latency). */
 struct ReaLimitParams
 {
     double thresholdDb = 0.0, ceilingDb = 0.0;
-    double releaseDbPerSec = 15.0;      // >= infiniteRelease: no slow stage
-    static constexpr double infiniteRelease = 1000.0;
+    double releaseDbPerSec = 15.0;      // the knob's "inf" is 150 dB/s
+    static constexpr double infiniteRelease = 150.0;
     bool operator== (const ReaLimitParams&) const = default;
 };
 
@@ -383,14 +388,16 @@ public:
     void prepare (double sampleRate);       // allocates
     void reset();
     void setParams (const ReaLimitParams&);
-    int latencySamples() const noexcept     { return std::max (0, lookahead_ - 1); }
+    int latencySamples() const noexcept     { return std::max (0, window_); }
 
     void process (float* const* io, int numChannels, int numSamples);
     double lastGainReductionDb() const noexcept { return lastReductionDb_; }
 
 private:
-    double sampleRate_ = 44100.0, boost_ = 1.0, out_ = 1.0, fast_ = 1.0, up_ = 0.0, slowDb_ = 0.0, lastReductionDb_ = 0.0;
-    int lookahead_ = 1, fastSamples_ = 1;
+    double sampleRate_ = 44100.0, boost_ = 1.0, out_ = 1.0, fast_ = 1.0, slowDb_ = 0.0, lastReductionDb_ = 0.0;
+    int lookahead_ = 1, window_ = 1;        // 2 ms attack ramp, 10 ms hold / release window (samples)
+    bool releasing_ = false;
+    long long index_ = 0, lastOver_ = -1;   // output sample counter, index of the last sample that needed a reduction
     size_t pos_ = 0;
     ReaLimitParams params_;
     std::array<std::vector<float>, 2> audio_;

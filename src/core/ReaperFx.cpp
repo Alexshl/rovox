@@ -619,9 +619,9 @@ void translateLimit (const ReaperFxEntry& fx, Sink& s)
         }
         else if (hasWord (w, "release"))
         {
-            // the number is the rate of the slow stage in dB per second; "inf" is the top of the knob (no slow stage)
+            // the number is the rate of the slow stage in dB per second (6 - 20 log10 n); "inf" is the top of the knob: 150 dB/s (measured)
             if (v.ok && v.infinite)
-                s.set (p, "release_rate", 1000.0, "infinite rate: no slow stage");
+                s.set (p, "release_rate", 150.0, "inf is 150 dB per second");
             else if (v.ok && v.value > 0.0)
                 s.set (p, "release_rate", n > 0.0 ? exactOrText (v.value, 6.0 - 20.0 * std::log10 (n), 0.06 + 0.006 * v.value) : v.value, "dB per second");
             else

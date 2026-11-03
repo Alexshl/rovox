@@ -338,7 +338,9 @@ private:
         p.highPassHz = value (reaHighPass);
         p.rmsMs = value (8);
         p.kneeDb = value (4);
-        p.legacyKnee = std::abs (value (reaLegacy) - 0.25f) > 1.0e-3f;
+        const double legacy = value (reaLegacy);
+        p.legacyKnee = ((long) std::floor (4.0 * legacy + 1.0e-6) & 1) == 0;       // floor (4 n) odd: the default knee
+        p.attackFromEnvelope = legacy > 0.5 + 1.0e-6;
         p.autoMakeup = flag (7);
         p.dry = gainOrSilence (value (reaDry));
         p.wet = gainOrSilence (value (reaWet));
@@ -555,7 +557,7 @@ private:
                  num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
                  toggle ("fx_delta", "FX delta (processed - input)", false),
                  num ("threshold", "Threshold (ReaLimit mode)", -60.0f, 12.0f, 0.0f, "dB", 2),
-                 num ("release_rate", "Release (ReaLimit mode, 1000 = instant)", 1.0f, 1000.0f, 15.0f, "dB/s", 1, 20.0f) };
+                 num ("release_rate", "Release (ReaLimit mode, 150 = inf)", 1.0f, 1000.0f, 15.0f, "dB/s", 1, 20.0f) };
     }
 
     bool compat() const                         { return flag (compatFlag); }
@@ -589,7 +591,7 @@ private:
         if (! compat())
             return limiter_.latencySamples();
 
-        return reaReady_ ? reaLimit_.latencySamples() : std::max (0, (int) std::lround (0.002 * sampleRate) - 1);
+        return reaReady_ ? reaLimit_.latencySamples() : std::max (0, (int) std::lround (0.010 * sampleRate));
     }
 
     json meters() const override                { return { { "gain_reduction_db", (double) grDb_.load() } }; }
