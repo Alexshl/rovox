@@ -531,7 +531,7 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     // ReaEQ: types from the band names (cross-checked with BANDTYPE), band 5 (high pass) off by BANDENABLED4, the other slots off
     CHECK_NEAR (valueOf (env, id, eq, "b1_type"), 0.0, 1e-6);
     CHECK_NEAR (valueOf (env, id, eq, "b1_freq"), 250.0, 1e-2);
-    CHECK_NEAR (valueOf (env, id, eq, "b1_gain"), -30.0, 1e-3);          // -inf: the Rovox minimum
+    CHECK_NEAR (valueOf (env, id, eq, "b1_gain"), -150.0, 1e-3);         // -inf: amplitude 0 (a gain of -150 dB or less)
     CHECK_NEAR (valueOf (env, id, eq, "b1_bw"), 0.8, 1e-3);
     CHECK_NEAR (valueOf (env, id, eq, "b1_on"), 1.0, 1e-6);
     CHECK_NEAR (valueOf (env, id, eq, "b2_type"), 2.0, 1e-6);
@@ -551,12 +551,6 @@ ROVOX_TEST (rpp, sidecar_translates_the_rea_effects_into_rovox_parameters)
     CHECK_NEAR (valueOf (env, id, eq, "b8_on"), 0.0, 1e-6);
     CHECK_NEAR (valueOf (env, id, eq, "out_gain"), 0.5, 1e-3);
     CHECK (eq["untranslated"].empty());
-    bool clamped = false;
-
-    for (auto& t : eq["translated"])
-        clamped = clamped || (t["param"] == "Gain-Low Shelf" && t.contains ("clamped_from") && t["clamped_from"].get<double>() < -30.0);
-
-    CHECK (clamped);
 
     // ReaComp (detector, envelope and knee as ReaComp does): unit-less ratio 3.00, release 250 (ms), pre-comp, own wet -3 dB / dry -inf; Auto Release is
     // listed as untranslated

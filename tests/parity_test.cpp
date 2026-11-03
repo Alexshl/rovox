@@ -12,6 +12,7 @@
 #include "TestFramework.h"
 #include "TestSupport.h"
 
+#include <array>
 #include <cmath>
 #include <fstream>
 
@@ -107,7 +108,7 @@ std::vector<double> iirImpulse (const Iir& f, size_t n)
 fx::BandType typeOfCode (int code)
 {
     static const fx::BandType map[] = { fx::BandType::LowShelf, fx::BandType::HighShelf, fx::BandType::PeakAlt2, fx::BandType::LowPass, fx::BandType::HighPass,
-                                        fx::BandType::AllPass, fx::BandType::Notch, fx::BandType::BandPass, fx::BandType::Peak, fx::BandType::Peak,
+                                        fx::BandType::AllPass, fx::BandType::Notch, fx::BandType::BandPass, fx::BandType::Peak, fx::BandType::PeakAlt,
                                         fx::BandType::ParallelBandPass };
     return map[code];
 }
@@ -127,6 +128,41 @@ std::vector<float> eqImpulse (const fx::EqParams& p, size_t n, double fs, int bl
     }
 
     return x;
+}
+
+// ReaEQ v3: the gain is an amplitude, -inf / very low gains switch the filter type
+Iir v3Band (int code, double f0, double amp, double bw, double fs)
+{
+    const double w0 = 2 * pi * f0 / fs, c = std::cos (w0), s = std::sin (w0);
+    const double alpha = s * std::sinh (std::log (2.0) / 2 * bw * w0 / s);
+    const auto set = [] (double b0, double b1, double b2, double a0, double a1, double a2) -> Iir
+    {
+        return { { b0 / a0, b1 / a0, b2 / a0 }, { 1, a1 / a0, a2 / a0 } };
+    };
+
+    if (code == 0 && amp < 0.01)    return set ((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + alpha, -2 * c, 1 - alpha);
+    if (code == 1 && amp < 0.01)    return set ((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + alpha, -2 * c, 1 - alpha);
+    if (code == 8 && amp < 0.001)   return set (1, -2 * c, 1, 1 + alpha, -2 * c, 1 - alpha);
+
+    if (code == 2 || code == 9)
+        amp = std::max (amp, 3.0e-5);
+
+    return specBand (code, f0, 20.0 * std::log10 (amp), bw, fs);
+}
+
+std::vector<float> eqSeriesImpulse (const std::vector<std::array<double, 5>>& bands, size_t n, double fs)
+{
+    // band = { code, freq, amp, bw, enabled }
+    fx::EqParams p;
+    p.reaperCompat = true;
+
+    for (size_t i = 0; i < 8; ++i)
+        p.bands[i].enabled = false;
+
+    for (size_t i = 0; i < bands.size(); ++i)
+        p.bands[i] = { bands[i][4] != 0.0, typeOfCode ((int) bands[i][0]), bands[i][1], bands[i][2] <= 0.0 ? -150.0 : 20.0 * std::log10 (bands[i][2]), bands[i][3] };
+
+    return eqImpulse (p, n, fs);
 }
 
 //------------------------------------------------------------------------------ ReaDelay
@@ -381,6 +417,80 @@ ROVOX_TEST (parity, reaeq_gain_is_ignored_by_pass_notch_and_band_pass_types_and_
         p1.bands[k].enabled = p2.bands[k].enabled = false;
 
     CHECK (eqImpulse (p1, 512, 48000.0) == eqImpulse (p2, 512, 48000.0));
+}
+
+ROVOX_TEST (parity, reaeq_v3_very_low_gains_switch_the_band_filters)
+{
+    const double fs = 48000.0;
+    double worst = 0.0;
+    struct Case { int code; double amp; };
+    const Case cases[] = { { 0, 0.0 }, { 0, 0.00998 }, { 0, 0.01 }, { 0, 0.5 }, { 1, 0.0 }, { 1, 0.00998 }, { 1, 0.01 }, { 8, 0.0 }, { 8, 0.000999 }, { 8, 0.001 },
+                           { 9, 0.0 }, { 9, 1.0e-5 }, { 9, 0.001 }, { 2, 0.0 }, { 2, 1.0e-5 }, { 2, 0.01 }, { 3, 0.0 }, { 4, 0.0 }, { 5, 0.0 }, { 6, 0.0 },
+                           { 7, 0.0 }, { 10, 0.0 } };
+
+    for (auto& c : cases)
+        for (double f0 : { 100.0, 768.3, 8132.8 })
+            for (double bw : { 0.8, 2.0 })
+            {
+                const auto got = eqSeriesImpulse ({ { (double) c.code, f0, c.amp, bw, 1.0 } }, 2048, fs);
+                const auto want = iirImpulse (v3Band (c.code, f0, c.amp, bw, fs), 2048);
+
+                for (size_t i = 0; i < want.size(); ++i)
+                    worst = std::max (worst, std::abs ((double) got[i] - want[i]));
+            }
+
+    CHECK (worst < 3.0e-6);
+}
+
+ROVOX_TEST (parity, reaeq_v3_minus_inf_low_shelf_is_a_high_pass_with_the_band_q_and_dc_gain_zero)
+{
+    const auto ir = eqSeriesImpulse ({ { 0, 768.315, 0.0, 0.8, 1.0 } }, 48000, 48000.0);
+    double dc = 0.0;
+
+    for (float v : ir)
+        dc += v;
+
+    CHECK_NEAR (dc, 0.0, 1.0e-4);
+    CHECK_NEAR (ir[0], 0.970074296, 2.0e-6);      // measured first sample (BW 0.8)
+}
+
+ROVOX_TEST (parity, reaeq_v3_mykola_instances_match_the_measured_impulse_samples)
+{
+    // the three ReaEQ instances of the user's project (bands as stored: type, freq, amplitude, BW); measured first impulse samples at 48 kHz
+    struct Inst { std::vector<std::array<double, 5>> bands; std::vector<double> ir; };
+    const Inst insts[] = {
+        { { { 0, 768.3150636133457, 0.0, 0.8, 1 }, { 8, 300.0, 1.0, 2.0, 1 }, { 8, 1000.0, 1.0, 2.0, 1 }, { 1, 5000.0, 1.0, 0.8, 1 }, { 4, 100.0, 1.0, 2.0, 0 } },
+          { 0.970074296, -0.062827587, -0.068293028, -0.072786979, -0.076318651, -0.078906193, -0.080576047, -0.081362203 } },
+        { { { 0, 202.3323704927588, 0.5199999809265137, 0.8, 1 }, { 8, 580.9411298908843, 0.8799999952316284, 2.0, 1 }, { 8, 1000.0, 1.0, 2.0, 1 },
+            { 1, 5000.0, 1.0, 0.8, 1 }, { 4, 100.0, 1.0, 2.0, 0 } },
+          { 0.987571657, -0.023962529, -0.022239244, -0.020642865, -0.01916684, -0.017804692, -0.016550045, -0.015396655 } },
+        { { { 0, 8132.787581251436, 0.0, 0.8, 1 }, { 8, 580.9411298908843, 0.8799999952316284, 2.0, 1 }, { 8, 1000.0, 1.0, 2.0, 1 },
+            { 1, 5000.0, 1.0, 0.8, 1 }, { 4, 100.0, 1.0, 2.0, 0 } },
+          { 0.566827774, -0.71846664, -0.265179098, 0.188428, 0.282945424, 0.109590158, -0.070447378, -0.111480646 } } };
+
+    for (auto& inst : insts)
+    {
+        const auto got = eqSeriesImpulse (inst.bands, 64, 48000.0);
+
+        for (size_t i = 0; i < inst.ir.size(); ++i)
+            CHECK_NEAR (got[i], inst.ir[i], 2.0e-6);
+    }
+}
+
+ROVOX_TEST (parity, reaeq_v3_native_eq_keeps_its_gain_range)
+{
+    fx::EqParams a, b;
+
+    for (auto* p : { &a, &b })
+        for (size_t i = 1; i < 8; ++i)
+            p->bands[i].enabled = false;
+
+    a.bands[0] = { true, fx::BandType::Peak, 1000.0, -100.0, 1.0 };
+    b.bands[0] = { true, fx::BandType::Peak, 1000.0, -30.0, 1.0 };
+    const auto x = eqImpulse (a, 256, 48000.0), y = eqImpulse (b, 256, 48000.0);
+
+    for (size_t i = 0; i < x.size(); ++i)
+        CHECK_NEAR (x[i], y[i], 1e-9);
 }
 
 ROVOX_TEST (parity, reaeq_parallel_band_passes_are_summed_and_then_run_in_series_with_the_other_bands)
@@ -642,6 +752,18 @@ ROVOX_TEST (parity, reaeq_translation_uses_the_codes_the_exact_knob_values_and_t
     CHECK_NEAR (translatedValue (t, "fx_wet"), 50.0, 1e-9);
     CHECK_NEAR (translatedValue (t, "fx_delta"), 1.0, 1e-9);
     CHECK (t.untranslated.empty());
+}
+
+ROVOX_TEST (parity, reaeq_v3_translation_reads_minus_inf_as_zero_amplitude_and_band_alt_as_its_own_type)
+{
+    const json entry = { { "name", "ReaEQ" },
+                         { "config", { { "BANDTYPE0", "0" }, { "BANDENABLED0", "1" }, { "BANDTYPE1", "9" }, { "BANDENABLED1", "1" } } },
+                         { "params", json::array ({ prm (0, "Freq-Low Shelf", 0.434, "768.3"), prm (1, "Gain-Low Shelf", 0.0, "-inf"), prm (2, "BW-Low Shelf", 0.2, "0.80"),
+                                                    prm (3, "Freq-Band 2", 0.5, "1160.5"), prm (4, "Gain-Band 2", 1.0e-6, "-114.0"), prm (5, "BW-Band 2", 0.5, "2.00") }) } };
+    const auto t = translateReaperFx ("eq", parseReaperFxEntry (entry));
+    CHECK_NEAR (translatedValue (t, "b1_gain"), -150.0, 1e-9);
+    CHECK_NEAR (translatedValue (t, "b2_type"), 10.0, 1e-9);        // code 9 = Band (alt)
+    CHECK_NEAR (translatedValue (t, "b2_gain"), 20.0 * std::log10 (2.0e-6), 1e-9);
 }
 
 ROVOX_TEST (parity, readelay_translation_reads_the_knobs_exactly)

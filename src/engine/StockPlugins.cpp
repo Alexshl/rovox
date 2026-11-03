@@ -223,7 +223,7 @@ private:
     static std::vector<ParamDef> definitions()
     {
         static const std::vector<std::string> types { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass",
-                                                       "all_pass", "peak_alt2", "parallel_band_pass" };
+                                                       "all_pass", "peak_alt2", "parallel_band_pass", "peak_alt" };
         struct Default { int type; float freq, bw; bool on; };
         static const Default d[8] = { { 0, 100, 2, true }, { 2, 400, 1, true }, { 2, 2500, 1, true }, { 1, 8000, 2, true },
                                       { 4, 30, 1, false }, { 2, 800, 1, false }, { 2, 5000, 1, false }, { 3, 18000, 1, false } };
@@ -236,7 +236,7 @@ private:
             out.push_back (toggle (p + "on", n + "enabled", d[b].on));
             out.push_back (choice (p + "type", n + "type", types, d[b].type));
             out.push_back (num (p + "freq", n + "frequency", 20.0f, 20000.0f, d[b].freq, "Hz", 1, 1000.0f));
-            out.push_back (num (p + "gain", n + "gain", -30.0f, 30.0f, 0.0f, "dB", 2));
+            out.push_back (num (p + "gain", n + "gain", -150.0f, 30.0f, 0.0f, "dB", 2));
             out.push_back (num (p + "bw", n + "bandwidth", 0.05f, 6.0f, d[b].bw, "oct", 2));
         }
 

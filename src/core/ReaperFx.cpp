@@ -284,7 +284,7 @@ struct EqBandIn
 double reaEqGainDb (double n)
 {
     const double amp = n <= 0.5 ? 2.0 * n : 1.0 + 6.0 * (n - 0.5);
-    return amp <= 1.0e-7 ? minusInfDb : 20.0 * std::log10 (amp);
+    return amp <= 0.0 ? minusInfDb : 20.0 * std::log10 (amp);
 }
 
 /** The value implied by the normalized parameter when it agrees with the displayed text (which is rounded) within `tolerance`, else the text's value. */
@@ -387,7 +387,7 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
 
         if (auto it = fx.config.find (cfgKey); it != fx.config.end())
         {
-            static const int map[] = { 0, 1, 8, 3, 4, 7, 5, 6, 2, 2, 9 };
+            static const int map[] = { 0, 1, 8, 3, 4, 7, 5, 6, 2, 10, 9 };
             const int reaType = std::atoi (it->second.c_str());
 
             if (reaType >= 0 && reaType < 11)
@@ -395,7 +395,7 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
 
             if (cfgType >= 0)
             {
-                if (type >= 0 && type != cfgType && ! (type == 2 && (cfgType == 8 || cfgType == 2)))
+                if (type >= 0 && type != cfgType && ! (type == 2 && (cfgType == 8 || cfgType == 2 || cfgType == 10)))
                     typeNote += "; " + cfgKey + "=" + it->second + " disagrees with the band name, the code is used";
 
                 type = cfgType;
@@ -405,7 +405,7 @@ void translateEq (const ReaperFxEntry& fx, Sink& s)
         if (type < 0)
             type = 2;
 
-        static const char* const typeNames[] = { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass", "all_pass", "peak_alt2", "parallel_band_pass" };
+        static const char* const typeNames[] = { "low_shelf", "high_shelf", "peak", "low_pass", "high_pass", "notch", "band_pass", "all_pass", "peak_alt2", "parallel_band_pass", "peak_alt" };
         s.out.translated.push_back ({ "band type (" + b.key + ")", fx.config.count (cfgKey) ? cfgKey + "=" + fx.config.at (cfgKey) : "from the band name",
                                       n + "type", (double) type, std::string (typeNames[type]) + typeNote });
 

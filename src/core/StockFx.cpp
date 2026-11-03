@@ -75,6 +75,7 @@ BiquadCoeffs designBiquad (BandType type, double sr, double freqHz, double gainD
         case BandType::AllPass:
         case BandType::PeakAlt2:
         case BandType::ParallelBandPass:
+        case BandType::PeakAlt:
             return designReaperBiquad (type, sr, freqHz, gainDb, bwOct);       // only exist as ReaEQ types
     }
 
@@ -87,12 +88,26 @@ BiquadCoeffs designReaperBiquad (BandType type, double sr, double freqHz, double
     const double bw = std::max (bwOct, 1.0e-3);
     const double w0 = 2.0 * pi * f / sr, c = std::cos (w0), s = std::sin (w0);
     const double alpha = s * std::sinh (0.5 * std::log (2.0) * bw * w0 / s);
-    const double A = std::pow (10.0, gainDb / 40.0);
+    // the gain is a linear amplitude inside ReaEQ: -150 dB or less is -inf (0); the low-gain rules work on the amplitude
+    double amp = gainDb <= -150.0 ? 0.0 : std::pow (10.0, gainDb / 20.0);
+
+    if (type == BandType::PeakAlt || type == BandType::PeakAlt2)
+        amp = std::max (amp, 3.0e-5);                       // "Band (alt)" / "Band (alt 2)" floor at -90.46 dB
+
+    const bool hpLp = (type == BandType::LowShelf || type == BandType::HighShelf) && amp < 0.01;
+    const bool notch = type == BandType::Peak && amp < 0.001;
+    const double A = std::sqrt (amp);
     double b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
+
+    if (hpLp)           type = type == BandType::LowShelf ? BandType::HighPass : BandType::LowPass;     // below -40 dB the shelves turn into a 2nd-order HP / LP at f0
+    else if (notch)     type = BandType::Notch;                                                         // below -60 dB the Band turns into a notch
+    else if (type == BandType::PeakAlt)
+        type = BandType::Peak;
 
     switch (type)
     {
         case BandType::Peak:
+        case BandType::PeakAlt:
             b0 = 1.0 + alpha * A;  b1 = -2.0 * c;  b2 = 1.0 - alpha * A;
             a0 = 1.0 + alpha / A;  a1 = -2.0 * c;  a2 = 1.0 - alpha / A;
             break;
@@ -192,10 +207,11 @@ void Eq::setParams (const EqParams& p)
     for (size_t i = 0; i < EqParams::maxBands; ++i)
     {
         const auto& b = p.bands[i];
-        const bool gainType = b.type == BandType::Peak || b.type == BandType::LowShelf || b.type == BandType::HighShelf || b.type == BandType::PeakAlt2;
+        const bool gainType = b.type == BandType::Peak || b.type == BandType::LowShelf || b.type == BandType::HighShelf || b.type == BandType::PeakAlt2
+                              || b.type == BandType::PeakAlt;
         active_[i] = b.enabled && ! (gainType && std::abs (b.gainDb) < 1.0e-9);
         coeffs_[i] = p.reaperCompat ? designReaperBiquad (b.type, sampleRate_, b.freqHz, b.gainDb, b.bandwidthOct)
-                                    : designBiquad (b.type, sampleRate_, b.freqHz, b.gainDb, b.bandwidthOct);
+                                    : designBiquad (b.type, sampleRate_, b.freqHz, std::clamp (b.gainDb, -30.0, 30.0), b.bandwidthOct);
     }
 }
 

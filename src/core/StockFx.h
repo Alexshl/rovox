@@ -18,7 +18,7 @@ namespace rovox::fx
 //==============================================================================
 enum class BandType : int { LowShelf = 0, HighShelf, Peak, LowPass, HighPass, Notch, BandPass,
                             // the ReaEQ band types that have no counterpart above (always designed the ReaEQ way)
-                            AllPass, PeakAlt2, ParallelBandPass };
+                            AllPass, PeakAlt2, ParallelBandPass, PeakAlt };
 
 struct BiquadCoeffs
 {
@@ -39,7 +39,7 @@ struct EqBand
 
 /** ReaEQ filter design (reaperCompat): the bandwidth turns into the RBJ alpha as alpha = sin(w0) * sinh(ln2/2 * BW * w0 / sin(w0)), the shelves use the
     shelf slope S = min(1 / BW^2, 1.2), the pass / notch / band-pass / all-pass types ignore the gain, "Band (alt 2)" keeps its poles at the BW
-    alpha whatever the gain is, and all ParallelBandPass bands are summed in parallel (the sum then goes through the other bands in series). */
+    alpha whatever the gain is, "Band (alt)" is the Band with a gain floor, a gain of -150 dB or less is -inf (amplitude 0: shelves become a high / low pass, the Band a notch), and all ParallelBandPass bands are summed in parallel (the sum then goes through the other bands in series). */
 BiquadCoeffs designReaperBiquad (BandType, double sampleRate, double freqHz, double gainDb, double bandwidthOct);
 
 struct EqParams
