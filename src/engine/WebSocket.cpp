@@ -127,6 +127,10 @@ WsConnection::WsConnection (int fd) : fd_ (fd)
     ::setsockopt (fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     int sndbuf = 64 * 1024;         // a small kernel buffer makes a stalled client show up as back-pressure in our own queue
     ::setsockopt (fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof sndbuf);
+    // httplib armed the accepted socket with its 60 s HTTP read timeout; a listener that only receives audio sends nothing
+    // for longer than that and must not be taken for a dead peer
+    timeval none {};
+    ::setsockopt (fd_, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof none);
 }
 
 WsConnection::~WsConnection()

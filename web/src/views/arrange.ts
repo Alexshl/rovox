@@ -90,6 +90,7 @@ export class ArrangeView {
   private readonly draw = rafThrottle(() => this.paint());
   private frameCount = 0;
   private frameStart = performance.now();
+  private lastStoppedPlayhead = Number.NaN;
   fps = 0;
 
   constructor(private readonly app: App) {
@@ -665,18 +666,26 @@ export class ArrangeView {
       if (s.isPlaying() || recentAgent) {
         this.followPlayhead(s);
         this.draw();
+      } else if (this.app.playhead(s) !== this.lastStoppedPlayhead) {
+        // a seek while stopped (rewind, go to start, ruler click): bring the cursor into view once
+        this.lastStoppedPlayhead = this.app.playhead(s);
+        if (this.revealPlayhead(s)) this.draw();
       }
     }
     requestAnimationFrame(() => this.tickAnimations());
   }
 
   private followPlayhead(s: ProjectStore): void {
-    if (!s.isPlaying()) return;
+    if (s.isPlaying()) this.revealPlayhead(s);
+  }
+
+  /** Scrolls so the playhead sits near the left edge when it is off screen; true if the view moved. */
+  private revealPlayhead(s: ProjectStore): boolean {
     const W = this.lanesCanvas.clientWidth;
     const x = this.xOf(this.app.playhead(s));
-    if (x > W - 40 || x < 0) {
-      s.view.start = Math.max(0, this.app.playhead(s) - (W * 0.1) / s.view.pps);
-    }
+    if (x <= W - 40 && x >= 0) return false;
+    s.view.start = Math.max(0, this.app.playhead(s) - (W * 0.1) / s.view.pps);
+    return true;
   }
 
   //==========================================================================

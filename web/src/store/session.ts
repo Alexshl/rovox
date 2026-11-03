@@ -405,6 +405,11 @@ export class App {
         // after a reconnect the old subscriptions are gone: forget the stores and let the list rebuild them with fresh snapshots
         this.projects.clear();
         this.order = [];
+        // the server forgot that this client listens: ask for the stream again, the old buffer is from before the gap
+        if (this.audio.stats.enabled) {
+          this.audio.flush();
+          this.socket.send({ t: 'audio', on: true });
+        }
         void this.listProjects().then(() => this.restoreRemembered());
         this.changed.emit();
         break;
