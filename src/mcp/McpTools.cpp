@@ -139,7 +139,7 @@ const CommandToolSpec commandTools[] = {
     { "track.delete", "Delete track", "Deletes a track and its items.", false },
     { "track.move", "Move track", "Moves a track to to_index among the audio tracks.", false },
     { "item.list", "List items", "Lists items (clips) with item_id, track_id, start_s, length_s, bar.beat position. Filter by track_id or a time window.", true },
-    { "item.update", "Update item", "Changes name, mute, start (start_s or a time), length (length_s or a duration), trim_start_s / trim_end_s (audio stays in place), fade_in_s, fade_out_s and gain_db of an item.", false },
+    { "item.update", "Update item", "Changes name, mute, start (start_s or a time), length (length_s or a duration), trim_start_s / trim_end_s (audio stays in place), fade_in_s, fade_out_s, gain_db and reaper_stretch_tone (the tone correction RPP import sets on time-stretched preserve-pitch items) of an item.", false },
     { "item.split", "Split item", "Splits an item at a time. Returns left_id (the original id) and right_id; both stay valid.", false },
     { "item.delete", "Delete item", "Deletes an item.", false },
     { "transport.get", "Get transport", "Playback state of a project: state (playing|stopped), position_s, loop {enabled,start_s,end_s}, epoch, audio mode. The audible output needs the server to run with --audio browser.", true },

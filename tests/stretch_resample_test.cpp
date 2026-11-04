@@ -3,6 +3,7 @@
 
 // Time-stretch long-run accuracy (no drift) and resampler passband flatness.
 
+#include "FadeStage.h"
 #include "Render.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
@@ -27,6 +28,39 @@ std::vector<float> renderRpp (test::Env& env, const fs::path& dir, const std::st
     std::ofstream (dir / "t.RPP") << rpp;
     const auto id = env.newProject ("stretch");
     REQUIRE (env.run (id, "import.rpp", { { "path", (dir / "t.RPP").string() } }).ok);
+    RenderRequest rq;
+    rq.tailS = 0.0;
+    auto rr = renderProject (env.project (id), rq);
+    REQUIRE (rr.ok());
+    std::vector<std::vector<float>> ch;
+    REQUIRE (test::readWav (env.project (id).dir() / rr.value()["file"]["path"].get<std::string>(), ch, sr));
+    REQUIRE (! ch.empty());
+    return ch[0];
+}
+
+/** Imports the RPP, optionally switches the stretch tone off with item.update and/or removes the item-stage from the track, renders the left channel. */
+std::vector<float> renderTone (test::Env& env, const fs::path& dir, const std::string& rpp, double& sr, bool toneOff, bool removeStage, bool* flagAfterImport = nullptr)
+{
+    std::ofstream (dir / "t.RPP") << rpp;
+    const auto id = env.newProject ("tone");
+    REQUIRE (env.run (id, "import.rpp", { { "path", (dir / "t.RPP").string() } }).ok);
+    const auto item = env.ok (id, "item.list")["items"][0];
+
+    if (flagAfterImport != nullptr)
+        *flagAfterImport = item["reaper_stretch_tone"].get<bool>();
+
+    if (toneOff)
+        env.ok (id, "item.update", { { "item_id", item["item_id"] }, { "reaper_stretch_tone", false } });
+
+    if (removeStage)
+        for (auto* t : te::getAudioTracks (env.project (id).edit()))
+            for (auto* pl : t->pluginList.getPlugins())
+                if (isFadeStage (*pl))
+                {
+                    pl->deleteFromParent();
+                    break;
+                }
+
     RenderRequest rq;
     rq.tailS = 0.0;
     auto rr = renderProject (env.project (id), rq);
@@ -180,4 +214,47 @@ ROVOX_TEST (stretch, varispeed_resampling_is_flat_to_18_khz)
     const double rate = 1.0583;
     const auto out = renderRpp (env, dir, itemRpp (3.0, "PLAYRATE " + std::to_string (rate) + " 0 0 -1 0 0.0025"), sr);
     checkFlat (out, sr, toneFreqs, rate, 0.1, 18000.0);
+}
+
+ROVOX_TEST (stretch, reaper_stretch_tone_off_is_bit_exact_and_on_has_the_fitted_response)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("stretchtone");
+    const std::vector<double> freqs { 1000, 100, 2000, 8000, 12500, 16000, 18000 };
+    test::writeWav (dir / "item.wav", { tones (freqs, 4.0, 48000.0) }, 48000.0, 24);
+    const auto rpp = itemRpp (3.0, "PLAYRATE 1.0583 1 0 -1 0 0.0025");
+    double sr = 0;
+    bool flagged = false;
+    const auto on = renderTone (env, dir, rpp, sr, false, false, &flagged);
+    CHECK (flagged);                                                    // set by the RPP import: stretched with preserve pitch
+    const auto off = renderTone (env, dir, rpp, sr, true, false);
+    const auto none = renderTone (env, dir, rpp, sr, true, true);       // no item stage on the track at all
+    REQUIRE (off.size() == none.size());
+    CHECK (off == none);                                                // flag off: bit-exact
+
+    // expected: low shelf +0.80 dB at 150 Hz and high shelf -2.05 dB at 15.5 kHz (RBJ, S = 1) at 44.1 kHz
+    const std::vector<std::pair<double, double>> expected { { 100, 0.668 }, { 1000, 0.0 }, { 8000, -0.022 }, { 12500, -0.269 }, { 16000, -1.209 }, { 18000, -1.828 } };
+    const size_t from = (size_t) (0.5 * sr), n = (size_t) (2.0 * sr);
+    REQUIRE (on.size() == off.size());
+
+    for (auto& [hz, db] : expected)
+    {
+        const double got = 20.0 * std::log10 (toneAmplitude (on, from, n, hz, sr) / toneAmplitude (off, from, n, hz, sr));
+        std::cerr << "    " << hz << " Hz: " << got << " dB (expected " << db << ")\n";
+        CHECK_NEAR (got, db, 0.05);
+    }
+}
+
+ROVOX_TEST (stretch, reaper_stretch_tone_is_only_set_for_stretched_preserve_pitch_items)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("stretchflag");
+    test::writeWav (dir / "item.wav", { tones ({ 1000 }, 4.0, 48000.0) }, 48000.0, 24);
+    double sr = 0;
+    bool flagged = true;
+    renderTone (env, dir, itemRpp (1.0, "PLAYRATE 1 1 0 -1 0 0.0025"), sr, false, false, &flagged);
+    CHECK (! flagged);                                                  // not stretched
+    flagged = true;
+    renderTone (env, dir, itemRpp (1.0, "PLAYRATE 1.0583 0 0 -1 0 0.0025"), sr, false, false, &flagged);
+    CHECK (! flagged);                                                  // resampled (pitch follows speed)
 }

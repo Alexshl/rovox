@@ -62,6 +62,7 @@ json clipJson (Project& p, te::Clip& c)
         j["fade_in_s"] = itemFadeSeconds (*a, true);
         j["fade_out_s"] = itemFadeSeconds (*a, false);
         j["gain_db"] = (double) a->getGainDB();
+        j["reaper_stretch_tone"] = itemStretchTone (*a);
     }
 
     return j;
@@ -299,7 +300,8 @@ void registerItemCommands (CommandRegistry& r)
     r.add (makeProjectCommand ("item.update",
         obj ({ { "item_id", strMin (1) }, { "name", strMin (1) }, { "start_s", numMin (0) }, { "start", timePosSchema() }, { "length_s", numMin (0.001) },
                { "length", durationSchema() }, { "mute", boolean() },
-               { "trim_start_s", numMin (0) }, { "trim_end_s", numMin (0) }, { "fade_in_s", numMin (0) }, { "fade_out_s", numMin (0) }, { "gain_db", { { "type", "number" }, { "minimum", -100 }, { "maximum", 24 } } } },
+               { "trim_start_s", numMin (0) }, { "trim_end_s", numMin (0) }, { "fade_in_s", numMin (0) }, { "fade_out_s", numMin (0) }, { "gain_db", { { "type", "number" }, { "minimum", -100 }, { "maximum", 24 } } },
+               { "reaper_stretch_tone", boolean() } },
              { "item_id" }),
         anyObject(), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
@@ -372,6 +374,9 @@ void registerItemCommands (CommandRegistry& r)
                 if (params.contains ("gain_db"))
                     audio->setGainDB (params["gain_db"].get<float>());
 
+                if (params.contains ("reaper_stretch_tone"))
+                    setItemStretchTone (*audio, params["reaper_stretch_tone"].get<bool>());
+
                 const double lengthNow = audio->getPosition().getLength().inSeconds();
 
                 if (params.contains ("fade_in_s"))
@@ -386,7 +391,7 @@ void registerItemCommands (CommandRegistry& r)
                 if (params.contains ("fade_out_s"))
                     audio->setFadeOut (te::TimeDuration::fromSeconds (std::min (params["fade_out_s"].get<double>(), lengthNow)));
             }
-            else if (params.contains ("gain_db") || params.contains ("fade_in_s") || params.contains ("fade_out_s"))
+            else if (params.contains ("gain_db") || params.contains ("reaper_stretch_tone") || params.contains ("fade_in_s") || params.contains ("fade_out_s"))
             {
                 return makeError (errc::invalidParams, "gain and fades apply to audio items only");
             }

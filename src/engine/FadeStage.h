@@ -6,6 +6,9 @@
 // same with Out) and applied by a stage at the head of the track's plugin chain ("rovoxfades", before any FX, as REAPER applies item fades).
 // The clip's own Tracktion fade is 0 then. The stage multiplies the sum of the track's items, so overlapping items on one track share the
 // product of their fades (crossfades are not modelled).
+// The same stage carries the optional "REAPER stretch tone" of an item ("rovox:stretchTone"): REAPER's stretcher colours preserve-pitch
+// time-stretched audio relative to Rovox's transparent one, so the items the RPP import marks get a fixed pair of minimum-phase shelves
+// (low shelf +0.80 dB at 150 Hz, high shelf -2.05 dB at 15.5 kHz). The numbers are fitted on one song at one rate (1.0583).
 #pragma once
 
 #include "Fades.h"
@@ -32,6 +35,10 @@ int visibleIndexOf (te::PluginList&, te::Plugin&);
 
 /** The fade length of a clip in seconds, whichever of the two mechanisms holds it. */
 double itemFadeSeconds (te::Clip&, bool fadeIn);
+
+/** Marks an item for the REAPER stretch-tone correction (installs the stage on the track). Off removes the mark. */
+void setItemStretchTone (te::Clip&, bool on);
+bool itemStretchTone (te::Clip&);
 
 /** Drops the REAPER curve of a fade (the clip's own fade length stays what it is). */
 void clearItemFadeCurve (te::Clip&, bool fadeIn);

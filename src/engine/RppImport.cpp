@@ -415,6 +415,9 @@ struct Importer
             if (preservePitch || pitchSemitones != 0.0)
                 clip->setTimeStretchMode (te::TimeStretcher::signalsmithDefault);       // keeps the pitch while the speed changes; without it the clip is resampled (pitch follows speed)
 
+            if (preservePitch && std::abs (rate - 1.0) > 1e-9)
+                setItemStretchTone (*clip, true);                                       // REAPER's stretcher colours the sound; see FadeStage.h
+
             if (pitchSemitones != 0.0)
                 clip->setPitchChange ((float) pitchSemitones);
         }
