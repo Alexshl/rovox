@@ -36,6 +36,8 @@ export function entrySuffices(e: PeakEntry, it: ItemState, visT0: number, visT1:
 /** Entries kept (least recently used go first) and the pauses after consecutive failures of one item. */
 export const PEAK_CACHE_LIMIT = 500;
 export const PEAK_BACKOFF_MS = [5_000, 30_000, 300_000];
+/** Short capped retry delays after a server (5xx, 504) or network error: the server is likely busy or restarting, not refusing. */
+export const PEAK_RETRY_MS = [1_000, 2_000, 5_000];
 const MAX_PARALLEL = 6;
 
 interface Job {
@@ -47,7 +49,7 @@ export class PeakCache {
   private entries = new Map<string, PeakEntry>(); // insertion order = recency
   private inflight = new Map<string, string>(); // key -> window signature being fetched
   private queued = new Map<string, Job>(); // at most one waiting request per item: a newer window replaces it
-  private failures = new Map<string, { count: number; until: number }>();
+  private failures = new Map<string, { count: number; until: number; geom: string }>();
   private active = 0;
 
   constructor(
@@ -71,15 +73,17 @@ export class PeakCache {
   }
 
   private request(projectId: string, key: string, it: ItemState, visT0: number, visT1: number, pps: number): void {
+    const geom = geomKey(it);
     const fail = this.failures.get(key);
-    if (fail && this.now() < fail.until) return;
+    if (fail && fail.geom !== geom) this.failures.delete(key); // the item changed: an earlier failure says nothing about it
+    else if (fail && this.now() < fail.until) return;
     const w = peakWindow(it, visT0, visT1, pps);
     if (w.t1 <= w.t0) return;
-    const geom = geomKey(it);
     const sig = `${geom}|${w.t0.toFixed(2)}|${w.bins}`;
     if (this.inflight.get(key) === sig || this.queued.get(key)?.sig === sig) return;
     const run = async () => {
       let ok = false;
+      let clientError = false; // 4xx: the server refuses this request, retrying soon will not help
       try {
         const url = `/api/projects/${encodeURIComponent(projectId)}/peaks/${encodeURIComponent(it.item_id)}?bins=${w.bins}&t0=${w.t0}&t1=${w.t1}`;
         const res = await this.fetchImpl(url, { credentials: 'same-origin' });
@@ -88,14 +92,14 @@ export class PeakCache {
           const t1 = Number(res.headers.get('X-Rovox-T1') ?? w.t1);
           this.store(key, { geom, t0, t1, bins: w.bins, data: new Int8Array(await res.arrayBuffer()) });
           ok = true;
-        }
+        } else clientError = res.status >= 400 && res.status < 500;
       } catch {
         /* counted as a failure below */
       }
       if (ok) {
         this.failures.delete(key);
         this.onReady();
-      } else this.fail(key);
+      } else this.fail(key, geom, clientError);
     };
     this.queued.set(key, { sig, run });
     this.next();
@@ -107,11 +111,18 @@ export class PeakCache {
     while (this.entries.size > PEAK_CACHE_LIMIT) this.entries.delete(this.entries.keys().next().value!);
   }
 
-  private fail(key: string): void {
-    const count = (this.failures.get(key)?.count ?? 0) + 1;
+  private fail(key: string, geom: string, clientError: boolean): void {
+    const prev = this.failures.get(key);
+    const count = (prev && prev.geom === geom ? prev.count : 0) + 1;
+    const delays = clientError ? PEAK_BACKOFF_MS : PEAK_RETRY_MS;
     this.failures.delete(key);
-    this.failures.set(key, { count, until: this.now() + PEAK_BACKOFF_MS[Math.min(count, PEAK_BACKOFF_MS.length) - 1]! });
+    this.failures.set(key, { count, until: this.now() + delays[Math.min(count, delays.length) - 1]!, geom });
     while (this.failures.size > PEAK_CACHE_LIMIT) this.failures.delete(this.failures.keys().next().value!);
+  }
+
+  /** Forget all failures (a reconnect or a fresh `welcome`): the server may have been down, so everything is worth retrying. */
+  resetFailures(): void {
+    this.failures.clear();
   }
 
   private next(): void {

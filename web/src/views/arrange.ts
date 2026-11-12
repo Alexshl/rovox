@@ -101,6 +101,10 @@ export class ArrangeView {
 
   constructor(private readonly app: App) {
     this.peaks = new PeakCache(() => this.draw());
+    app.welcomed.on(() => {
+      this.peaks.resetFailures();
+      this.draw();
+    });
     this.rulerBox.append(this.rulerCanvas);
     this.lanes.append(this.lanesCanvas);
     const lanesWrap = h('div', { class: 'lanes-wrap' }, this.scroller, this.lanes, this.empty);

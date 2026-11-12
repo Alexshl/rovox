@@ -4,7 +4,7 @@
 // Browser side of the audio stream (task 330): Opus packets from the WebSocket -> WebCodecs AudioDecoder -> AudioWorklet
 // with a 150 ms jitter buffer. The audio context is created from a user gesture (autoplay policy).
 import workletUrl from './player.worklet.ts?worker&url';
-import { STREAM_RATE, DEFAULT_TARGET_MS } from './jitter';
+import { STREAM_RATE, DEFAULT_TARGET_MS, epochNewer } from './jitter';
 import type { AudioPacket } from '../net/protocol';
 
 export interface AudioStats {
@@ -22,6 +22,9 @@ export interface AudioStats {
   lastPacketAt: number;
   error?: string;
 }
+
+/** Frames in one packet when no two packets of an epoch have been seen yet (20 ms). */
+const DEFAULT_PACKET_FRAMES = 960;
 
 export function webCodecsOpusSupported(): boolean {
   return typeof AudioDecoder !== 'undefined' && typeof EncodedAudioChunk !== 'undefined' && typeof AudioWorkletNode !== 'undefined';
@@ -49,6 +52,8 @@ export class BrowserAudio {
   // Chrome's Opus AudioDecoder restamps its output, so packet metadata is matched by order (decoder output is FIFO).
   private meta: { epoch: number; pos: number }[] = [];
   private lastSeq = -1;
+  private lastPos: number | null = null; // timeline sample of the last accepted packet
+  private packetFrames = DEFAULT_PACKET_FRAMES;
   private report: { t: number; pos: number | null; playing: boolean } | null = null;
   private listeners = new Set<() => void>();
   private statListeners = new Set<() => void>();
@@ -121,10 +126,17 @@ export class BrowserAudio {
     this.flush();
   }
 
+  /** The epoch moved on but the audio continues where the buffer ends (a clock resync of the server): keep what is buffered. */
+  private adoptEpoch(epoch: number): void {
+    this.stats.epoch = epoch;
+    for (const m of this.meta) m.epoch = epoch;
+  }
+
   flush(): void {
     this.node?.port.postMessage({ type: 'flush' });
     this.meta = [];
     this.lastSeq = -1;
+    this.lastPos = null;
     this.report = null;
     this.resetDecoder();
   }
@@ -133,13 +145,22 @@ export class BrowserAudio {
     if (!this.stats.enabled || !this.decoder) return;
     this.stats.packets++;
     this.stats.lastPacketAt = performance.now();
-    if (p.epoch < this.stats.epoch) {
-      this.stats.stale++;
-      return;
+    if (p.epoch !== this.stats.epoch) {
+      if (!epochNewer(p.epoch, this.stats.epoch)) {
+        this.stats.stale++;
+        return;
+      }
+      const contiguous = this.lastPos !== null && Math.abs(p.samplePos - (this.lastPos + this.packetFrames)) <= this.packetFrames;
+      if (contiguous) this.adoptEpoch(p.epoch);
+      else this.setEpoch(p.epoch);
     }
-    if (p.epoch > this.stats.epoch) this.setEpoch(p.epoch);
+    if (this.lastPos !== null && this.lastSeq >= 0 && p.seq === this.lastSeq + 1) {
+      const d = p.samplePos - this.lastPos;
+      if (d > 0 && d <= 4800) this.packetFrames = d;
+    }
     if (this.lastSeq >= 0 && p.seq !== this.lastSeq + 1 && !p.discontinuity) this.stats.gaps++;
     this.lastSeq = p.seq;
+    this.lastPos = p.samplePos;
     if (this.decoder.state !== 'configured') return;
     try {
       this.decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: p.seq, data: p.opus }));

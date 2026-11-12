@@ -176,6 +176,33 @@ describe('reconnect', () => {
     expect(ws2.sent.some((m) => m.t === 'sub' && m.project_id === 'p_1')).toBe(true);
   });
 
+  it('forgets the old pidx on close and emits `welcomed` again after the reconnect', async () => {
+    const { app, ws } = await boot();
+    const store = app.projects.get('p_1')!;
+    expect(store.pidx).toBe(1);
+    let welcomes = 0;
+    app.welcomed.on(() => welcomes++);
+    ws.close();
+    expect(store.pidx).toBe(-1); // meters of a restarted server cannot land on this project
+    await tick(1500);
+    await tick(300);
+    expect(welcomes).toBe(1);
+    expect(store.pidx).toBe(1); // the fresh snapshot
+  });
+
+  it('drops marks above the revision of the new snapshot (the server lost that work), keeps the others', async () => {
+    const { app, ws } = await boot();
+    const store = app.projects.get('p_1')!;
+    const mark = (revision: number) => ({ session: 'm1', label: 'Claude', at: 1, revision, undoLabel: 'x', op: 'update' as const });
+    store.marks.set('trk_old', mark(5));
+    store.marks.set('trk_lost', mark(99)); // the snapshot says revision 10
+    ws.close();
+    await tick(1500);
+    await tick(300);
+    expect(store.marks.has('trk_old')).toBe(true);
+    expect(store.marks.has('trk_lost')).toBe(false);
+  });
+
   it('rebuilds the agent marks from the activity log so Accept is enabled after a reload', async () => {
     activity = [{ t: '2026-11-12T10:00:00Z', origin: { kind: 'mcp', session: 'm1', label: 'Claude' }, name: 'track.update', params: { track_id: 'trk_a', volume_db: -3 }, ok: true, revision: 12, mutating: true }];
     const { app } = await boot();
@@ -227,5 +254,32 @@ describe('render dialog', () => {
     expect(scrim.querySelector('.finding.error')!.textContent).toContain('network down');
     expect(buttons.every((b) => !b.disabled)).toBe(true);
     expect((scrim.querySelector('.progress') as HTMLElement).style.display).toBe('none');
+  });
+
+  it('traps Tab inside the dialog and returns the focus to the opener on close', async () => {
+    const { openRenderDialog } = await import('../src/views/render');
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    openRenderDialog({ active: { id: 'p_1', name: 'one' }, mcp: { runJob: vi.fn() } } as any);
+    const scrim = document.querySelector('.scrim')!;
+    const dialog = scrim.querySelector('.dialog')!;
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled])')];
+    const first = focusable[0]!;
+    const last = focusable[focusable.length - 1]!;
+    const tab = (el: Element, shiftKey = false) => {
+      const ev = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+      el.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    };
+    last.focus();
+    expect(tab(last)).toBe(true); // wraps instead of leaving the dialog
+    expect(document.activeElement).toBe(first);
+    expect(tab(first, true)).toBe(true);
+    expect(document.activeElement).toBe(last);
+    scrim.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(document.querySelector('.scrim')).toBeNull();
+    expect(document.activeElement).toBe(opener);
   });
 });

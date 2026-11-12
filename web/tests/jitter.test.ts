@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Rovox contributors
 
 import { describe, expect, it } from 'vitest';
-import { DriftController, JitterRing, MAX_RATE_DEVIATION, STREAM_RATE } from '../src/audio/jitter';
+import { DEADBAND_MS, DriftController, epochNewer, hermite, JitterRing, MAX_RATE_DEVIATION, STREAM_RATE } from '../src/audio/jitter';
 
 const chunk = (n: number, v = 0.5) => [new Float32Array(n).fill(v), new Float32Array(n).fill(-v)] as const;
 
@@ -95,6 +95,8 @@ function simulate(ppm: number, minutes: number, adaptive: boolean) {
   let sent = 0;
   let minBuf = Infinity;
   let maxBuf = -Infinity;
+  let corrected = 0; // blocks pulled while the controller asked for a rate other than 1
+  let pulled = 0;
   const quantaPerMinute = (60 * STREAM_RATE) / 128;
   const quanta = Math.round(minutes * quantaPerMinute);
   for (let q = 0; q < quanta; q++) {
@@ -103,14 +105,19 @@ function simulate(ppm: number, minutes: number, adaptive: boolean) {
       r.push(l, rr, sent);
       sent += packet;
     }
+    const wasPlaying = r.playing;
     r.pull(outL, outR);
+    if (wasPlaying) {
+      pulled++;
+      if (r.rate !== 1) corrected++;
+    }
     if (q > quantaPerMinute && r.playing) {
       // after the first minute
       minBuf = Math.min(minBuf, r.buffered);
       maxBuf = Math.max(maxBuf, r.buffered);
     }
   }
-  return { r, minBuf, maxBuf, target };
+  return { r, minBuf, maxBuf, target, corrected, pulled };
 }
 
 describe('clock drift compensation', () => {
@@ -126,8 +133,9 @@ describe('clock drift compensation', () => {
 
   for (const ppm of [200, -200]) {
     it(`holds the fill within the target +-50 ms with no underrun over 30 minutes at ${ppm > 0 ? '+' : ''}${ppm} ppm`, () => {
-      const { r, minBuf, maxBuf, target } = simulate(ppm, 30, true);
+      const { r, minBuf, maxBuf, target, corrected, pulled } = simulate(ppm, 30, true);
       expect(r.underruns).toBe(0);
+      expect(corrected / pulled).toBeLessThan(0.2); // the deadband keeps the rate at exactly 1 most of the time
       expect(r.overflows).toBe(0);
       expect(minBuf).toBeGreaterThanOrEqual(target - 2400);
       expect(maxBuf).toBeLessThanOrEqual(target + 2400);
@@ -149,5 +157,87 @@ describe('clock drift compensation', () => {
     expect(r.rate).toBeGreaterThan(1); // the fill is far above the target
     for (const v of l) expect(v).toBeCloseTo(0.25, 6);
     for (const v of rr) expect(v).toBeCloseTo(-0.25, 6);
+  });
+});
+
+describe('deadband', () => {
+  const ms = (n: number) => Math.round((n * STREAM_RATE) / 1000);
+
+  it('returns exactly 1 while the fill is within the deadband of the target', () => {
+    const c = new DriftController(7200);
+    for (const off of [0, 5, -5, 14, -14]) {
+      const d = new DriftController(7200);
+      expect(d.update(7200 + ms(off), 128)).toBe(1);
+    }
+    expect(c.update(7200, 128)).toBe(1);
+  });
+
+  it('starts correcting outside the deadband with at most 0.5 % and returns to exactly 1 with hysteresis', () => {
+    const c = new DriftController(7200, 0.1, 0.001); // almost no smoothing: the fill is followed at once
+    const out = c.update(7200 + ms(DEADBAND_MS + 2), 128);
+    expect(out).toBeGreaterThan(1);
+    expect(out).toBeLessThanOrEqual(1 + MAX_RATE_DEVIATION);
+    expect(c.update(7200 + ms(10), 128)).toBeGreaterThan(1); // still correcting between 5 and 15 ms
+    expect(c.update(7200 + ms(4), 128)).toBe(1);
+    expect(c.update(7200 + ms(10), 128)).toBe(1); // and stays at 1 until the deadband is left again
+    expect(c.update(7200 - ms(DEADBAND_MS + 2), 128)).toBeLessThan(1);
+  });
+
+  it('with zero drift the output equals the input bit for bit', () => {
+    const target = 7200;
+    const r = new JitterRing(STREAM_RATE * 2, target);
+    r.adaptive = true;
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5;
+    const packet = 960;
+    const total = STREAM_RATE * 10;
+    const inL = new Float32Array(total + packet);
+    const inR = new Float32Array(total + packet);
+    for (let i = 0; i < inL.length; i++) {
+      inL[i] = rnd();
+      inR[i] = rnd();
+    }
+    const outL = new Float32Array(128);
+    const outR = new Float32Array(128);
+    let sent = 0;
+    let produced = 0;
+    let read = 0;
+    for (let q = 0; q < total / 128; q++) {
+      produced += 128;
+      while (sent + packet <= produced) {
+        r.push(inL.subarray(sent, sent + packet), inR.subarray(sent, sent + packet), sent);
+        sent += packet;
+      }
+      const wasPlaying = r.playing;
+      expect(r.pull(outL, outR)).toBe(false);
+      expect(r.rate).toBe(1);
+      if (!wasPlaying) continue;
+      for (let i = 0; i < 128; i++) {
+        if (outL[i] !== inL[read + i] || outR[i] !== inR[read + i]) throw new Error(`sample ${read + i} differs`);
+      }
+      read += 128;
+    }
+    expect(read).toBeGreaterThan(total / 2);
+    expect(r.underruns).toBe(0);
+  });
+
+  it('hermite reproduces its end points and a straight line', () => {
+    expect(hermite(1, 2, 3, 4, 0)).toBe(2);
+    expect(hermite(1, 2, 3, 4, 1)).toBe(3);
+    expect(hermite(1, 2, 3, 4, 0.25)).toBeCloseTo(2.25, 12);
+    expect(hermite(0.5, 0.5, 0.5, 0.5, 0.37)).toBeCloseTo(0.5, 12);
+  });
+});
+
+describe('epoch serial arithmetic', () => {
+  it('orders 16-bit epochs across the wrap-around', () => {
+    expect(epochNewer(5, 4)).toBe(true);
+    expect(epochNewer(4, 5)).toBe(false);
+    expect(epochNewer(4, 4)).toBe(false);
+    expect(epochNewer(0, 0xffff)).toBe(true); // wrapped: 0 follows 65535
+    expect(epochNewer(0xffff, 0)).toBe(false);
+    expect(epochNewer(3, 0xfffe)).toBe(true);
+    expect(epochNewer(0x8000, 0)).toBe(false); // half the range away counts as older
+    expect(epochNewer(0x7fff, 0)).toBe(true);
   });
 });

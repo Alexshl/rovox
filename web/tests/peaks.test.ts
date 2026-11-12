@@ -4,7 +4,7 @@
 // The peaks fetcher: failures back off, one request per item (a newer window replaces the queued one), keys carry the project,
 // the cache is bounded.
 import { describe, expect, it, vi } from 'vitest';
-import { PEAK_BACKOFF_MS, PEAK_CACHE_LIMIT, PeakCache } from '../src/views/peaks';
+import { PEAK_BACKOFF_MS, PEAK_CACHE_LIMIT, PEAK_RETRY_MS, PeakCache } from '../src/views/peaks';
 import type { ItemState } from '../src/net/protocol';
 
 const item = (id: string, length = 10): ItemState => ({ item_id: id, track_id: 't', name: id, start_s: 0, length_s: length, end_s: length, muted: false, file: 'a.wav', offset_s: 0 });
@@ -94,5 +94,60 @@ describe('peak cache', () => {
     await flush();
     await flush();
     expect(c.stats().entries).toBeLessThanOrEqual(PEAK_CACHE_LIMIT);
+  });
+});
+
+describe('peak cache failure recovery', () => {
+  const status = (n: number) => vi.fn(async () => ({ ok: false, status: n }) as unknown as Response);
+
+  it('resetFailures lets every item retry at once (after a reconnect)', async () => {
+    let t = 1000;
+    const fetchImpl = status(404);
+    const c = new PeakCache(() => undefined, fetchImpl as unknown as typeof fetch, () => t);
+    c.get('p', item('a'), 0, 10, 100);
+    await flush();
+    c.get('p', item('a'), 0, 10, 100);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // backing off
+    c.resetFailures();
+    c.get('p', item('a'), 0, 10, 100);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('a change of the item geometry clears its back-off', async () => {
+    const t = 1000;
+    const fetchImpl = status(404);
+    const c = new PeakCache(() => undefined, fetchImpl as unknown as typeof fetch, () => t);
+    c.get('p', item('a'), 0, 10, 100);
+    await flush();
+    c.get('p', item('a'), 0, 10, 100);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    c.get('p', { ...item('a'), offset_s: 1 }, 0, 10, 100); // trimmed: a different source window
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries 5xx and network errors after a short capped delay, not the long back-off', async () => {
+    let t = 1000;
+    const fetchImpl = vi.fn(async () => {
+      if (fetchImpl.mock.calls.length === 1) throw new TypeError('network');
+      return { ok: false, status: 504 } as unknown as Response;
+    });
+    const c = new PeakCache(() => undefined, fetchImpl as unknown as typeof fetch, () => t);
+    c.get('p', item('a'), 0, 10, 100);
+    await flush();
+    t += PEAK_RETRY_MS[0]! + 1;
+    c.get('p', item('a'), 0, 10, 100);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 6; i++) {
+      t += PEAK_RETRY_MS[PEAK_RETRY_MS.length - 1]! + 1; // the delay never grows past the cap
+      c.get('p', item('a'), 0, 10, 100);
+      await flush();
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(8);
+    expect(PEAK_RETRY_MS[PEAK_RETRY_MS.length - 1]).toBeLessThan(PEAK_BACKOFF_MS[0]!);
   });
 });

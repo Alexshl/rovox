@@ -209,6 +209,19 @@ describe('mixer gestures', () => {
     expect(updates(ws, 'volume_db').length).toBe(before + 1);
   });
 
+  it('rebuilds the FX rows when the same plugin is removed and added again under a new id', async () => {
+    const { app } = await boot();
+    const strip = document.querySelector('.strip')!;
+    const row = strip.querySelector('.fxlist > div')!;
+    expect(row.textContent).toBe('ReaVerb');
+    app.active!.fx.set('trk_a', [{ plugin_id: 'fx_rev2', name: 'ReaVerb', type: 'reverb', enabled: true } as any]);
+    app.active!.state.emit();
+    await tick(60);
+    const after = strip.querySelector('.fxlist > div')!;
+    expect(after.textContent).toBe('ReaVerb');
+    expect(after).not.toBe(row);
+  });
+
   it('pan input sends one command per animation frame and the change event sends the exact final value', async () => {
     const { ws } = await boot();
     const pan = document.querySelector<HTMLInputElement>('.strip input.pan')!;

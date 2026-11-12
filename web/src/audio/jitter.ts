@@ -11,14 +11,21 @@ export const DEFAULT_TARGET_MS = 150;
 /** Largest deviation of the playback rate from 1 the drift controller may ask for (0.5 %, about 8 cents of pitch). */
 export const MAX_RATE_DEVIATION = 0.005;
 
+/** Fill error (ms) under which the rate stays exactly 1, and the smaller error at which a correction ends again (hysteresis). */
+export const DEADBAND_MS = 15;
+export const DEADBAND_RELEASE_MS = 5;
+
 /**
  * Keeps the buffer fill near the target against the clock drift between the server (48 kHz) and the sound card: a slow
  * proportional controller on the smoothed fill returns the playback rate to resample with (1 = untouched). Pure: it only sees
  * the fill and the number of frames output since the last call. A fill above the target speeds playback up, below slows it
  * down; the gain makes a drift of d need only d / gain of offset (200 ppm -> 2 ms), the time constant is 1 / gain (10 s).
+ * A deadband keeps the rate exactly 1 (bit-exact playback) while the fill is within DEADBAND_MS of the target; a correction
+ * starts outside it and ends once the fill is back within DEADBAND_RELEASE_MS.
  */
 export class DriftController {
   private smooth: number | null = null;
+  private correcting = false;
 
   constructor(
     public targetFrames: number,
@@ -26,6 +33,8 @@ export class DriftController {
     private readonly smoothingS = 1, // time constant of the fill low-pass (chunks arrive in 20 ms steps)
     private readonly maxDeviation = MAX_RATE_DEVIATION,
     private readonly rate = STREAM_RATE,
+    private readonly deadbandMs = DEADBAND_MS,
+    private readonly releaseMs = DEADBAND_RELEASE_MS,
   ) {}
 
   /** `buffered` frames now, `frames` output since the last call. Returns the rate for the next block. */
@@ -34,12 +43,29 @@ export class DriftController {
     if (this.smooth === null) this.smooth = buffered;
     else this.smooth += (buffered - this.smooth) * Math.min(1, dt / this.smoothingS);
     const errS = (this.smooth - this.targetFrames) / this.rate;
+    const absMs = Math.abs(errS) * 1000;
+    if (this.correcting) {
+      if (absMs <= this.releaseMs) this.correcting = false;
+    } else if (absMs >= this.deadbandMs) this.correcting = true;
+    if (!this.correcting) return 1;
     return 1 + Math.max(-this.maxDeviation, Math.min(this.maxDeviation, this.gain * errS));
   }
 
   reset(): void {
     this.smooth = null;
+    this.correcting = false;
   }
+}
+
+/** 4-point cubic Hermite (Catmull-Rom) between y1 and y2 at fraction f. */
+export function hermite(y0: number, y1: number, y2: number, y3: number, f: number): number {
+  return y1 + 0.5 * f * (y2 - y0 + f * (2 * y0 - 5 * y1 + 4 * y2 - y3 + f * (3 * (y1 - y2) + y3 - y0)));
+}
+
+/** Serial-number arithmetic on the 16-bit epoch: `a` is newer than `b` if it is ahead by less than half the range. */
+export function epochNewer(a: number, b: number): boolean {
+  const d = (a - b) & 0xffff;
+  return d !== 0 && d < 0x8000;
 }
 
 export interface JitterStats {
@@ -57,6 +83,7 @@ export class JitterRing {
   private readIdx = 0;
   private chunks: { start: number; pos: number }[] = [];
   private _playing = false;
+  private lastDev = 0; // rate deviation of the last correction
   private frac = 0; // fractional read offset (frames after readIdx) while resampling
   private readonly drift: DriftController;
   /** Adaptive resampling against clock drift; off by default so plain playback stays bit-exact. */
@@ -116,23 +143,37 @@ export class JitterRing {
       this.drift.targetFrames = this.targetFrames;
       this.rate = this.drift.update(this.buffered, n);
     } else this.rate = 1;
-    // linear interpolation between neighbours; at rate 1 the fractional part stays 0 and the samples are copied as they are
+    // cubic Hermite between neighbours while the drift controller corrects; at rate 1 the fractional part stays 0 and the samples
+    // are copied as they are. When a correction ends, its remaining fraction is run out (tiny steps) and snapped to a whole frame.
+    const rate = this.rate;
+    if (rate !== 1) this.lastDev = rate - 1;
+    let settling = rate === 1 && this.frac !== 0;
     let p = this.frac;
     let have = 0;
     for (; have < n; have++) {
       const i0 = Math.floor(p);
       const f = p - i0;
       if (i0 >= this.buffered || (f > 0 && i0 + 1 >= this.buffered)) break;
-      const k = (this.readIdx + i0) % this.capacity;
+      const base = this.readIdx + i0;
+      const k = base % this.capacity;
       if (f === 0) {
         outL[have] = this.l[k]!;
         outR[have] = this.r[k]!;
       } else {
-        const k1 = (k + 1) % this.capacity;
-        outL[have] = this.l[k]! * (1 - f) + this.l[k1]! * f;
-        outR[have] = this.r[k]! * (1 - f) + this.r[k1]! * f;
+        const km = this.slot(base - 1, base);
+        const k1 = (base + 1) % this.capacity;
+        const k2 = base + 2 < this.writeIdx ? (base + 2) % this.capacity : k1;
+        outL[have] = hermite(this.l[km]!, this.l[k]!, this.l[k1]!, this.l[k2]!, f);
+        outR[have] = hermite(this.r[km]!, this.r[k]!, this.r[k1]!, this.r[k2]!, f);
       }
-      p += this.rate;
+      if (settling) {
+        p += 1 + this.lastDev;
+        const near = Math.round(p);
+        if (Math.abs(p - near) <= Math.abs(this.lastDev)) {
+          p = near;
+          settling = false;
+        }
+      } else p += rate;
     }
     for (let i = have; i < n; i++) {
       outL[i] = 0;
@@ -171,6 +212,11 @@ export class JitterRing {
 
   stats(): JitterStats {
     return { buffered: this.buffered, underruns: this.underruns, overflows: this.overflows, playing: this._playing, pushed: this.pushed };
+  }
+
+  /** Ring slot of the absolute frame `abs` (the one before the read position), or of `fallback` if it is gone. */
+  private slot(abs: number, fallback: number): number {
+    return (abs >= 0 && abs >= this.writeIdx - this.capacity ? abs : fallback) % this.capacity;
   }
 
   private dropOldChunks(): void {

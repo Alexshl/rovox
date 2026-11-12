@@ -211,7 +211,7 @@ class Strip {
     this.canvas.setAttribute('aria-valuetext', formatDb(c.volume_db ?? 0, true));
 
     const list: PluginState[] = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
-    const fxSig = list.map((p) => `${p.name}\u0001${p.type}\u0001${p.enabled ? 1 : 0}`).join('\u0002');
+    const fxSig = list.map((p) => `${p.plugin_id}\u0001${p.name}\u0001${p.type}\u0001${p.enabled ? 1 : 0}`).join('\u0002');
     if (fxSig === this.fxSignature) return;
     this.fxSignature = fxSig;
     clear(this.fxList);
