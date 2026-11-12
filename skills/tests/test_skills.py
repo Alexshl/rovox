@@ -8,13 +8,15 @@ import os
 import sys
 import struct
 import tempfile
+import threading
 import unittest
 import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from rovox_skills import analysis, server, skills  # noqa: E402
-from rovox_skills.core import CoreError  # noqa: E402
+from rovox_skills.core import Core, CoreError  # noqa: E402
 
 
 class FakeCore:
@@ -164,6 +166,98 @@ def click_wav(path, bpm, seconds=10, rate=22050, lead_s=0.0, per_beat=1, offbeat
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(struct.pack("<%dh" % n, *samples))
+
+
+class _FakeCoreHttp:
+    """A minimal Streamable HTTP core: sessions, 404 for an unknown session, DELETE."""
+
+    def __init__(self):
+        self.sessions = set()
+        self.initializes = 0
+        self.deleted = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _reply(self, code, body=b"", headers=None):
+                self.send_response(code)
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_DELETE(self):
+                outer.deleted.append(self.headers.get("Mcp-Session-Id"))
+                outer.sessions.discard(self.headers.get("Mcp-Session-Id"))
+                self._reply(200)
+
+            def do_POST(self):
+                message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if message.get("method") == "initialize":
+                    outer.initializes += 1
+                    sid = "s%d" % outer.initializes
+                    outer.sessions.add(sid)
+                    body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {}}).encode()
+                    return self._reply(200, body, {"Content-Type": "application/json", "Mcp-Session-Id": sid})
+                if self.headers.get("Mcp-Session-Id") not in outer.sessions:
+                    return self._reply(404, b'{"error":"unknown session"}')
+                if "id" not in message:
+                    return self._reply(202)
+                envelope = {"ok": True, "data": {"echo": message["params"]["arguments"]}}
+                body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"structuredContent": envelope}}).encode()
+                self._reply(200, body, {"Content-Type": "application/json"})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d/mcp" % self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class SessionRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.core_http = _FakeCoreHttp()
+        self.addCleanup(self.core_http.stop)
+
+    def test_a_404_starts_a_new_session_and_repeats_the_call(self):
+        core = Core(self.core_http.url, "", name="skill:test")
+        self.assertEqual(core.call("x.y", a=1), {"echo": {"a": 1}})
+        self.assertEqual(self.core_http.initializes, 1)
+        self.core_http.sessions.clear()         # the core restarted
+        self.assertEqual(core.call("x.y", a=2), {"echo": {"a": 2}})
+        self.assertEqual(self.core_http.initializes, 2)
+
+    def test_close_deletes_the_session(self):
+        core = Core(self.core_http.url, "", name="skill:test")
+        core.call("x.y")
+        core.close()
+        self.assertEqual(self.core_http.deleted, ["s1"])
+
+    def test_one_session_serves_two_skill_runs_and_is_deleted_at_exit(self):
+        run = {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "analysis.tempo_map", "arguments": {"project_id": "p"}}}
+        lines = [json.dumps(dict(run, id=1)), json.dumps(dict(run, id=2))]
+        created = []
+        original = server.Core
+
+        def factory(url, token, name=None):
+            created.append(name)
+            return original(url, token, name=name)
+        original_tempo = analysis.tempo_map
+        server.Core = factory
+        analysis.tempo_map = lambda core, args: core.call("x.y", n=1)
+        try:
+            server.serve(self.core_http.url, None, stdin=io.StringIO("\n".join(lines) + "\n"), stdout=io.StringIO())
+        finally:
+            server.Core = original
+            analysis.tempo_map = original_tempo
+        self.assertEqual(len(created), 1)
+        self.assertEqual(self.core_http.initializes, 1)
+        self.assertEqual(self.core_http.deleted, ["s1"])
 
 
 class SecretTests(unittest.TestCase):

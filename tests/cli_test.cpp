@@ -37,8 +37,8 @@ fs::path cliBinary()
     return env != nullptr ? fs::path (env) : fs::path();
 }
 
-/** stdin is a pipe that carries `input` and then ends: no command can block on a terminal. */
-Process spawn (const std::vector<std::string>& args, const fs::path& dataDir, const std::string& input = {})
+/** stdin is a pipe that carries `input` and then ends (unless `keepStdin` takes over the write end): no command can block on a terminal. */
+Process spawn (const std::vector<std::string>& args, const fs::path& dataDir, const std::string& input = {}, int* keepStdin = nullptr)
 {
     int outPipe[2], errPipe[2], inPipe[2];
     REQUIRE (pipe (outPipe) == 0);
@@ -82,7 +82,11 @@ Process spawn (const std::vector<std::string>& args, const fs::path& dataDir, co
         done += (size_t) n;
     }
 
-    close (inPipe[1]);
+    if (keepStdin != nullptr)
+        *keepStdin = inPipe[1];             // the caller feeds more lines and closes it
+    else
+        close (inPipe[1]);
+
     p.outFd = outPipe[0];
     p.errFd = errPipe[0];
     fcntl (p.outFd, F_SETFL, O_NONBLOCK);
@@ -468,6 +472,121 @@ ROVOX_TEST (cli, mcp_connect_survives_a_second_initialize)
     CHECK (code == 0);
     CHECK (m.out.find ("\"id\":1") != std::string::npos);
     CHECK (m.out.find ("\"id\":2") != std::string::npos);
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
+ROVOX_TEST (cli, mcp_stdio_refuses_a_data_dir_another_process_holds)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("mcp-lock");
+    auto server = spawn ({ "serve", "--port", "0" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+
+    int code = -1;
+    auto m = run ({ "mcp" }, data, 20, code);
+    CHECK (code == 1);
+    CHECK (m.err.find ("already using") != std::string::npos);
+    CHECK (m.err.find ("--data-dir") != std::string::npos);
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
+ROVOX_TEST (cli, mcp_stdio_enforces_the_path_policy_and_allow_path)
+{
+    if (! haveCli())
+        return;
+
+    const std::string head =
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})" "\n";
+    const auto allowed = test::makeTempDir ("mcp-allowed");
+    const auto outside = test::makeTempDir ("mcp-outside");
+    const auto call = [] (const fs::path& target)
+    {
+        return json { { "jsonrpc", "2.0" }, { "id", 7 }, { "method", "tools/call" },
+                      { "params", { { "name", "project.open" }, { "arguments", { { "target", target.string() } } } } } }.dump() + "\n";
+    };
+
+    int code = -1;
+    auto denied = run ({ "mcp" }, test::makeTempDir ("d"), 60, code, head + call (outside));
+    CHECK (code == 0);
+    CHECK (denied.out.find ("FORBIDDEN_PATH") != std::string::npos);
+
+    // --allow-path lifts the refusal for that directory (the open then fails for another reason: nothing is there)
+    auto permitted = run ({ "mcp", "--allow-path", allowed.string() }, test::makeTempDir ("d"), 60, code, head + call (allowed));
+    CHECK (code == 0);
+    CHECK (permitted.out.find ("FORBIDDEN_PATH") == std::string::npos);
+    auto stillDenied = run ({ "mcp", "--allow-path", allowed.string() }, test::makeTempDir ("d"), 60, code, head + call (outside));
+    CHECK (stillDenied.out.find ("FORBIDDEN_PATH") != std::string::npos);
+}
+
+ROVOX_TEST (cli, mcp_connect_recovers_after_the_server_restarts)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("mcp-restart");
+    auto server = spawn ({ "serve", "--port", "0", "--token", "tok123" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const auto at = server.out.find ("http://127.0.0.1:");
+    REQUIRE (at != std::string::npos);
+    const int port = std::stoi (server.out.substr (at + 17));
+
+    int stdinFd = -1;
+    const std::string init =
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})" "\n";
+    auto proxy = spawn ({ "mcp", "--connect", "http://127.0.0.1:" + std::to_string (port), "--token", "tok123" }, test::makeTempDir ("d"), init, &stdinFd);
+    REQUIRE (stdinFd >= 0);
+    REQUIRE (pump (proxy, 20, [&] { return proxy.out.find ("\"id\":1") != std::string::npos; }));
+
+    // the server restarts on the same port: it knows nothing of the session
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+    auto again = spawn ({ "serve", "--port", std::to_string (port), "--token", "tok123" }, data);
+    REQUIRE (pump (again, 20, [&] { return again.out.find ("serving on") != std::string::npos; }));
+
+    const std::string list = R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})" "\n";
+    REQUIRE (write (stdinFd, list.data(), list.size()) == (ssize_t) list.size());
+    CHECK (pump (proxy, 20, [&] { return proxy.out.find ("\"id\":2") != std::string::npos; }));
+    CHECK (proxy.out.find ("\"tools\"") != std::string::npos);
+    CHECK (proxy.out.find ("\"error\"") == std::string::npos);
+
+    close (stdinFd);
+    CHECK (waitExit (proxy, 20) == 0);
+    kill (again.pid, SIGTERM);
+    CHECK (waitExit (again, 10) == 0);
+}
+
+ROVOX_TEST (cli, mcp_connect_forwards_a_cancel_while_a_call_waits)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("mcp-cancel");
+    auto server = spawn ({ "serve", "--port", "0", "--token", "tok123" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const auto at = server.out.find ("http://127.0.0.1:");
+    REQUIRE (at != std::string::npos);
+    const int port = std::stoi (server.out.substr (at + 17));
+
+    // events.poll waits 30 s for an event that never comes; the cancel behind it must reach the server while it waits
+    int code = -1;
+    const std::string input =
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})" "\n"
+        R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"events.poll","arguments":{"since_event_id":1000000,"wait_s":30}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}})" "\n";
+    const auto t0 = std::chrono::steady_clock::now();
+    auto m = run ({ "mcp", "--connect", "http://127.0.0.1:" + std::to_string (port), "--token", "tok123" }, test::makeTempDir ("d"), 60, code, input);
+    CHECK (code == 0);
+    CHECK (m.out.find ("\"id\":7") != std::string::npos);
+    CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() < 15.0);
 
     kill (server.pid, SIGTERM);
     CHECK (waitExit (server, 10) == 0);

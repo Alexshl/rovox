@@ -115,6 +115,7 @@ int main (int argc, char** argv)
     auto* mcp = app.add_subcommand ("mcp", "MCP over stdio: the same tools as 'serve', for Claude Code and other local clients");
     mcp->add_option ("--connect", o.connectUrl, "Proxy to a running 'rovox serve' (stdio to HTTP), e.g. http://127.0.0.1:4810, instead of opening the projects in this process");
     mcp->add_option ("--token", o.token, "With --connect: Bearer token (default: $ROVOX_TOKEN)");
+    mcp->add_option ("--allow-path", o.allowPaths, "Directory the tools may read besides the data dir (repeatable; default $ROVOX_ALLOWED_PATHS, ':' separated)");
     mcp->add_option ("--plugins", o.pluginsDir, "Extra plugin directory (VST3/LV2)");
     mcp->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();
     mcp->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");

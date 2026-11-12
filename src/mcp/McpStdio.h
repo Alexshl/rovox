@@ -16,8 +16,8 @@ class StdioTransport
 public:
     StdioTransport (McpServer&, std::istream& in, std::ostream& out);
 
-    /** Blocks until the input ends. Requests that cannot block run on the reader thread in arrival order; calls that wait on a
-        job run on worker threads so they never hold up the ones behind them. */
+    /** Blocks until the input ends. Tool calls run off the reader thread (calls that wait on a job on workers, the rest in arrival
+        order on one lane), so cancel and ping are handled while a call runs. */
     void run();
 
 private:

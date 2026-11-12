@@ -4,6 +4,7 @@
 #include "McpStdio.h"
 
 #include <iostream>
+#include <map>
 
 namespace rovox::mcp
 {
@@ -33,39 +34,80 @@ void StdioTransport::run()
                 write (m);
     });
 
-    // workers for requests that wait on jobs
-    std::mutex queueMutex;
-    std::condition_variable queueCv;
-    std::deque<std::function<void()>> queue;
-    bool closing = false;
-    std::vector<std::thread> workers;
+    // Two lanes besides the reader: eight workers for requests that wait on jobs, and one ordered lane for the other tool calls
+    // (they keep their arrival order but never hold up the reader, so cancel and ping are processed while one runs).
+    struct Lane
+    {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::deque<std::function<void()>> queue;
+        bool closing = false;
+        std::vector<std::thread> threads;
 
-    for (int i = 0; i < 8; ++i)
-        workers.emplace_back ([&]
+        void start (int n)
         {
-            for (;;)
-            {
-                std::function<void()> task;
-
+            for (int i = 0; i < n; ++i)
+                threads.emplace_back ([this]
                 {
-                    std::unique_lock<std::mutex> lock (queueMutex);
-                    queueCv.wait (lock, [&] { return closing || ! queue.empty(); });
+                    for (;;)
+                    {
+                        std::function<void()> task;
 
-                    if (queue.empty())
-                        return;
+                        {
+                            std::unique_lock<std::mutex> lock (mutex);
+                            cv.wait (lock, [&] { return closing || ! queue.empty(); });
 
-                    task = std::move (queue.front());
-                    queue.pop_front();
-                }
+                            if (queue.empty())
+                                return;
 
-                task();
+                            task = std::move (queue.front());
+                            queue.pop_front();
+                        }
+
+                        task();
+                    }
+                });
+        }
+
+        void push (std::function<void()> f)
+        {
+            {
+                std::lock_guard<std::mutex> lock (mutex);
+                queue.push_back (std::move (f));
             }
-        });
 
-    auto process = [this, session] (const json& msg)
+            cv.notify_one();
+        }
+
+        void finish()
+        {
+            {
+                std::lock_guard<std::mutex> lock (mutex);
+                closing = true;
+            }
+
+            cv.notify_all();
+
+            for (auto& t : threads)
+                t.join();
+        }
+    };
+
+    Lane blocking, ordered;
+    blocking.start (8);
+    ordered.start (1);
+
+    // cancel flags of requests that were handed to a lane: a cancel can arrive while the request is still queued
+    std::mutex pendingMutex;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> pendingCancel;
+
+    auto process = [this, session] (const json& msg, std::shared_ptr<std::atomic<bool>> cancelled)
     {
         RequestContext rc;
         rc.emit = [this] (const json& n) { write (n); };
+
+        if (cancelled != nullptr)
+            rc.cancelled = cancelled;
 
         if (auto response = server_.handle (*session, msg, rc))
             write (*response);
@@ -92,31 +134,45 @@ void StdioTransport::run()
             continue;
         }
 
-        if (McpServer::isRequest (msg) && server_.mayBlock (msg))
+        if (McpServer::isNotification (msg) && msg.value ("method", "") == "notifications/cancelled"
+            && msg.contains ("params") && msg["params"].is_object() && msg["params"].contains ("requestId"))
         {
+            std::lock_guard<std::mutex> lock (pendingMutex);
+
+            if (auto it = pendingCancel.find (msg["params"]["requestId"].dump()); it != pendingCancel.end())
+                it->second->store (true);
+        }
+
+        const bool isToolCall = McpServer::isRequest (msg) && msg.value ("method", "") == "tools/call";
+
+        if (isToolCall)
+        {
+            const auto key = msg["id"].dump();
+            auto cancelled = std::make_shared<std::atomic<bool>> (false);
+
             {
-                std::lock_guard<std::mutex> lock (queueMutex);
-                queue.push_back ([process, msg] { process (msg); });
+                std::lock_guard<std::mutex> lock (pendingMutex);
+                pendingCancel[key] = cancelled;
             }
 
-            queueCv.notify_one();
+            auto task = [&process, &pendingMutex, &pendingCancel, msg, key, cancelled]
+            {
+                process (msg, cancelled);
+                std::lock_guard<std::mutex> lock (pendingMutex);
+                pendingCancel.erase (key);
+            };
+
+            (server_.mayBlock (msg) ? blocking : ordered).push (std::move (task));
         }
         else
         {
-            process (msg);
+            process (msg, nullptr);
         }
     }
 
     // input closed: let running calls finish (a job wait ends at its own deadline)
-    {
-        std::lock_guard<std::mutex> lock (queueMutex);
-        closing = true;
-    }
-
-    queueCv.notify_all();
-
-    for (auto& w : workers)
-        w.join();
+    ordered.finish();
+    blocking.finish();
 
     done = true;
     pump.join();

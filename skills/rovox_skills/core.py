@@ -20,6 +20,10 @@ class CoreError(Exception):
         super().__init__("%s failed: %s: %s" % (tool, self.code, (error or {}).get("message", "")))
 
 
+class SessionExpired(RuntimeError):
+    """The core answered 404 for our session id: it restarted or dropped the session as idle."""
+
+
 class Core:
     def __init__(self, url=None, token=None, name="skill:rovox-skills", timeout=180):
         self.url = url or os.environ.get("ROVOX_URL", "http://127.0.0.1:4810/mcp")
@@ -41,12 +45,22 @@ class Core:
         try:
             return urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as e:
+            if e.code == 404 and self.session:
+                raise SessionExpired("the core no longer knows this session")
             raise RuntimeError("the core answered HTTP %d: %s" % (e.code, e.read().decode(errors="replace")[:300]))
 
-    def _request(self, method, params):
+    def _request(self, method, params, retry=True):
         self._id += 1
         message = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
-        with self._post(message) as r:
+        try:
+            response = self._post(message)
+        except SessionExpired:
+            if not retry:
+                raise
+            self.session = None     # start a new session and repeat the request once
+            self.initialize()
+            return self._request(method, params, retry=False)
+        with response as r:
             if r.headers.get("Mcp-Session-Id"):
                 self.session = r.headers["Mcp-Session-Id"]
             body = r.read().decode()
@@ -68,6 +82,19 @@ class Core:
             raise RuntimeError("initialize failed: %s" % r["error"])
         with self._post({"jsonrpc": "2.0", "method": "notifications/initialized"}):
             pass
+
+    def close(self):
+        """Ends the session (DELETE); errors are ignored, the core drops idle sessions anyway."""
+        if not self.session:
+            return
+        headers = {"Mcp-Session-Id": self.session}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        try:
+            urllib.request.urlopen(urllib.request.Request(self.url, headers=headers, method="DELETE"), timeout=5).close()
+        except (OSError, ValueError):
+            pass
+        self.session = None
 
     # -- tools ---------------------------------------------------------------------------------------------------
     def envelope(self, tool, **arguments):
