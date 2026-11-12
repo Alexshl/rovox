@@ -6,6 +6,9 @@
 // line at the bottom of this file.
 import { en } from './en';
 import { uk } from './uk';
+import { lv } from './lv';
+import { lt } from './lt';
+import { et } from './et';
 import type { MessageKey } from './uk';
 
 export type { MessageKey } from './uk';
@@ -207,6 +210,9 @@ export function errorDetail(err: ErrorLike | null | undefined): string {
 // the languages; a new one is one file + these two lines
 registerLocale('uk', 'Українська', uk);
 registerLocale('en', 'English', en);
+registerLocale('lv', 'Latviešu', lv);
+registerLocale('lt', 'Lietuvių', lt);
+registerLocale('et', 'Eesti', et);
 
 current = detectLocale();
 applyLang();
