@@ -197,7 +197,9 @@ describe('mixer gestures', () => {
     canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 60, height: 216, right: 60, bottom: 216, x: 0, y: 0, toJSON: () => ({}) });
     ptr(canvas, 'pointerdown', { y: 100 });
     ptr(canvas, 'pointermove', { y: 90 });
+    await tick(60); // the readout follows the store on the next render
     const shown = strip.querySelector('.dbread')!.textContent;
+    expect(shown).not.toBe('-40.0 dB');
     app.active!.patchTrack('trk_a', { volume_db: -40 }); // an agent moves the same fader
     await tick(60);
     expect(strip.querySelector('.dbread')!.textContent).toBe(shown);

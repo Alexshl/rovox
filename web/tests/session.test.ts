@@ -200,7 +200,7 @@ describe('socket heartbeat', () => {
     s.connect();
     vi.advanceTimersByTime(1000);
     expect(made[0]!.sent.some((m) => m.t === 'ping')).toBe(true);
-    vi.advanceTimersByTime(3500);
+    vi.advanceTimersByTime(3000); // the 4th beat (t = 4 s) sees 4 s of silence > deadMs and closes; the retry comes after the backoff
     expect(s.status).toBe('closed');
     vi.advanceTimersByTime(600);
     expect(made).toHaveLength(2);
