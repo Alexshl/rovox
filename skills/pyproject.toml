@@ -17,9 +17,11 @@ dependencies = []            # the core client and the skills use the standard l
 [project.optional-dependencies]
 # heavy analysis stays optional; the skills of this version do not need it
 analysis = ["numpy", "soundfile", "librosa"]
+# SVG engraving for notation.engrave; LilyPond and abcmidi are separate programs (apt), not pip packages
+notation = ["verovio"]
 
 [project.scripts]
 rovox-skills = "rovox_skills.cli:main"
 
 [tool.setuptools]
-packages = ["rovox_skills"]
+packages = ["rovox_skills", "rovox_skills.notation"]
