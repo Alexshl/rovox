@@ -4,7 +4,9 @@
 // Render dialog: the same preflight, loudness normalisation and post-render checks an agent gets from render.preflight /
 // render.start, driven through the MCP endpoint. Shows findings, progress, LUFS before / after and the file.
 import { clear, h } from '../lib/dom';
+import type { ToolEnvelope } from '../net/mcp';
 import type { App } from '../store/session';
+import { openModal } from './dialog';
 
 interface Finding {
   check: string;
@@ -17,8 +19,12 @@ function num(v: unknown, digits = 1): string {
   return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '-';
 }
 
+let fieldSeq = 0;
+
 function field(label: string, control: HTMLElement): HTMLElement[] {
-  return [h('label', { class: 'label', text: label }), control];
+  const id = `render-f${++fieldSeq}`;
+  control.id = id;
+  return [h('label', { class: 'label', text: label, attrs: { for: id } }), control];
 }
 
 export function openRenderDialog(app: App): void {
@@ -27,7 +33,7 @@ export function openRenderDialog(app: App): void {
 
   const format = h('select', {}, ...['wav', 'flac', 'mp3'].map((f) => h('option', { text: f, attrs: { value: f } })));
   const depth = h('select', {}, ...['24', '16', '32'].map((d) => h('option', { text: `${d} bit`, attrs: { value: d } })));
-  const target = h('input', { attrs: { type: 'number', step: '0.5', placeholder: 'без нормалізації', 'aria-label': 'Target LUFS' } });
+  const target = h('input', { attrs: { type: 'number', step: '0.5', placeholder: 'без нормалізації' } });
   const name = h('input', { attrs: { type: 'text', value: 'mix' } });
   const check = h('input', { attrs: { type: 'checkbox', checked: '' } });
   const bitrate = h('select', {}, ...['320', '256', '192', '128'].map((b) => h('option', { text: `${b} kbps`, attrs: { value: b } })));
@@ -72,15 +78,20 @@ export function openRenderDialog(app: App): void {
     bar.style.width = '0%';
     output.append(h('div', { class: 'readout muted', text: kind === 'preflight' ? 'Перевірка...' : 'Рендер...' }));
 
-    const res = await app.mcp.runJob(kind === 'preflight' ? 'render.preflight' : 'render.start', args(), (p, stage) => {
-      bar.style.width = `${Math.round(p * 100)}%`;
-      if (stage) output.firstElementChild!.textContent = stage;
-    });
-
-    progress.style.display = 'none';
-    clear(output);
-    busy = false;
-    for (const b of [preflightBtn, renderBtn]) b.disabled = false;
+    let res: ToolEnvelope;
+    try {
+      res = await app.mcp.runJob(kind === 'preflight' ? 'render.preflight' : 'render.start', args(), (p, stage) => {
+        bar.style.width = `${Math.round(p * 100)}%`;
+        if (stage && output.firstElementChild) output.firstElementChild.textContent = stage;
+      });
+    } catch (e) {
+      res = { ok: false, error: { code: 'NETWORK', message: e instanceof Error ? e.message : 'Помилка мережі' } };
+    } finally {
+      progress.style.display = 'none';
+      clear(output);
+      busy = false;
+      for (const b of [preflightBtn, renderBtn]) b.disabled = false;
+    }
 
     const job = res.data as { state?: string; result?: Record<string, any>; error?: { code: string; message: string; details?: any } } | undefined;
     if (!res.ok || !job || job.state === 'failed' || job.state === 'cancelled') {
@@ -123,36 +134,25 @@ export function openRenderDialog(app: App): void {
   preflightBtn.addEventListener('click', () => void run('preflight'));
   renderBtn.addEventListener('click', () => void run('render'));
 
-  const scrim = h(
+  const dialog = h(
     'div',
-    { class: 'scrim', attrs: { role: 'dialog', 'aria-label': 'Render' } },
+    { class: 'dialog' },
+    h('header', { text: `Render · ${project.name}` }),
     h(
       'div',
-      { class: 'dialog' },
-      h('header', { text: `Render · ${project.name}` }),
-      h(
-        'div',
-        { class: 'body' },
-        ...field('Формат', format),
-        ...field('Розрядність', depth),
-        ...field('MP3 bitrate', bitrate),
-        ...field('Target LUFS', target),
-        ...field('Назва файлу', name),
-        ...field('Check (fail on problems)', check),
-        progress,
-        output,
-      ),
-      h('footer', {}, closeBtn, preflightBtn, renderBtn),
+      { class: 'body' },
+      ...field('Формат', format),
+      ...field('Розрядність', depth),
+      ...field('MP3 bitrate', bitrate),
+      ...field('Target LUFS', target),
+      ...field('Назва файлу', name),
+      ...field('Check (fail on problems)', check),
+      progress,
+      output,
     ),
+    h('footer', {}, closeBtn, preflightBtn, renderBtn),
   );
-  const close = () => scrim.remove();
-  closeBtn.addEventListener('click', close);
-  scrim.addEventListener('pointerdown', (e) => {
-    if (e.target === scrim) close();
-  });
-  scrim.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') close();
-  });
-  document.body.append(scrim);
+  const modal = openModal('Render', dialog);
+  closeBtn.addEventListener('click', () => modal.close());
   renderBtn.focus();
 }

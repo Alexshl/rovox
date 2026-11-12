@@ -48,12 +48,13 @@ export class McpClient {
     return this.initializing;
   }
 
-  async call(tool: string, args: Record<string, unknown>): Promise<ToolEnvelope> {
+  async call(tool: string, args: Record<string, unknown>, retries = 2): Promise<ToolEnvelope> {
     await this.ensureSession();
     const res = await this.post({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/call', params: { name: tool, arguments: args } });
     if (res.status === 404) {
       this.session = null; // the session expired on the server
-      return this.call(tool, args);
+      if (retries > 0) return this.call(tool, args, retries - 1);
+      return { ok: false, error: { code: 'MCP_SESSION', message: 'MCP session lost: the server keeps answering 404' } };
     }
     const text = await res.text();
     const json = parseRpc(text);

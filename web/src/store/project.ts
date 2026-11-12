@@ -242,7 +242,39 @@ export class ProjectStore {
     }
     // events seen since the page opened are newer than the history
     this.log = [...this.log, ...rows.filter((r) => !this.log.some((l) => l.revision === r.revision))].slice(0, 200);
+    this.rebuildMarks(entries);
     this.agentChanged.emit();
+  }
+
+  /** After a reload / reconnect: re-creates the agent marks of the steps the person has not accepted yet, from the ids in their params. */
+  private rebuildMarks(entries: ActivityEntry[]): void {
+    const known = (id: string): boolean => {
+      if (this.items.has(id) || this.tracks.some((t) => t.track_id === id) || this.markers.some((m) => m.marker_id === id)) return true;
+      for (const list of this.fx.values()) if (list.some((p) => p.plugin_id === id)) return true;
+      return false;
+    };
+    const idsIn = (v: unknown, out: Set<string>, depth = 0): void => {
+      if (depth > 3 || v === null || typeof v !== 'object') return;
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof x === 'string' && k.endsWith('_id') && known(x)) out.add(x);
+        else if (Array.isArray(x)) {
+          for (const y of x) {
+            if (typeof y === 'string' && k.endsWith('_ids') && known(y)) out.add(y);
+            else idsIn(y, out, depth + 1);
+          }
+        } else idsIn(x, out, depth + 1);
+      }
+    };
+    for (const e of entries) {
+      if (!isAgent(e.origin) || e.ok === false || e.mutating === false || !e.revision || e.revision <= this.acceptedRevision) continue;
+      const ids = new Set<string>();
+      idsIn(e.params, ids);
+      for (const id of ids) {
+        const have = this.marks.get(id);
+        if (have && have.revision >= e.revision) continue;
+        this.marks.set(id, { session: e.origin.session, label: e.origin.label, at: Date.parse(e.t) || Date.now(), revision: e.revision, undoLabel: `${e.origin.label}: ${e.name}`, op: 'update' });
+      }
+    }
   }
 
   accept(upTo: number): void {
