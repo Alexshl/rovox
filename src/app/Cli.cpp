@@ -26,6 +26,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <memory>
 #include <csignal>
 #include <random>
 #include <cstdlib>
@@ -628,6 +630,22 @@ public:
 };
 } // namespace
 
+namespace
+{
+/** Paths the API and MCP may touch: the data dir plus --allow-path / $ROVOX_ALLOWED_PATHS. */
+void restrictToAllowedPaths (EngineConfig& cfg, const Options& o)
+{
+    cfg.restrictPaths = true;
+
+    for (auto& p : o.allowPaths)
+        cfg.allowedRoots.emplace_back (p);
+
+    if (const char* env = std::getenv ("ROVOX_ALLOWED_PATHS"))
+        for (auto& p : split (env, ':'))
+            cfg.allowedRoots.emplace_back (p);
+}
+} // namespace
+
 int runServe (const Options& o)
 {
     auto cfg = engineConfig (o, true);
@@ -640,14 +658,7 @@ int runServe (const Options& o)
     if (lockFd < 0)
         return fail ("cannot use data directory " + cfg.dataDir.string() + " (is it writable?)");
 
-    cfg.restrictPaths = true;
-
-    for (auto& p : o.allowPaths)
-        cfg.allowedRoots.emplace_back (p);
-
-    if (const char* env = std::getenv ("ROVOX_ALLOWED_PATHS"))
-        for (auto& p : split (env, ':'))
-            cfg.allowedRoots.emplace_back (p);
+    restrictToAllowedPaths (cfg, o);
 
     std::signal (SIGTERM, onSignal);
     std::signal (SIGINT, onSignal);
@@ -763,23 +774,114 @@ int runServe (const Options& o)
 }
 
 //==============================================================================
-/** `mcp --connect`: stdio to Streamable HTTP. Each stdin line is POSTed to /mcp; JSON and SSE replies come back as one JSON per stdout line;
-    a GET /mcp stream forwards the notifications of the server; the session is deleted at the end of input. Logs go to stderr. */
-int runMcpProxy (const Options& o)
+namespace
 {
-    httplib::Client client (o.connectUrl);
-    client.set_connection_timeout (10, 0);
-    client.set_read_timeout (600, 0);
-    const std::string token = ! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : "");
+/** `mcp --connect`: stdio to Streamable HTTP. Each stdin line is POSTed to /mcp; JSON and SSE replies come back as one JSON per stdout line
+    (SSE events are forwarded as they arrive, so progress reaches the client during a call); a GET /mcp stream forwards the notifications of the
+    server. Requests run concurrently (at most 8 in flight) so a long wait_s call does not hold up cancel, ping or other calls. A session the server
+    no longer knows (restart, idle expiry) is replaced transparently: the client's initialize is replayed and the request retried once.
+    The session is deleted at the end of input. Logs go to stderr. */
+class McpProxy
+{
+public:
+    explicit McpProxy (const Options& o)
+        : url (o.connectUrl),
+          token (! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : ""))
+    {}
 
-    std::mutex outMutex;
-    auto emit = [&outMutex] (const std::string& line)
+    int run()
+    {
+        std::string line;
+
+        while (std::getline (std::cin, line))
+        {
+            if (line.find_first_not_of (" \t\r") == std::string::npos)
+                continue;
+
+            auto request = json::parse (line, nullptr, false);
+            const bool isRequest = request.is_object() && request.contains ("id") && request.contains ("method");
+            const auto method = request.is_object() ? request.value ("method", "") : std::string();
+
+            // notifications, initialize and ping are quick and keep their order; calls go to a worker each
+            if (! isRequest || method == "initialize" || method == "ping")
+            {
+                handle (line);
+                continue;
+            }
+
+            {
+                std::unique_lock<std::mutex> lock (flightMutex);
+                flightCv.wait (lock, [&] { return inFlight < maxInFlight; });
+                ++inFlight;
+            }
+
+            std::thread ([this, line]
+            {
+                handle (line);
+                std::lock_guard<std::mutex> lock (flightMutex);
+                --inFlight;
+                flightCv.notify_all();
+            }).detach();
+        }
+
+        {
+            std::unique_lock<std::mutex> lock (flightMutex);
+            flightCv.wait (lock, [&] { return inFlight == 0; });
+        }
+
+        stopListenerThread();
+        const auto session = currentSession();
+
+        if (! session.empty())
+            makeClient (10)->Delete ("/mcp", headers (session, false));
+
+        return 0;
+    }
+
+private:
+    struct Reply
+    {
+        std::string error, contentType, sessionId, body;
+        int status = 0;
+    };
+
+    static constexpr int maxInFlight = 8;
+
+    std::unique_ptr<httplib::Client> makeClient (int readTimeoutS) const
+    {
+        auto c = std::make_unique<httplib::Client> (url);
+        c->set_connection_timeout (10, 0);
+        c->set_read_timeout (readTimeoutS, 0);
+        return c;
+    }
+
+    httplib::Headers headers (const std::string& session, bool sse) const
+    {
+        httplib::Headers h { { "Accept", sse ? "text/event-stream" : "application/json, text/event-stream" } };
+
+        if (! token.empty())
+            h.emplace ("Authorization", "Bearer " + token);
+
+        if (! session.empty())
+            h.emplace ("Mcp-Session-Id", session);
+
+        return h;
+    }
+
+    std::string currentSession()
+    {
+        std::lock_guard<std::mutex> lock (stateMutex);
+        return sessionId;
+    }
+
+    void emit (const std::string& line)
     {
         std::lock_guard<std::mutex> lock (outMutex);
         std::cout << line << "\n";
         std::cout.flush();
-    };
-    auto emitJson = [&emit] (const std::string& text)
+    }
+
+    void emitJson (const std::string& text)
     {
         auto j = json::parse (text, nullptr, false);
 
@@ -787,9 +889,10 @@ int runMcpProxy (const Options& o)
             emit (j.dump());
         else
             std::cerr << "mcp proxy: ignoring a reply that is not JSON\n";
-    };
+    }
+
     // data of every complete SSE event (lines starting "data:" joined by newlines), the rest stays in `pending`
-    auto drainSse = [&emitJson] (std::string& pending)
+    void drainSse (std::string& pending)
     {
         for (;;)
         {
@@ -815,143 +918,303 @@ int runMcpProxy (const Options& o)
             if (! data.empty())
                 emitJson (data);
         }
-    };
+    }
 
-    std::string sessionId;
-    std::atomic<bool> stopListener { false };
-    std::thread listener;
-    std::unique_ptr<httplib::Client> listenClient;
-
-    auto headers = [&] (bool withSession)
+    void feedSse (std::string& pending, const char* data, size_t n)
     {
-        httplib::Headers h { { "Accept", "application/json, text/event-stream" } };
+        pending.append (data, n);
+        std::string normalised;
 
-        if (! token.empty())
-            h.emplace ("Authorization", "Bearer " + token);
+        for (size_t i = 0; i < pending.size(); ++i)
+            if (! (pending[i] == '\r' && i + 1 < pending.size() && pending[i + 1] == '\n'))
+                normalised += pending[i];
 
-        if (withSession && ! sessionId.empty())
-            h.emplace ("Mcp-Session-Id", sessionId);
+        pending = std::move (normalised);
+        drainSse (pending);
+    }
 
-        return h;
-    };
-
-    auto stopListenerThread = [&]
+    /** POSTs one message. An SSE reply is forwarded event by event while it arrives; anything else is returned in `body`. */
+    Reply post (const std::string& line, const std::string& session)
     {
-        stopListener = true;
+        Reply r;
+        auto client = makeClient (600);
+        httplib::Request req;
+        req.method = "POST";
+        req.path = "/mcp";
+        req.headers = headers (session, false);
+        req.set_header ("Content-Type", "application/json");
+        req.body = line;
+        bool sse = false;
+        std::string pending;
 
-        if (listenClient != nullptr)
-            listenClient->stop();
-
-        if (listener.joinable())
-            listener.join();
-
-        listenClient.reset();
-        stopListener = false;
-    };
-
-    auto startListener = [&]
-    {
-        stopListenerThread();
-        listenClient = std::make_unique<httplib::Client> (o.connectUrl);
-        listenClient->set_connection_timeout (10, 0);
-        listenClient->set_read_timeout (3600, 0);
-        listener = std::thread ([&]
+        req.response_handler = [&] (const httplib::Response& res)
         {
-            std::string pending;
-            auto h = headers (true);
-            h.erase ("Accept");
-            h.emplace ("Accept", "text/event-stream");
-            auto res = listenClient->Get ("/mcp", h, [&] (const char* data, size_t n)
-            {
-                pending.append (data, n);
-                std::string normalised;
-
-                for (size_t i = 0; i < pending.size(); ++i)
-                    if (! (pending[i] == '\r' && i + 1 < pending.size() && pending[i + 1] == '\n'))
-                        normalised += pending[i];
-
-                pending = std::move (normalised);
-                drainSse (pending);
-                return ! stopListener.load();
-            });
-
-            if (! stopListener && (res == nullptr || res->status != 200))
-                std::cerr << "mcp proxy: server notifications are not available" << (res != nullptr ? " (HTTP " + std::to_string (res->status) + ")" : "") << "\n";
-        });
-    };
-
-    std::string line;
-
-    while (std::getline (std::cin, line))
-    {
-        if (line.find_first_not_of (" \t\r") == std::string::npos)
-            continue;
-
-        auto request = json::parse (line, nullptr, false);
-        const bool isInit = request.is_object() && request.value ("method", "") == "initialize";
-        const json id = request.is_object() && request.contains ("id") ? request["id"] : json (nullptr);
-
-        auto failRequest = [&] (const std::string& message)
+            r.status = res.status;
+            r.contentType = res.get_header_value ("Content-Type");
+            r.sessionId = res.get_header_value ("Mcp-Session-Id");
+            sse = res.status >= 200 && res.status < 300 && r.contentType.find ("text/event-stream") != std::string::npos;
+            return true;
+        };
+        req.content_receiver = [&] (const char* data, size_t n, uint64_t, uint64_t)
         {
-            std::cerr << "mcp proxy: " << message << "\n";
+            if (sse)
+                feedSse (pending, data, n);
+            else
+                r.body.append (data, n);
 
-            if (! id.is_null())
-                emit (json { { "jsonrpc", "2.0" }, { "id", id }, { "error", { { "code", -32603 }, { "message", message } } } }.dump());
+            return true;
         };
 
-        auto res = client.Post ("/mcp", headers (! isInit), line, "application/json");
+        auto res = client->send (req);
 
-        if (res == nullptr)
+        if (! res)
         {
-            failRequest ("cannot reach " + o.connectUrl + ": " + httplib::to_string (res.error()));
-            continue;
+            r.error = httplib::to_string (res.error());
+            return r;
         }
 
-        if (isInit && res->status == 200 && res->has_header ("Mcp-Session-Id"))
+        if (sse)
         {
-            sessionId = res->get_header_value ("Mcp-Session-Id");
-            startListener();
-        }
-
-        if (res->status == 202 || res->body.empty())
-            continue;
-
-        if (res->get_header_value ("Content-Type").find ("text/event-stream") != std::string::npos)
-        {
-            std::string pending;
-
-            for (size_t i = 0; i < res->body.size(); ++i)
-                if (! (res->body[i] == '\r' && i + 1 < res->body.size() && res->body[i + 1] == '\n'))
-                    pending += res->body[i];
-
             pending += "\n\n";
             drainSse (pending);
         }
-        else if (res->status >= 200 && res->status < 300)
+
+        return r;
+    }
+
+    /** Replaces a session the server no longer knows by replaying the client's initialize. True if a usable session exists afterwards. */
+    bool reinitialize (const std::string& stale)
+    {
+        std::lock_guard<std::mutex> lock (reinitMutex);
+        std::string initLine;
+
         {
-            emitJson (res->body);
+            std::lock_guard<std::mutex> state (stateMutex);
+
+            if (sessionId != stale)
+                return true;                        // another request has already done it
+
+            initLine = initializeLine;
+        }
+
+        if (initLine.empty())
+            return false;
+
+        auto r = post (initLine, "");
+
+        if (! r.error.empty() || r.status != 200 || r.sessionId.empty())
+        {
+            std::cerr << "mcp proxy: cannot start a new session: " << (r.error.empty() ? "HTTP " + std::to_string (r.status) : r.error) << "\n";
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> state (stateMutex);
+            sessionId = r.sessionId;
+        }
+
+        post (R"({"jsonrpc":"2.0","method":"notifications/initialized"})", r.sessionId);
+
+        if (! stale.empty())
+            makeClient (10)->Delete ("/mcp", headers (stale, false));
+
+        std::cerr << "mcp proxy: the server dropped the session; started a new one\n";
+        kickListener();
+        return true;
+    }
+
+    void failRequest (const json& id, const std::string& message)
+    {
+        std::cerr << "mcp proxy: " << message << "\n";
+
+        if (! id.is_null())
+            emit (json { { "jsonrpc", "2.0" }, { "id", id }, { "error", { { "code", -32603 }, { "message", message } } } }.dump());
+    }
+
+    void handle (const std::string& line)
+    {
+        auto request = json::parse (line, nullptr, false);
+        const std::string method = request.is_object() ? request.value ("method", "") : std::string();
+        const bool isInit = method == "initialize";
+        const json id = request.is_object() && request.contains ("id") ? request["id"] : json (nullptr);
+
+        Reply r;
+
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const auto session = isInit ? std::string() : currentSession();
+            r = post (line, session);
+
+            if (r.error.empty() && r.status == 404 && attempt == 0 && ! isInit && ! session.empty() && method != "notifications/cancelled" && reinitialize (session))
+                continue;
+
+            break;
+        }
+
+        if (! r.error.empty())
+        {
+            failRequest (id, "cannot reach " + url + ": " + r.error);
+            return;
+        }
+
+        if (isInit && r.status == 200 && ! r.sessionId.empty())
+        {
+            std::string old;
+
+            {
+                std::lock_guard<std::mutex> state (stateMutex);
+                old = sessionId;
+                sessionId = r.sessionId;
+                initializeLine = line;
+            }
+
+            if (! old.empty() && old != r.sessionId)
+                makeClient (10)->Delete ("/mcp", headers (old, false));
+
+            kickListener();
+        }
+
+        if (r.status == 202 || r.body.empty())
+            return;
+
+        if (r.status >= 200 && r.status < 300)
+        {
+            emitJson (r.body);
+            return;
+        }
+
+        auto body = json::parse (r.body, nullptr, false);
+
+        if (body.is_object() && body.contains ("error") && ! id.is_null())
+        {
+            body["id"] = id;
+            emit (body.dump());
         }
         else
         {
-            auto body = json::parse (res->body, nullptr, false);
-
-            if (body.is_object() && body.contains ("error") && ! id.is_null())
-            {
-                body["id"] = id;
-                emit (body.dump());
-            }
-            else
-            {
-                failRequest ("server answered HTTP " + std::to_string (res->status));
-            }
+            failRequest (id, "server answered HTTP " + std::to_string (r.status));
         }
     }
 
-    if (! sessionId.empty())
-        client.Delete ("/mcp", headers (true));
+    //==========================================================================
+    // GET /mcp stream: runs for as long as the proxy does, reconnecting with backoff and after a new session
 
-    stopListenerThread();
-    return 0;
+    void kickListener()
+    {
+        {
+            std::lock_guard<std::mutex> lock (listenMutex);
+
+            if (! listener.joinable())
+                listener = std::thread ([this] { listenLoop(); });
+            else if (listenClient != nullptr)
+                listenClient->stop();
+        }
+
+        listenCv.notify_all();
+    }
+
+    void stopListenerThread()
+    {
+        std::thread t;
+
+        {
+            std::lock_guard<std::mutex> lock (listenMutex);
+            stopListener = true;
+
+            if (listenClient != nullptr)
+                listenClient->stop();
+
+            t = std::move (listener);
+        }
+
+        listenCv.notify_all();
+
+        if (t.joinable())
+            t.join();
+    }
+
+    void listenLoop()
+    {
+        int backoffS = 1, lastLogged = 0;
+
+        for (;;)
+        {
+            const auto session = currentSession();
+            int status = 0;
+
+            if (! session.empty())
+            {
+                {
+                    std::lock_guard<std::mutex> lock (listenMutex);
+
+                    if (stopListener)
+                        return;
+
+                    listenClient = makeClient (3600);
+                }
+
+                std::string pending;
+                auto res = listenClient->Get ("/mcp", headers (session, true), [&] (const char* data, size_t n)
+                {
+                    feedSse (pending, data, n);
+                    return ! stopListener.load();
+                });
+
+                {
+                    std::lock_guard<std::mutex> lock (listenMutex);
+                    listenClient.reset();
+                }
+
+                status = res != nullptr ? res->status : -1;
+
+                if (status == 200)
+                    backoffS = 1;
+            }
+
+            if (stopListener)
+                return;
+
+            if (currentSession() != session)
+                continue;                           // a new session: reconnect at once
+
+            if (status == 404)
+            {
+                reinitialize (session);
+            }
+            else if (status != 0 && status != 200 && status != lastLogged)
+            {
+                lastLogged = status;
+                std::cerr << "mcp proxy: server notifications are not available" << (status > 0 ? " (HTTP " + std::to_string (status) + ")" : "") << "\n";
+            }
+
+            const auto wait = status == 200 || status == 0 ? std::chrono::seconds (0) + std::chrono::milliseconds (200) : std::chrono::milliseconds (backoffS * 1000);
+
+            if (status != 200 && status != 0)
+                backoffS = std::min (backoffS * 2, 30);
+
+            std::unique_lock<std::mutex> lock (listenMutex);
+            listenCv.wait_for (lock, wait, [&] { return stopListener.load(); });
+
+            if (stopListener)
+                return;
+        }
+    }
+
+    const std::string url, token;
+    std::mutex outMutex, stateMutex, reinitMutex, flightMutex, listenMutex;
+    std::condition_variable flightCv, listenCv;
+    int inFlight = 0;
+    std::string sessionId, initializeLine;
+    std::atomic<bool> stopListener { false };
+    std::thread listener;
+    std::unique_ptr<httplib::Client> listenClient;
+};
+} // namespace
+
+int runMcpProxy (const Options& o)
+{
+    McpProxy proxy (o);
+    return proxy.run();
 }
 
 //==============================================================================
@@ -964,7 +1227,19 @@ int runMcp (const Options& o)
     std::signal (SIGTERM, onSignal);
     std::signal (SIGINT, onSignal);
 
-    EngineHost host (engineConfig (o, true));
+    auto cfg = engineConfig (o, true);
+    std::string holder;
+    const int lockFd = lockDataDir (cfg.dataDir, holder);
+
+    if (lockFd == -2)
+        return fail ("another rovox process (pid " + holder + ") is already using " + cfg.dataDir.string() + ". Stop it, use `rovox mcp --connect` to share it, or use a different --data-dir.");
+
+    if (lockFd < 0)
+        return fail ("cannot use data directory " + cfg.dataDir.string() + " (is it writable?)");
+
+    restrictToAllowedPaths (cfg, o);
+
+    EngineHost host (cfg);
     EventHub hub;
     ProjectManager pm (host, hub);
     CommandRegistry registry;

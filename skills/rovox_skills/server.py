@@ -103,17 +103,30 @@ def _handle(message, core_factory):
 
 
 def serve(url=None, token=None, stdin=sys.stdin, stdout=sys.stdout):
-    for line in stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-        except ValueError:
-            stdout.write(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}) + "\n")
-            stdout.flush()
-            continue
-        response = handle(message, lambda name: Core(url, token, name=name), token)
-        if response is not None:
-            stdout.write(json.dumps(response) + "\n")
-            stdout.flush()
+    cores = {}      # one core session per origin name, reused by every call of this process and deleted at exit
+
+    def core_factory(name):
+        if name not in cores:
+            cores[name] = Core(url, token, name=name)
+        return cores[name]
+
+    try:
+        for line in stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                stdout.write(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}) + "\n")
+                stdout.flush()
+                continue
+            response = handle(message, core_factory, token)
+            if response is not None:
+                stdout.write(json.dumps(response) + "\n")
+                stdout.flush()
+    finally:
+        for core in cores.values():
+            close = getattr(core, "close", None)
+            if close is not None:
+                close()
