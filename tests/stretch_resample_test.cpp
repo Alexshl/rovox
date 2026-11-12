@@ -258,3 +258,58 @@ ROVOX_TEST (stretch, reaper_stretch_tone_is_only_set_for_stretched_preserve_pitc
     renderTone (env, dir, itemRpp (1.0, "PLAYRATE 1.0583 0 0 -1 0 0.0025"), sr, false, false, &flagged);
     CHECK (! flagged);                                                  // resampled (pitch follows speed)
 }
+
+// Guards the pass-through decision in HighQualityResamplerReader (cmake/patches/tracktion-rovox.patch): a playrate-1 clip at the project rate must be copied
+// bit-exact for its whole length. The per-block speed ratio comes from floating-point time ranges and can be 1 +- epsilon; if that flipped the reader into the
+// sinc converter mid-clip, the samples after the flip would no longer equal the source.
+ROVOX_TEST (stretch, playrate_one_clip_at_fractional_positions_stays_pass_through_bit_exact)
+{
+    test::Env env;
+    const double fs = 44100.0;
+    const double lengthS = 3.0;
+    std::vector<float> src ((size_t) (8.0 * fs));
+    uint32_t seed = 12345u;
+
+    for (auto& v : src)
+    {
+        seed = seed * 1664525u + 1013904223u;
+        v = (float) ((int) (seed >> 10) - (1 << 21)) / 8388608.0f;        // on the 24-bit grid, so the 24-bit render can hold it exactly
+    }
+
+    std::vector<std::pair<double, double>> cases { { 1.2345678, 0.3333333 }, { 0.0, 0.0 }, { 0.5, 1.0 / 3.0 }, { 2.718281828, 0.141592653 } };
+    seed = 777u;
+
+    for (int k = 0; k < 4; ++k)
+    {
+        seed = seed * 1664525u + 1013904223u;
+        const double start = 0.1 + (double) (seed >> 8) / (double) (1u << 24) * 2.0;
+        seed = seed * 1664525u + 1013904223u;
+        cases.emplace_back (start, (double) (seed >> 8) / (double) (1u << 24) * 2.0);
+    }
+
+    for (auto& [start, offset] : cases)
+    {
+        const auto dir = test::makeTempDir ("passthrough");
+        test::writeWav (dir / "item.wav", { src }, fs, 24);
+        const auto rpp = "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  TEMPO 120 4 4 0\n"
+                         "  <TRACK {AAAAAAAA-0000-0000-0000-0000000000B1}\n    NAME \"T\"\n    ISBUS 0 0\n"
+                         "    <ITEM\n      POSITION " + std::to_string (start) + "\n      SOFFS " + std::to_string (offset) + "\n      LENGTH " + std::to_string (lengthS)
+                         + "\n      PLAYRATE 1 1 0 -1 0 0.0025\n      <SOURCE WAVE\n        FILE \"item.wav\"\n      >\n    >\n  >\n>\n";
+        double sr = 0;
+        const auto out = renderRpp (env, dir, rpp, sr);
+        CHECK_NEAR (sr, fs, 0.5);
+
+        const auto startS = (long long) std::llround (start * fs), offS = (long long) std::llround (offset * fs);
+        const auto from = (size_t) startS + 4096, to = std::min (out.size(), (size_t) (startS + (long long) (lengthS * fs)) - 4096);
+        REQUIRE (to > from + 44100);
+        size_t bad = 0, firstBad = 0;
+
+        for (size_t i = from; i < to; ++i)
+            if (out[i] != src[(size_t) ((long long) i - startS + offS)] && bad++ == 0)
+                firstBad = i;
+
+        std::cerr << "    start " << start << " offset " << offset << ": " << bad << " mismatching samples of " << to - from
+                  << (bad > 0 ? ", first at " + std::to_string (firstBad) : std::string()) << "\n";
+        CHECK (bad == 0);
+    }
+}

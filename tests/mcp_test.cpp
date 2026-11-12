@@ -1946,3 +1946,97 @@ ROVOX_TEST (mcp, project_catalog_tool_lists_disk_projects)
     CHECK (found);
     CHECK (h.data ("project.open", { { "target", id } }).contains ("project_id"));
 }
+
+ROVOX_TEST (mcp, midi_edit_of_500_notes_is_fast_one_undo_step_and_reads_back)
+{
+    Harness h;
+    const auto project = h.newProject();
+    const auto track = h.data ("track.create", { { "project_id", project }, { "name", "Keys" } })["track_id"].get<std::string>();
+    const auto item = h.data ("item.create_midi", { { "project_id", project }, { "track_id", track } })["item_id"].get<std::string>();
+
+    json add = json::array();
+
+    for (int i = 0; i < 500; ++i)
+        add.push_back ({ { "pitch", 30 + i % 60 }, { "start_qn", i * 0.25 }, { "length_qn", 0.2 }, { "velocity", 20 + i % 100 } });
+
+    const auto stepsBefore = h.data ("history.list", { { "project_id", project } })["undo"].size();
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto r = h.tool ("midi.edit", { { "project_id", project }, { "item_id", item }, { "add", add } });
+    const auto ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
+    REQUIRE (r["ok"] == true);
+    std::cerr << "    midi.edit with 500 notes: " << ms << " ms\n";
+    CHECK (ms < 100.0);
+    CHECK (h.data ("history.list", { { "project_id", project } })["undo"].size() == stepsBefore + 1);
+
+    const auto notes = h.data ("midi.get", { { "project_id", project }, { "item_id", item } })["notes"];
+    REQUIRE (notes.size() == 500);
+
+    for (int i = 0; i < 500; ++i)
+    {
+        CHECK (notes[(size_t) i]["pitch"] == 30 + i % 60);
+        CHECK_NEAR (notes[(size_t) i]["start_qn"].get<double>(), i * 0.25, 1.0e-9);
+        CHECK_NEAR (notes[(size_t) i]["length_qn"].get<double>(), 0.2, 1.0e-9);
+        CHECK (notes[(size_t) i]["velocity"] == 20 + i % 100);
+    }
+
+    CHECK (h.tool ("undo", { { "project_id", project } })["ok"] == true);
+    CHECK (h.data ("midi.get", { { "project_id", project }, { "item_id", item } })["notes"].empty());
+}
+
+ROVOX_TEST (mcp, midi_transpose_shifts_exactly_errors_or_folds_out_of_range_notes_in_one_undo_step)
+{
+    Harness h;
+    const auto project = h.newProject();
+    const auto track = h.data ("track.create", { { "project_id", project }, { "name", "Keys" } })["track_id"].get<std::string>();
+    const auto item = h.data ("item.create_midi", { { "project_id", project }, { "track_id", track },
+                                                    { "notes", json::array ({ { { "pitch", 60 }, { "start_qn", 0 }, { "length_qn", 1 } }, { { "pitch", 126 }, { "start_qn", 1 }, { "length_qn", 1 } },
+                                                                              { { "pitch", 1 }, { "start_qn", 2 }, { "length_qn", 1 } } }) } })["item_id"].get<std::string>();
+
+    auto pitches = [&]
+    {
+        std::vector<int> v;
+
+        const auto got = h.data ("midi.get", { { "project_id", project }, { "item_id", item } })["notes"];
+
+        for (auto& n : got)
+            v.push_back (n["pitch"].get<int>());
+
+        return v;
+    };
+
+    const std::vector<int> original { 60, 126, 1 };
+    REQUIRE (pitches() == original);
+
+    // +2 on the in-range notes only (note_ids select the range)
+    const auto notes = h.data ("midi.get", { { "project_id", project }, { "item_id", item } })["notes"];
+    auto steps = [&] { return h.data ("history.list", { { "project_id", project } })["undo"].size(); };
+    auto before = steps();
+    REQUIRE (h.tool ("midi.transpose", { { "project_id", project }, { "item_id", item }, { "semitones", 2 }, { "note_ids", json::array ({ notes[0]["note_id"], notes[2]["note_id"] }) } })["ok"] == true);
+    CHECK ((pitches() == std::vector<int> { 62, 126, 3 }));
+    CHECK (steps() == before + 1);
+    h.data ("undo", { { "project_id", project } });
+    CHECK (pitches() == original);
+
+    // default clamp "error": 126 + 2 leaves the range, nothing changes, no undo step
+    before = steps();
+    auto bad = h.tool ("midi.transpose", { { "project_id", project }, { "item_id", item }, { "semitones", 2 } });
+    CHECK (bad["ok"] == false);
+    CHECK (bad["error"]["code"] == "INVALID_PARAMS");
+    bad = h.tool ("midi.transpose", { { "project_id", project }, { "item_id", item }, { "semitones", 2 }, { "clamp", "error" } });
+    CHECK (bad["error"]["code"] == "INVALID_PARAMS");
+    CHECK (pitches() == original);
+    CHECK (steps() == before);
+
+    // fold: 126 + 2 = 128 -> 116; 60 -> 62; 1 + 2 = 3
+    REQUIRE (h.tool ("midi.transpose", { { "project_id", project }, { "item_id", item }, { "semitones", 2 }, { "clamp", "fold" } })["ok"] == true);
+    CHECK ((pitches() == std::vector<int> { 62, 116, 3 }));
+    CHECK (steps() == before + 1);
+    h.data ("undo", { { "project_id", project } });
+    CHECK (pitches() == original);
+
+    // folding downwards: 1 - 5 = -4 -> 8
+    REQUIRE (h.tool ("midi.transpose", { { "project_id", project }, { "item_id", item }, { "semitones", -5 }, { "clamp", "fold" } })["ok"] == true);
+    CHECK ((pitches() == std::vector<int> { 55, 121, 8 }));
+    h.data ("undo", { { "project_id", project } });
+    CHECK (pitches() == original);
+}

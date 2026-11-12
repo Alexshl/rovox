@@ -11,12 +11,13 @@ index 1993f02782b..4db6aac18a5 100644
  
      SampleCount getReadPosition() const
      {
-@@ -559,6 +559,32 @@ public:
+@@ -559,6 +559,33 @@ public:
          const auto ratio = sampleRatio * speedRatio;
          assert (ratio > 0.0);
  
 +        // ROVOX PATCH: nothing to convert (same rate, normal speed): pass the source through bit-exact; the sinc filter would change the samples
-+        const bool passThrough = (sampleRatio == 1.0 && speedRatio == 1.0);
++        // (speedRatio is derived per block from floating-point time ranges and is 1 +- epsilon for a playrate-1 clip: treat that as 1, or the reader flips to the converter mid-clip)
++        const bool passThrough = (sampleRatio == 1.0 && std::abs (speedRatio - 1.0) < 1.0e-9);
 +
 +        // on every mode change drop the filter state and re-seek the source: libsamplerate has already pulled input past readPosition, and
 +        // pass-through must not read ahead of it (nor the first converted block start from a cold filter fed from the wrong position)
@@ -44,7 +45,7 @@ index 1993f02782b..4db6aac18a5 100644
          const auto numRead = src_callback_read (src_state, 1.0 / ratio,
                                                  static_cast<long> (numFramesToDo),
                                                  interleavedOutputScratchBuffer.getView().data.data);
-@@ -571,7 +597,7 @@ public:
+@@ -571,7 +598,7 @@ public:
          }
  
          choc::buffer::copy (destBuffer, interleavedOutputScratchBuffer.getStart (numFramesToDo));

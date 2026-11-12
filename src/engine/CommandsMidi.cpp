@@ -472,7 +472,8 @@ void registerMidiCommands (CommandRegistry& r)
         }));
 
     r.add (makeProjectCommand ("midi.transpose",
-        obj ({ { "item_id", strMin (1) }, { "semitones", { { "type", "integer" }, { "minimum", -96 }, { "maximum", 96 } } }, { "note_ids", arrayOf (str()) } }, { "item_id", "semitones" }),
+        obj ({ { "item_id", strMin (1) }, { "semitones", { { "type", "integer" }, { "minimum", -96 }, { "maximum", 96 } } }, { "note_ids", arrayOf (str()) },
+               { "clamp", { { "type", "string" }, { "enum", { "error", "fold" } }, { "default", "error" } } } }, { "item_id", "semitones" }),
         anyObject(), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
@@ -490,12 +491,29 @@ void registerMidiCommands (CommandRegistry& r)
                 if (selectedNote (params, *n, wanted))
                     targets.push_back (n);
 
-            for (auto* n : targets)
-                if (n->getNoteNumber() + by < 0 || n->getNoteNumber() + by > 127)
-                    return makeError (errc::invalidParams, "transposing by " + std::to_string (by) + " moves note " + pitchName (n->getNoteNumber()) + " out of the MIDI range 0..127");
+            const bool fold = params.value ("clamp", "error") == "fold";
+
+            // fold: move by whole octaves back into 0..127 (the pitch class is kept)
+            auto target = [&] (int pitch)
+            {
+                int t = pitch + by;
+
+                if (fold)
+                {
+                    while (t < 0)   t += 12;
+                    while (t > 127) t -= 12;
+                }
+
+                return t;
+            };
+
+            if (! fold)
+                for (auto* n : targets)
+                    if (n->getNoteNumber() + by < 0 || n->getNoteNumber() + by > 127)
+                        return makeError (errc::invalidParams, "transposing by " + std::to_string (by) + " moves note " + pitchName (n->getNoteNumber()) + " out of the MIDI range 0..127 (use clamp \"fold\" to fold by octaves)");
 
             for (auto* n : targets)
-                n->setNoteNumber (n->getNoteNumber() + by, &p.edit().getUndoManager());
+                n->setNoteNumber (target (n->getNoteNumber()), &p.edit().getUndoManager());
 
             return json { { "item", itemJson (p, *clip) }, { "transposed", (int) targets.size() }, { "semitones", by } };
         }));
