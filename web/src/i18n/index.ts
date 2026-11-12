@@ -4,6 +4,9 @@
 // Message catalogs and locale-aware formatting. Ukrainian (uk.ts) is the source catalog: its keys are the typed MessageKey set and
 // every other catalog must be a Record<MessageKey, string>. Adding a language = one catalog file + one import and one registerLocale
 // line at the bottom of this file.
+import { et } from './et';
+import { lt } from './lt';
+import { lv } from './lv';
 import { en } from './en';
 import { uk } from './uk';
 import { ru } from './ru';
@@ -213,6 +216,9 @@ registerLocale('en', 'English', en);
 registerLocale('ru', 'Русский', ru);
 registerLocale('de', 'Deutsch', de);
 registerLocale('sv', 'Svenska', sv);
+registerLocale('lv', 'Latviešu', lv);
+registerLocale('lt', 'Lietuvių', lt);
+registerLocale('et', 'Eesti', et);
 
 current = detectLocale();
 applyLang();

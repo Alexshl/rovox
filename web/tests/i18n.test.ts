@@ -107,6 +107,15 @@ describe('t and plural', () => {
     expect(f(21)).toBe('21 дорожка');
   });
 
+  it('picks the Lithuanian plural form (one / few / other)', () => {
+    setLocale('lt');
+    const f = (n: number) => plural(n, 'picker.tracks');
+    expect(f(1)).toBe('1 takelis');
+    expect(f(2)).toBe('2 takeliai');
+    expect(f(10)).toBe('10 takelių');
+    expect(f(21)).toBe('21 takelis');
+  });
+
   it('formats numbers and sizes with the active language', () => {
     expect(fmtNumber(-14, { minimumFractionDigits: 1, maximumFractionDigits: 1 })).toMatch(/^[-−]14,0$/);
     expect(fmtBytes(4.8 * 1024 ** 3)).toBe('4,8 ГБ');
