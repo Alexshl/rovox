@@ -3,7 +3,7 @@
 
 // Project picker: every project of the server, open or only on disk (project.catalog), to open with a click or Enter, plus opening by path / id / name.
 import { clear, h } from '../lib/dom';
-import { pluralUk } from '../lib/units';
+import { fmtDuration, fmtShortDateTime, plural, t } from '../i18n';
 import type { App } from '../store/session';
 import { openModal } from './dialog';
 
@@ -22,21 +22,8 @@ export interface ServerProject {
   open?: boolean;
 }
 
-function formatDuration(s: number): string {
-  const total = Math.round(s);
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
-}
-
-/** DD.MM HH:MM (HH:MM:SS with `seconds`), local time, 24 h; '' for an unparsable value. */
-function formatShort(d: Date, seconds = false): string {
-  if (Number.isNaN(d.getTime())) return '';
-  const date = d.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit' });
-  const time = d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), hour12: false });
-  return `${date} ${time}`;
-}
-
 function formatModified(v: number | string, seconds = false): string {
-  return formatShort(new Date(typeof v === 'number' && v < 1e11 ? v * 1000 : v), seconds);
+  return fmtShortDateTime(new Date(typeof v === 'number' && v < 1e11 ? v * 1000 : v), seconds);
 }
 
 /**
@@ -45,17 +32,17 @@ function formatModified(v: number | string, seconds = false): string {
  */
 export function projectMeta(p: ServerProject, showCreated = false, seconds = false): string {
   const parts: string[] = [];
-  if (typeof p.tracks === 'number') parts.push(`${p.tracks} ${pluralUk(p.tracks, 'доріжка', 'доріжки', 'доріжок')}`);
-  if (typeof p.duration_s === 'number') parts.push(formatDuration(p.duration_s));
+  if (typeof p.tracks === 'number') parts.push(plural(p.tracks, 'picker.tracks'));
+  if (typeof p.duration_s === 'number') parts.push(fmtDuration(p.duration_s));
   const modified = p.modified !== undefined ? formatModified(p.modified, seconds) : '';
-  if (modified) parts.push(`змінено ${modified}`);
+  if (modified) parts.push(t('picker.modified', { time: modified }));
   if (showCreated && p.created_at) {
-    // same-named projects are told apart by creation time; skipped when it says the same as "змінено"
-    const created = formatShort(new Date(p.created_at), seconds);
-    if (created && created !== modified) parts.push(`створено ${created}`);
+    // same-named projects are told apart by creation time; skipped when it says the same as "modified"
+    const created = fmtShortDateTime(new Date(p.created_at), seconds);
+    if (created && created !== modified) parts.push(t('picker.created', { time: created }));
   }
-  if (p.unsaved) parts.push('незбережено');
-  // a part never breaks inside ("створено 02.11 18:05" stays on one line); the row wraps only between parts
+  if (p.unsaved) parts.push(t('picker.unsaved'));
+  // a part never breaks inside ("created 02.11 18:05" stays on one line); the row wraps only between parts
   return parts.map((s) => s.replace(/ /g, '\u00a0')).join(' · ');
 }
 
@@ -72,9 +59,9 @@ export interface ProjectPicker {
 
 /** `onOpened` runs after the user picked a project (e.g. to close the dialog around the picker). */
 export function projectPicker(app: App, onOpened?: () => void): ProjectPicker {
-  const list = h('div', { class: 'project-list', attrs: { role: 'listbox', 'aria-label': 'Проекти сервера' } });
-  const path = h('input', { attrs: { type: 'text', placeholder: 'Шлях до .rvx, id або назва проекту', 'aria-label': 'Шлях до проекту' } });
-  const go = h('button', { class: 'btn primary', text: 'Відкрити' });
+  const list = h('div', { class: 'project-list', attrs: { role: 'listbox', 'aria-label': t('picker.list') } });
+  const path = h('input', { attrs: { type: 'text', placeholder: t('picker.pathPlaceholder'), 'aria-label': t('picker.pathLabel') } });
+  const go = h('button', { class: 'btn primary', text: t('picker.open') });
   const el = h('div', { class: 'project-picker' }, list, h('div', { class: 'open-path' }, path, go));
 
   const open = (p: ServerProject) => {
@@ -110,7 +97,7 @@ export function projectPicker(app: App, onOpened?: () => void): ProjectPicker {
   const refresh = async () => {
     const projects = await fetchServerProjects(app);
     clear(list);
-    if (!projects.length) list.append(h('div', { class: 'none', text: 'На сервері ще немає проектів.' }));
+    if (!projects.length) list.append(h('div', { class: 'none', text: t('picker.empty') }));
     const nameCount = new Map<string, number>();
     for (const p of projects) nameCount.set(p.name, (nameCount.get(p.name) ?? 0) + 1);
     // same-named rows that still read alike at minute precision (imports seconds apart) get seconds
@@ -129,7 +116,7 @@ export function projectPicker(app: App, onOpened?: () => void): ProjectPicker {
         'button',
         { class: `project-row${isOpen ? ' open' : ''}`, attrs: { role: 'option', 'aria-selected': String(isOpen), type: 'button' }, title: p.path ?? p.project_id },
         h('span', { class: 'pname', text: p.name || p.project_id }),
-        isOpen ? h('span', { class: 'pbadge', text: 'відкрито' }) : null,
+        isOpen ? h('span', { class: 'pbadge', text: t('picker.opened') }) : null,
         meta ? h('span', { class: 'pmeta', text: meta }) : null,
       );
       row.addEventListener('click', () => open(p));
@@ -142,11 +129,11 @@ export function projectPicker(app: App, onOpened?: () => void): ProjectPicker {
 }
 
 export function openProjectDialog(app: App): void {
-  const closeBtn = h('button', { class: 'btn', text: 'Закрити' });
+  const closeBtn = h('button', { class: 'btn', text: t('picker.close') });
   let close = () => {};
   const picker = projectPicker(app, () => close());
-  const dialog = h('div', { class: 'dialog project-dialog' }, h('header', { text: 'Відкрити проект' }), h('div', { class: 'body' }, h('div', { class: 'full' }, picker.el)), h('footer', {}, closeBtn));
-  const modal = openModal('Відкрити проект', dialog);
+  const dialog = h('div', { class: 'dialog project-dialog' }, h('header', { text: t('picker.title') }), h('div', { class: 'body' }, h('div', { class: 'full' }, picker.el)), h('footer', {}, closeBtn));
+  const modal = openModal(t('picker.title'), dialog);
   close = modal.close;
   closeBtn.addEventListener('click', close);
   void picker.refresh().then(() => picker.focus());

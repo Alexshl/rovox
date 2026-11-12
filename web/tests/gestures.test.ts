@@ -5,6 +5,7 @@
 // Gesture robustness: shift-drag on a selected item, Escape while renaming, pointercancel, a fader that ignores outside updates
 // while dragged, one pan command per frame, and the FX popover that closes on Escape without leaking listeners.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLocale } from '../src/i18n';
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -80,6 +81,7 @@ let errors: unknown[] = [];
 const onError = (e: ErrorEvent) => errors.push(e.error ?? e.message);
 
 beforeEach(() => {
+  setLocale('uk'); // the tests assert the Ukrainian texts, whatever navigator.language says
   FakeWebSocket.instances = [];
   errors = [];
   vi.stubGlobal('WebSocket', FakeWebSocket);

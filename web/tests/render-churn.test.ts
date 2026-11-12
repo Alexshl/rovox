@@ -4,10 +4,12 @@
 // @vitest-environment jsdom
 // The worklet's 30 Hz statistics must not re-render the whole shell: they only refresh the audio button.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLocale } from '../src/i18n';
 
 const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => {
+  setLocale('uk'); // the tests assert the Ukrainian texts, whatever navigator.language says
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   document.body.innerHTML = '';

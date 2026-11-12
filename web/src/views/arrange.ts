@@ -3,6 +3,7 @@
 
 // Arrange view: ruler + lanes drawn on Canvas (virtualised: only the visible tracks and the items in the visible time window),
 // track control panels (TCP) as DOM. Edits become commands of the command layer; items touched by an agent are drawn in agent-cyan.
+import { fmtDate, t } from '../i18n';
 import { alpha, mix } from '../lib/color';
 import { clear, h, rafThrottle, sliderKeyDb, token } from '../lib/dom';
 import { type Grid, snapTime } from '../lib/snap';
@@ -67,14 +68,14 @@ type Drag =
 export class ArrangeView {
   readonly el: HTMLElement;
   private readonly rulerCanvas = h('canvas');
-  private readonly lanesCanvas = h('canvas', { attrs: { tabindex: '0', role: 'application', 'aria-label': 'Аранжування', 'aria-describedby': 'rx-arrange-hint' } });
-  private readonly hint = h('div', { class: 'sr-only', id: 'rx-arrange-hint', text: 'Стрілки ліворуч і праворуч вибирають кліп на доріжці, вгору і вниз змінюють доріжку, Enter перейменовує кліп, Delete видаляє вибране.' });
+  private readonly lanesCanvas = h('canvas', { attrs: { tabindex: '0', role: 'application', 'aria-describedby': 'rx-arrange-hint' } });
+  private readonly hint = h('div', { class: 'sr-only', id: 'rx-arrange-hint' });
   private readonly announce = h('div', { class: 'sr-only', attrs: { 'aria-live': 'polite', role: 'status' } });
   private readonly scroller = h('div', { class: 'lanes-scroll' });
   private readonly inner = h('div', { class: 'lanes-inner' });
   private readonly lanes = h('div', { class: 'lanes' });
   private readonly rulerBox = h('div', { class: 'ruler' });
-  private readonly headLabel = h('span', { class: 'label', text: 'TRACKS' });
+  private readonly headLabel = h('span', { class: 'label' });
   private readonly empty = h('div', { class: 'empty-state' });
   private pickerOnline = false;
   private pickerShown = false;
@@ -111,7 +112,7 @@ export class ArrangeView {
     this.scroller.append(this.inner);
     this.el = h(
       'section',
-      { class: 'arrange', attrs: { 'aria-label': 'Arrange' } },
+      { class: 'arrange' },
       h('div', { class: 'ruler-row' }, h('div', { class: 'head' }, this.headLabel), this.rulerBox),
       lanesWrap,
       this.tip,
@@ -138,9 +139,26 @@ export class ArrangeView {
     this.rulerCanvas.addEventListener('pointercancel', (e) => this.onCancel(e));
     this.rulerCanvas.addEventListener('dblclick', (e) => this.onRulerDouble(e));
     this.rulerCanvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    this.applyLabels();
     this.refreshPalette();
     void document.fonts?.ready.then(() => this.draw());
     requestAnimationFrame(() => this.tickAnimations());
+  }
+
+  /** The labels that exist as long as the view does (the track rows and the empty state are rebuilt by relabel()). */
+  private applyLabels(): void {
+    this.el.setAttribute('aria-label', t('a11y.arrange'));
+    this.lanesCanvas.setAttribute('aria-label', t('a11y.arrange'));
+    this.hint.textContent = t('a11y.arrangeHint');
+    this.headLabel.textContent = t('tracks.head');
+  }
+
+  /** After a language switch: static labels, the track rows (their buttons) and the empty-state card. */
+  relabel(): void {
+    this.applyLabels();
+    this.pickerShown = false;
+    this.trackSignature = '';
+    this.onStoreChanged();
   }
 
   //==========================================================================
@@ -171,15 +189,15 @@ export class ArrangeView {
     if (s) this.pickerShown = false;
 
     if (!s || !s.loaded) {
-      if (s) this.showEmpty('Завантаження проекту...');
+      if (s) this.showEmpty(t('tracks.loading'));
       else this.showProjectPicker();
       this.draw();
       return;
     }
 
-    this.headLabel.textContent = `TRACKS · ${s.tracks.length}`;
+    this.headLabel.textContent = t('tracks.headN', { n: s.tracks.length });
 
-    if (s.tracks.length === 0) this.showEmpty('Порожній проект: імпортуйте аудіо через rovox import або попросіть агента додати доріжки.');
+    if (s.tracks.length === 0) this.showEmpty(t('tracks.empty'));
 
     const signature = s.tracks.map((t) => t.track_id).join(',');
     this.inner.style.height = `${s.tracks.length * TRACK_H}px`;
@@ -207,7 +225,7 @@ export class ArrangeView {
     this.pickerOnline = this.app.status === 'open';
     clear(this.empty);
     const picker = projectPicker(this.app);
-    this.empty.append(h('div', { class: 'card' }, h('div', { text: 'Немає відкритих проектів. Створіть проект кнопкою + або відкрийте існуючий:' }), picker.el));
+    this.empty.append(h('div', { class: 'card' }, h('div', { text: t('tracks.noProjects') }), picker.el));
     this.empty.style.display = 'flex';
   }
 
@@ -489,7 +507,7 @@ export class ArrangeView {
       ctx.fillStyle = pal.ink;
       ctx.font = '10px "IBM Plex Sans", system-ui, sans-serif';
       ctx.textBaseline = 'middle';
-      const label = agent && mark ? `${item.name}  · edited by ${mark.label}` : item.name;
+      const label = agent && mark ? `${item.name}  · ${t('tracks.editedBy', { name: mark.label })}` : item.name;
       ctx.save();
       ctx.beginPath();
       ctx.rect(x, y, w - 2, STRIP_H);
@@ -962,7 +980,7 @@ export class ArrangeView {
   }
 
   private renameItem(item: ItemState): void {
-    void textDialog({ title: 'Назва айтема', label: 'Назва', value: item.name }).then((name) => {
+    void textDialog({ title: t('tracks.renameItem.title'), label: t('tracks.renameItem.label'), value: item.name }).then((name) => {
       if (name && name !== item.name) void this.app.edit('item.update', { item_id: item.item_id, name });
     });
   }
@@ -1019,7 +1037,7 @@ export class ArrangeView {
     s.state.emit();
     this.draw();
     const track = s.tracks[index];
-    this.announce.textContent = `${item.name}, доріжка ${track?.name ?? index + 1}, ${formatClock(item.start_s)}–${formatClock(item.end_s)}`;
+    this.announce.textContent = t('a11y.clip', { item: item.name, track: track?.name ?? index + 1, from: formatClock(item.start_s), to: formatClock(item.end_s) });
   }
 
   private onWheel(e: WheelEvent): void {
@@ -1078,7 +1096,7 @@ export class ArrangeView {
     const { x, y } = this.local(e, this.rulerCanvas);
     const marker = y > 6 ? this.markerAt(x) : undefined;
     if (marker) {
-      void textDialog({ title: 'Назва маркера', label: 'Назва маркера (порожньо = видалити)', value: marker.name }).then((name) => {
+      void textDialog({ title: t('tracks.renameMarker.title'), label: t('tracks.renameMarker.label'), value: marker.name }).then((name) => {
         if (name === null) return;
         void (name === '' ? this.app.edit('marker.delete', { marker_id: marker.marker_id }, { refetch: true }) : this.app.edit('marker.upsert', { markers: [{ marker_id: marker.marker_id, name }] }, { refetch: true }));
       });
@@ -1098,9 +1116,8 @@ export class ArrangeView {
       const mark = s.itemMark(it.item_id);
       const lines = [h('div', { text: it.name }), h('div', { class: 'mono', text: `${formatClock(it.start_s)} + ${formatClock(it.length_s)}  ${formatDb(it.gain_db ?? 0, true)}` })];
       if (mark) {
-        const t = new Date(mark.at);
-        const hh = (n: number) => String(n).padStart(2, '0');
-        lines.push(h('div', { class: 'by', text: `${mark.label} · ${hh(t.getHours())}:${hh(t.getMinutes())}:${hh(t.getSeconds())} · ${mark.undoLabel.replace(`${mark.label}: `, '')}` }));
+        const time = fmtDate(new Date(mark.at), { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        lines.push(h('div', { class: 'by', text: `${mark.label} · ${time} · ${mark.undoLabel.replace(`${mark.label}: `, '')}` }));
       }
       clear(this.tip);
       this.tip.append(...lines);
@@ -1187,10 +1204,10 @@ class TcpRow {
   private readonly color = h('span', { class: 'color' });
   private readonly nameEl = h('span', { class: 'name' });
   private readonly vol = h('div', { class: 'vol', attrs: { role: 'slider', tabindex: '0', 'aria-valuemin': String(SILENCE_DB), 'aria-valuemax': '12', 'aria-valuenow': '0' } }, h('i'));
-  private readonly mute = h('button', { class: 'sbtn mute', text: 'M', title: 'Mute', attrs: { 'aria-label': 'Mute' } });
-  private readonly solo = h('button', { class: 'sbtn solo', text: 'S', title: 'Solo', attrs: { 'aria-label': 'Solo' } });
-  private readonly fx = h('button', { class: 'sbtn fx', text: 'FX', title: 'FX', attrs: { 'aria-label': 'FX' } });
-  private readonly arm = h('button', { class: 'sbtn arm', text: '●', title: 'Запис недоступний у цій версії', attrs: { 'aria-label': 'Запис', disabled: '' } });
+  private readonly mute = h('button', { class: 'sbtn mute', text: 'M', title: t('mixer.mute'), attrs: { 'aria-label': t('mixer.mute') } });
+  private readonly solo = h('button', { class: 'sbtn solo', text: 'S', title: t('mixer.solo'), attrs: { 'aria-label': t('mixer.solo') } });
+  private readonly fx = h('button', { class: 'sbtn fx', text: 'FX', title: t('mixer.fx'), attrs: { 'aria-label': t('mixer.fx') } });
+  private readonly arm = h('button', { class: 'sbtn arm', text: '●', title: t('tracks.recHint'), attrs: { 'aria-label': t('tracks.rec'), disabled: '' } });
 
   constructor(
     private readonly app: App,
@@ -1229,25 +1246,25 @@ class TcpRow {
     });
   }
 
-  update(t: TrackState, index: number): void {
+  update(tr: TrackState, index: number): void {
     this.el.style.top = `${index * TRACK_H}px`;
     this.num.textContent = String(index + 1);
-    this.color.style.background = t.color;
-    if (this.nameEl.textContent !== t.name) this.nameEl.textContent = t.name;
-    this.nameEl.title = t.name;
-    this.mute.classList.toggle('on', t.mute);
-    this.solo.classList.toggle('on', t.solo);
-    const plugins = (this.store.fx.get(t.track_id) ?? []).filter((p) => p.type !== 'volume');
+    this.color.style.background = tr.color;
+    if (this.nameEl.textContent !== tr.name) this.nameEl.textContent = tr.name;
+    this.nameEl.title = tr.name;
+    this.mute.classList.toggle('on', tr.mute);
+    this.solo.classList.toggle('on', tr.solo);
+    const plugins = (this.store.fx.get(tr.track_id) ?? []).filter((p) => p.type !== 'volume');
     this.fx.classList.toggle('has', plugins.length > 0);
-    this.el.classList.toggle('selected', this.store.selectedTrack === t.track_id);
-    this.el.classList.toggle('muted', t.mute);
-    this.el.classList.toggle('agent', this.store.trackMark(t.track_id) !== undefined);
+    this.el.classList.toggle('selected', this.store.selectedTrack === tr.track_id);
+    this.el.classList.toggle('muted', tr.mute);
+    this.el.classList.toggle('agent', this.store.trackMark(tr.track_id) !== undefined);
     const bar = this.vol.firstElementChild as HTMLElement;
-    bar.style.width = `${dbToFader(t.volume_db ?? 0) * 100}%`;
-    this.vol.title = `Гучність ${formatDb(t.volume_db ?? 0, true)} (двічі клік = 0 dB)`;
-    this.vol.setAttribute('aria-label', `Гучність: ${t.name}`);
-    this.vol.setAttribute('aria-valuenow', String(Math.round((t.volume_db ?? 0) * 10) / 10));
-    this.vol.setAttribute('aria-valuetext', formatDb(t.volume_db ?? 0, true));
+    bar.style.width = `${dbToFader(tr.volume_db ?? 0) * 100}%`;
+    this.vol.title = t('tracks.volumeHint', { value: formatDb(tr.volume_db ?? 0, true) });
+    this.vol.setAttribute('aria-label', t('tracks.volume', { name: tr.name }));
+    this.vol.setAttribute('aria-valuenow', String(Math.round((tr.volume_db ?? 0) * 10) / 10));
+    this.vol.setAttribute('aria-valuetext', formatDb(tr.volume_db ?? 0, true));
   }
 
   private rename(): void {
@@ -1339,8 +1356,8 @@ class TcpRow {
     const pop = h(
       'div',
       { class: 'popover', style: { left: `${Math.min(r.left, window.innerWidth - 376)}px`, top: `${r.bottom + 4}px` } },
-      h('div', { class: 'head label', text: `FX · ${this.store.track(this.id)?.name ?? ''}` }),
-      ...(rows.length ? rows : [h('div', { class: 'row', text: 'Немає плагінів' })]),
+      h('div', { class: 'head label', text: t('tracks.fxHead', { name: this.store.track(this.id)?.name ?? '' }) }),
+      ...(rows.length ? rows : [h('div', { class: 'row', text: t('tracks.noPlugins') })]),
     );
     document.body.append(pop);
     const onDown = (ev: Event) => {

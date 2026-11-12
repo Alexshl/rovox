@@ -3,6 +3,7 @@
 
 // The application controller: the socket, the open projects (tabs), the audio stream and every action of the UI.
 // Views read state from here and call its methods; nothing else talks to the server.
+import { type ErrorLike, errorDetail, errorText, t, type MessageKey } from '../i18n';
 import { Emitter } from '../lib/dom';
 import type { Grid } from '../lib/snap';
 import { McpClient } from '../net/mcp';
@@ -33,6 +34,8 @@ export interface Toast {
   id: number;
   text: string;
   kind: 'info' | 'error';
+  /** The raw server message of an error, shown below the plain text. */
+  detail?: string;
 }
 
 export interface UiPrefs {
@@ -158,14 +161,19 @@ export class App {
     this.changed.emit();
   }
 
-  toast(text: string, kind: Toast['kind'] = 'info'): void {
-    const t = { id: this.toastId++, text, kind };
-    this.toasts.push(t);
+  toast(text: string, kind: Toast['kind'] = 'info', detail?: string): void {
+    const toast: Toast = { id: this.toastId++, text, kind, ...(detail ? { detail } : {}) };
+    this.toasts.push(toast);
     this.changed.emit();
     setTimeout(() => {
-      this.toasts = this.toasts.filter((x) => x !== t);
+      this.toasts = this.toasts.filter((x) => x !== toast);
       this.changed.emit();
     }, kind === 'error' ? 6000 : 3000);
+  }
+
+  /** An error toast: plain localised text for the error code, the raw server message on a second line. */
+  toastError(err: ErrorLike | null | undefined, fallback?: MessageKey): void {
+    this.toast(errorText(err, fallback), 'error', errorDetail(err));
   }
 
   tabStatus(p: ProjectStore): TabStatus {
@@ -178,7 +186,7 @@ export class App {
   // commands
   async cmd<T = unknown>(name: string, params: Record<string, unknown> = {}, o: CmdOptions = {}): Promise<CmdResult<T>> {
     const r = await this.socket.cmd<T>(name, params, { projectId: this.activeId, ...o });
-    if (!r.ok && r.error?.code !== 'DISCONNECTED') this.toast(`${name}: ${r.error?.message ?? 'error'}`, 'error');
+    if (!r.ok && r.error?.code !== 'DISCONNECTED') this.toast(errorText(r.error, 'toast.command'), 'error', `${name} · ${errorDetail(r.error)}`);
     return r;
   }
 
@@ -198,7 +206,7 @@ export class App {
   async editBatch(ops: { name: string; params: Record<string, unknown> }[], o: CmdOptions & { refetch?: boolean } = {}): Promise<CmdResult> {
     const p = this.active;
     const r = await this.socket.batch(ops, { projectId: this.activeId, ...o });
-    if (!r.ok) this.toast(`${r.error?.message ?? 'batch failed'}`, 'error');
+    if (!r.ok) this.toastError(r.error, 'toast.command');
     if (p) {
       if (r.ok && r.revision) p.revision = Math.max(p.revision, r.revision);
       if (!r.ok || o.refetch) this.refetchSoon(p.id, 0);
@@ -285,12 +293,12 @@ export class App {
     if (this.activeId === id) this.activeId = this.order[0];
   }
 
-  async newProject(name = 'Untitled'): Promise<void> {
+  async newProject(name = t('project.untitled')): Promise<void> {
     const r = await this.socket.cmd<{ project_id: string }>('project.new', { name });
     if (r.ok && r.data) {
       await this.listProjects();
       this.setActive(r.data.project_id);
-    } else this.toast(r.error?.message ?? 'не вдалося створити проект', 'error');
+    } else this.toastError(r.error, 'toast.projectCreate');
   }
 
   async openProject(target: string): Promise<void> {
@@ -298,13 +306,13 @@ export class App {
     if (r.ok && r.data) {
       await this.listProjects();
       this.setActive(r.data.project_id);
-    } else this.toast(r.error?.message ?? 'не вдалося відкрити проект', 'error');
+    } else this.toastError(r.error, 'toast.projectOpen');
   }
 
   async closeProject(id: string): Promise<void> {
     const r = await this.socket.cmd('project.close', { project_id: id, save: true }, { projectId: id });
     if (r.ok) await this.listProjects();
-    else this.toast(r.error?.message ?? 'не вдалося закрити проект', 'error');
+    else this.toastError(r.error, 'toast.projectClose');
   }
 
   //==========================================================================
@@ -341,7 +349,7 @@ export class App {
     const r = await this.socket.cmd<TransportState>('transport.set', params, { projectId: p.id });
 
     if (!r.ok) {
-      this.toast(r.error?.message ?? 'transport', 'error');
+      this.toastError(r.error, 'toast.transport');
       return;
     }
     if (r.data) this.applyTransport(p, r.data);
@@ -398,7 +406,7 @@ export class App {
       this.audio.disable();
       return;
     }
-    if (!(await this.audio.enable())) this.toast(this.audio.stats.error ?? 'звук недоступний', 'error');
+    if (!(await this.audio.enable())) this.toast(this.audio.stats.error ?? t('toast.audio'), 'error');
     const p = this.active;
     if (p) this.audio.setEpoch(p.transport.epoch);
   }
@@ -420,7 +428,7 @@ export class App {
     const id = p.id;
     const hist = await this.socket.cmd<{ undo: HistoryStep[]; redo: HistoryStep[] }>('history.list', {}, { projectId: id });
     if (!hist.ok || !hist.data) {
-      this.toast(hist.error?.message ?? 'не вдалося отримати історію', 'error');
+      this.toastError(hist.error, 'toast.history');
       return;
     }
     p.setHistory(hist.data);
@@ -430,8 +438,8 @@ export class App {
     for (let i = 0; i < count; i++) {
       const r = await this.socket.cmd('undo', {}, { projectId: id, ifRevision: revision });
       if (!r.ok) {
-        if (r.error?.code === 'REVISION_CONFLICT') this.toast(`Проект змінився під час відкату (скасовано кроків: ${done}) — решту не чіпаю`, 'error');
-        else if (r.error?.code !== 'DISCONNECTED') this.toast(`undo: ${r.error?.message ?? 'error'}`, 'error');
+        if (r.error?.code === 'REVISION_CONFLICT') this.toast(t('toast.undoConflict', { done }), 'error');
+        else if (r.error?.code !== 'DISCONNECTED') this.toastError(r.error, 'toast.undoFailed');
         break;
       }
       done++;
@@ -494,7 +502,7 @@ export class App {
         this.refetchSoon(m.project_id, 0);
         break;
       case 'error':
-        if (m.message) this.toast(m.message, 'error');
+        if (m.message) this.toastError({ code: m.code, message: m.message }, 'toast.command');
         break;
       default:
         break;

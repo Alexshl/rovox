@@ -4,6 +4,7 @@
 // Mixer: one strip per track and the master. Fader (dB law, double click = 0 dB, Shift-drag = fine), pan, M/S, FX list and peak
 // meters (green to -12 dBFS, amber to -3, red above; fed by the 0x02 frames at 30 Hz). Changes go through track.update with a
 // coalesce key, so a drag is one undo step.
+import { t } from '../i18n';
 import { clear, h, sliderKeyDb, token } from '../lib/dom';
 import { SILENCE_DB, clamp, dbToFader, faderToDb, formatDb, formatPan, meterPosition } from '../lib/units';
 import type { PluginState, TrackState } from '../net/protocol';
@@ -57,12 +58,12 @@ class Strip {
   private readonly nameEl = h('span');
   private readonly colorEl = h('i');
   private readonly fxList = h('div', { class: 'fxlist' });
-  private readonly pan = h('input', { class: 'pan', attrs: { type: 'range', min: '-100', max: '100', step: '1', 'aria-label': 'Pan' } });
+  private readonly pan = h('input', { class: 'pan', attrs: { type: 'range', min: '-100', max: '100', step: '1', 'aria-label': t('mixer.pan') } });
   private readonly panRead = h('div', { class: 'panread' });
   private readonly dbRead = h('div', { class: 'dbread' });
   private readonly canvas = h('canvas', { attrs: { role: 'slider', tabindex: '0', 'aria-orientation': 'vertical', 'aria-valuemin': String(SILENCE_DB), 'aria-valuemax': '12', 'aria-valuenow': '0' } });
-  private readonly mute = h('button', { class: 'sbtn mute', text: 'M', attrs: { 'aria-label': 'Mute' } });
-  private readonly solo = h('button', { class: 'sbtn solo', text: 'S', attrs: { 'aria-label': 'Solo' } });
+  private readonly mute = h('button', { class: 'sbtn mute', text: 'M', title: t('mixer.mute'), attrs: { 'aria-label': t('mixer.mute') } });
+  private readonly solo = h('button', { class: 'sbtn solo', text: 'S', title: t('mixer.solo'), attrs: { 'aria-label': t('mixer.solo') } });
   private dragging = false;
   private dragDb = 0; // the value under the pointer while dragging; external updates do not move the fader
   private lastSent = 0;
@@ -188,25 +189,25 @@ class Strip {
   private current(): { name: string; color?: string; volume_db?: number; pan?: number; mute?: boolean; solo?: boolean } {
     if (this.id === 'master') {
       const m: MasterState | undefined = this.store.master;
-      return { name: 'MASTER', volume_db: m?.volume_db, pan: m?.pan };
+      return { name: t('mixer.master'), volume_db: m?.volume_db, pan: m?.pan };
     }
     return this.store.track(this.id) ?? { name: '' };
   }
 
-  update(t: TrackState | undefined): void {
+  update(tr: TrackState | undefined): void {
     const c = this.current();
-    const name = this.id === 'master' ? 'MASTER' : (t?.name ?? c.name);
+    const name = this.id === 'master' ? t('mixer.master') : (tr?.name ?? c.name);
     this.nameEl.textContent = name;
     this.nameEl.title = name;
     if (this.id === 'master') this.nameEl.style.fontFamily = 'var(--rx-font-display)';
-    this.colorEl.style.background = this.id === 'master' ? 'var(--rx-orange)' : (t?.color ?? 'var(--rx-ink-muted)');
+    this.colorEl.style.background = this.id === 'master' ? 'var(--rx-orange)' : (tr?.color ?? 'var(--rx-ink-muted)');
     this.el.classList.toggle('agent', this.store.trackMark(this.id) !== undefined);
-    this.mute.classList.toggle('on', !!t?.mute);
-    this.solo.classList.toggle('on', !!t?.solo);
+    this.mute.classList.toggle('on', !!tr?.mute);
+    this.solo.classList.toggle('on', !!tr?.solo);
     if (document.activeElement !== this.pan) this.pan.value = String(Math.round((c.pan ?? 0) * 100));
     this.panRead.textContent = formatPan(c.pan);
     this.dbRead.textContent = formatDb(this.dragging ? this.dragDb : (c.volume_db ?? 0), true);
-    this.canvas.setAttribute('aria-label', `Гучність: ${name}`);
+    this.canvas.setAttribute('aria-label', t('tracks.volume', { name }));
     this.canvas.setAttribute('aria-valuenow', String(Math.round((c.volume_db ?? 0) * 10) / 10));
     this.canvas.setAttribute('aria-valuetext', formatDb(c.volume_db ?? 0, true));
 
@@ -215,7 +216,7 @@ class Strip {
     if (fxSig === this.fxSignature) return;
     this.fxSignature = fxSig;
     clear(this.fxList);
-    if (!list.length) this.fxList.append(h('div', { class: 'none', text: this.id === 'master' ? 'no master FX' : 'no FX' }));
+    if (!list.length) this.fxList.append(h('div', { class: 'none', text: t('mixer.noFx') }));
     // the box holds four lines: four plugins, or three and a "+N ще" line
     const shown = list.length > 4 ? 3 : 4;
     for (const p of list.slice(0, shown)) {
@@ -223,7 +224,7 @@ class Strip {
       const credit = p.type === 'rovoxdrums' ? `\n${DRUMS_CREDIT}` : '';
       this.fxList.append(h('div', { class: p.enabled ? 'on' : 'off', text: p.name, title: `${p.name} (${p.type})${credit}` }));
     }
-    if (list.length > shown) this.fxList.append(h('div', { class: 'none', text: `+${list.length - shown} ще`, title: list.slice(shown).map((p) => p.name).join(', ') }));
+    if (list.length > shown) this.fxList.append(h('div', { class: 'none', text: t('mixer.more', { n: list.length - shown }), title: list.slice(shown).map((p) => p.name).join(', ') }));
   }
 
   paint(): void {
@@ -320,7 +321,8 @@ class Strip {
 export class MixerView {
   readonly el: HTMLElement;
   private readonly strips = h('div', { class: 'strips' });
-  private readonly title = h('span', { class: 'label', text: 'MIXER' });
+  private readonly title = h('span', { class: 'label' });
+  private readonly peakLabel = h('span', { class: 'readout muted' });
   private readonly rows = new Map<string, Strip>();
   private signature = '';
   private store: ProjectStore | undefined;
@@ -329,11 +331,21 @@ export class MixerView {
   constructor(private readonly app: App) {
     this.el = h(
       'section',
-      { class: 'mixer', attrs: { 'aria-label': 'Мікшер' } },
-      h('div', { class: 'head' }, this.title, h('span', { class: 'readout muted', text: 'peak, dBFS' })),
+      { class: 'mixer' },
+      h('div', { class: 'head' }, this.title, this.peakLabel),
       this.strips,
     );
+    this.relabel();
     this.loop();
+  }
+
+  /** The labels of the section itself; the strips get theirs when they are rebuilt (their signature is reset here). */
+  relabel(): void {
+    this.el.setAttribute('aria-label', t('a11y.mixer'));
+    this.title.textContent = t('mixer.head');
+    this.peakLabel.textContent = t('mixer.peak');
+    this.signature = '';
+    this.sync();
   }
 
   sync(): void {
@@ -361,7 +373,7 @@ export class MixerView {
       this.strips.append(master.el);
     }
     for (const [id, strip] of this.rows) strip.update(id === 'master' ? undefined : s.track(id));
-    this.title.textContent = `MIXER · ${s.tracks.length}`;
+    this.title.textContent = t('mixer.headN', { n: s.tracks.length });
   }
 
   private loop = () => {

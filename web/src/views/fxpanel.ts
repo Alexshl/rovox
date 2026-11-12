@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Rovox contributors
 
 // The FX popover body: one disclosure per plugin; expanding it fetches fx.params and shows a searchable list of range sliders.
+import { t } from '../i18n';
 import { clear, h } from '../lib/dom';
 import type { PluginState } from '../net/protocol';
 import type { App } from '../store/session';
@@ -69,10 +70,10 @@ export class FxPluginSection {
   private paintHead(): void {
     this.twist.textContent = `${this.open ? '▾' : '▸'} ${this.plugin.name}`;
     this.twist.style.color = this.plugin.enabled ? 'var(--rx-ink)' : 'var(--rx-ink-muted)';
-    this.toggle.textContent = this.plugin.enabled ? 'on' : 'off';
+    this.toggle.textContent = this.plugin.enabled ? t('fx.on') : t('fx.off');
     this.toggle.classList.toggle('on', this.plugin.enabled);
     this.toggle.setAttribute('aria-pressed', String(this.plugin.enabled));
-    this.toggle.setAttribute('aria-label', `${this.plugin.name}: ${this.plugin.enabled ? 'увімкнено' : 'вимкнено'}`);
+    this.toggle.setAttribute('aria-label', t(this.plugin.enabled ? 'fx.enabled' : 'fx.disabled', { name: this.plugin.name }));
   }
 
   collapse(): void {
@@ -90,11 +91,11 @@ export class FxPluginSection {
     this.paintHead();
     if (!this.params) {
       clear(this.body);
-      this.body.append(h('div', { class: 'row fxnote', text: 'Завантаження…' }));
+      this.body.append(h('div', { class: 'row fxnote', text: t('fx.loading') }));
       const r = await this.app.cmd<{ fx?: { params?: FxParam[] } }>('fx.params', { plugin_id: this.plugin.plugin_id });
       if (!r.ok) {
         clear(this.body);
-        this.body.append(h('div', { class: 'row fxnote', text: 'Не вдалося отримати параметри' }));
+        this.body.append(h('div', { class: 'row fxnote', text: t('fx.loadFailed') }));
         return;
       }
       this.params = r.data?.fx?.params ?? [];
@@ -107,10 +108,10 @@ export class FxPluginSection {
     clear(this.body);
     const params = this.params ?? [];
     if (!params.length) {
-      this.body.append(h('div', { class: 'row fxnote', text: 'Немає параметрів' }));
+      this.body.append(h('div', { class: 'row fxnote', text: t('fx.noParams') }));
       return;
     }
-    const search = h('input', { class: 'fxsearch', attrs: { type: 'search', placeholder: 'пошук параметра', 'aria-label': 'Пошук параметра' } });
+    const search = h('input', { class: 'fxsearch', attrs: { type: 'search', placeholder: t('fx.search'), 'aria-label': t('fx.searchLabel') } });
     search.value = this.query;
     const list = h('div', { class: 'fxlist' });
     this.body.append(h('div', { class: 'row' }, search), list);
@@ -121,14 +122,14 @@ export class FxPluginSection {
       const shown = this.showAll || q ? hits : hits.slice(0, FIRST);
       for (const p of shown) list.append(this.paramRow(p));
       if (shown.length < hits.length) {
-        const more = h('button', { class: 'fxmore', text: `… ще ${hits.length - shown.length}` });
+        const more = h('button', { class: 'fxmore', text: t('fx.more', { n: hits.length - shown.length }) });
         more.addEventListener('click', () => {
           this.showAll = true;
           fill();
         });
         list.append(h('div', { class: 'row' }, more));
       }
-      if (!hits.length) list.append(h('div', { class: 'row fxnote', text: 'Нічого не знайдено' }));
+      if (!hits.length) list.append(h('div', { class: 'row fxnote', text: t('fx.nothing') }));
     };
     search.addEventListener('input', () => {
       this.query = search.value;
@@ -155,7 +156,7 @@ export class FxPluginSection {
       const sw = h('button', { class: 'fxtoggle fxswitch', attrs: { type: 'button', 'aria-label': label } });
       const paint = () => {
         const on = index() === 1;
-        sw.textContent = on ? 'on' : 'off';
+        sw.textContent = on ? t('fx.on') : t('fx.off');
         sw.classList.toggle('on', on);
         sw.setAttribute('aria-pressed', String(on));
       };
@@ -178,7 +179,7 @@ export class FxPluginSection {
     const label = `${this.plugin.name} — ${p.name}`;
     const hasDefault = this.defaults.has(p.ident);
     const range = h('input', { class: 'fxrange', attrs: { type: 'range', 'aria-label': label } });
-    range.title = hasDefault ? `${p.name} — подвійний клік або Delete/Backspace: типове значення` : p.name;
+    range.title = hasDefault ? t('fx.resetHint', { name: p.name }) : p.name;
     range.min = String(p.min);
     range.max = String(p.max);
     range.step = String((p.max - p.min) / 1000 || 0.001);
