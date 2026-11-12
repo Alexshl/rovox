@@ -715,6 +715,11 @@ ROVOX_TEST (stock, catalog_lists_the_stock_effects_and_fx_add_takes_them_by_id_o
     CHECK_NEAR (findParam (info, "b2_freq")["default"].get<double>(), 400.0, 1e-3);
     CHECK_NEAR (findParam (info, "b2_gain")["default"].get<double>(), 0.0, 1e-6);
     CHECK (findParam (info, "b1_type")["display"] == "low_shelf");
+    // named states come as choices (value = min + index); a number does not
+    REQUIRE (findParam (info, "b1_type").contains ("choices"));
+    CHECK (findParam (info, "b1_type")["choices"][0] == "low_shelf");
+    CHECK (findParam (info, "b5_on")["choices"] == json::array ({ "off", "on" }));
+    CHECK (! findParam (info, "b2_freq").contains ("choices"));
     CHECK (findParam (info, "b4_type")["display"] == "high_shelf");
     CHECK (findParam (info, "b5_on")["display"] == "off");
 

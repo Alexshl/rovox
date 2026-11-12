@@ -15,6 +15,7 @@ import type { ProjectStore } from '../store/project';
 const DRUMS_CREDIT = 'Drum samples: DRSKit by the DrumGizmo team and Jes Eiler (DRSDrums), CC BY 4.0';
 
 const SCALE_DB = [12, 6, 0, -6, -12, -20, -30, -40, -60];
+const SCALE_LABEL_ORDER = [0, 12, -60, -12, -30, 6, -6, -20, -40];
 
 class Strip {
   readonly el: HTMLElement;
@@ -139,12 +140,14 @@ class Strip {
     const list: PluginState[] = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
     clear(this.fxList);
     if (!list.length) this.fxList.append(h('div', { class: 'none', text: this.id === 'master' ? 'no master FX' : 'no FX' }));
-    for (const p of list.slice(0, 4)) {
+    // the box holds four lines: four plugins, or three and a "+N ще" line
+    const shown = list.length > 4 ? 3 : 4;
+    for (const p of list.slice(0, shown)) {
       // the built-in drum sampler plays DRSKit samples (CC BY 4.0): the credit travels with the plugin
       const credit = p.type === 'rovoxdrums' ? `\n${DRUMS_CREDIT}` : '';
       this.fxList.append(h('div', { class: p.enabled ? 'on' : 'off', text: p.name, title: `${p.name} (${p.type})${credit}` }));
     }
-    if (list.length > 4) this.fxList.append(h('div', { class: 'none', text: `+${list.length - 4} ще` }));
+    if (list.length > shown) this.fxList.append(h('div', { class: 'none', text: `+${list.length - shown} ще`, title: list.slice(shown).map((p) => p.name).join(', ') }));
   }
 
   paint(now: number): void {
@@ -176,10 +179,19 @@ class Strip {
     ctx.font = '9px "IBM Plex Mono", ui-monospace, monospace';
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'right';
+    // a short strip has no room for every label: every tick is drawn, labels are placed by importance (0 dB first, then the ends)
+    // and one that would touch an already placed label is left out
+    const labelled: number[] = [];
+    for (const db of SCALE_LABEL_ORDER) {
+      const y = bottom - dbToFader(db) * trackH;
+      if (labelled.every((o) => Math.abs(o - y) >= 10)) labelled.push(y);
+    }
     for (const db of SCALE_DB) {
       const y = bottom - dbToFader(db) * trackH;
-      ctx.fillStyle = muted;
-      ctx.fillText(String(db), 16, y);
+      if (labelled.includes(y)) {
+        ctx.fillStyle = muted;
+        ctx.fillText(String(db), 16, y);
+      }
       ctx.fillStyle = hairline;
       ctx.fillRect(18, Math.round(y), 4, 1);
     }

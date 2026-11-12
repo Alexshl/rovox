@@ -1196,13 +1196,14 @@ class TcpRow {
 
   private showFx(): void {
     this.popover?.remove();
-    const list = this.store.fx.get(this.id) ?? [];
+    // the fader and the level meter are the track's own controls, not effects (the mixer strip hides them the same way)
+    const list = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
     const sections: FxPluginSection[] = list.map((p) => new FxPluginSection(this.app, p, (self) => sections.forEach((o) => o !== self && o.collapse())));
     const rows = sections.map((x) => x.el);
     const r = this.fx.getBoundingClientRect();
     const pop = h(
       'div',
-      { class: 'popover', style: { left: `${Math.min(r.left, window.innerWidth - 330)}px`, top: `${r.bottom + 4}px` } },
+      { class: 'popover', style: { left: `${Math.min(r.left, window.innerWidth - 376)}px`, top: `${r.bottom + 4}px` } },
       h('div', { class: 'head label', text: `FX · ${this.store.track(this.id)?.name ?? ''}` }),
       ...(rows.length ? rows : [h('div', { class: 'row', text: 'Немає плагінів' })]),
     );

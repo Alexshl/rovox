@@ -20,6 +20,8 @@ interface FxParam {
   label?: string;
   text?: string;
   display?: string;
+  /** Named states of a discrete parameter; value = min + index. */
+  choices?: string[];
 }
 
 function valueText(p: FxParam): string {
@@ -135,7 +137,44 @@ export class FxPluginSection {
     fill();
   }
 
+  /** A discrete parameter: an on/off switch for two states named off/on, a select otherwise. */
+  private choiceRow(p: FxParam, choices: string[]): HTMLElement {
+    const label = `${this.plugin.name} — ${p.name}`;
+    const name = h('span', { class: 'fxpname', text: p.name, title: p.name });
+    const index = () => Math.max(0, Math.min(choices.length - 1, Math.round(p.value - p.min)));
+    const send = (i: number, done: (ok: boolean) => void) => {
+      const before = p.value;
+      p.value = p.min + i;
+      void this.app.edit('fx.update', { plugin_id: this.plugin.plugin_id, params: { [p.ident]: p.value } }).then((r) => {
+        if (!r.ok) p.value = before;
+        done(r.ok);
+      });
+    };
+    const isSwitch = choices.length === 2 && choices[0] === 'off' && choices[1] === 'on';
+    if (isSwitch) {
+      const sw = h('button', { class: 'fxtoggle fxswitch', attrs: { type: 'button', 'aria-label': label } });
+      const paint = () => {
+        const on = index() === 1;
+        sw.textContent = on ? 'on' : 'off';
+        sw.classList.toggle('on', on);
+        sw.setAttribute('aria-pressed', String(on));
+      };
+      paint();
+      sw.addEventListener('click', () => {
+        send(index() === 1 ? 0 : 1, paint);
+        paint();
+      });
+      return h('div', { class: 'row fxparam' }, name, h('span', { class: 'fxfill' }), sw);
+    }
+    const sel = h('select', { class: 'fxselect', attrs: { 'aria-label': label } });
+    choices.forEach((c, i) => sel.append(h('option', { text: c, attrs: { value: String(i) } })));
+    sel.value = String(index());
+    sel.addEventListener('change', () => send(Number(sel.value), () => (sel.value = String(index()))));
+    return h('div', { class: 'row fxparam' }, name, sel);
+  }
+
   private paramRow(p: FxParam): HTMLElement {
+    if (p.choices && p.choices.length >= 2) return this.choiceRow(p, p.choices);
     const label = `${this.plugin.name} — ${p.name}`;
     const hasDefault = this.defaults.has(p.ident);
     const range = h('input', { class: 'fxrange', attrs: { type: 'range', 'aria-label': label } });

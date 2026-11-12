@@ -12,6 +12,7 @@
 #include "StockPlugins.h"
 #include "TimePos.h"
 
+#include <cctype>
 #include <cmath>
 #include <sstream>
 
@@ -91,6 +92,28 @@ json paramJson (te::AutomatableParameter& ap)
                { "display", text }, { "text", text }, { "label", toStd (ap.getLabel()) },
                { "min", (double) range.getStart() }, { "max", (double) range.getEnd() },
                { "min_text", shown (range.getStart()) }, { "max_text", shown (range.getEnd()) } };
+
+    // a parameter with a few named states (on/off, a filter type): the names, value = min + index. Numbers are not choices.
+    if (const double span = (double) range.getEnd() - (double) range.getStart(); std::abs (span - std::round (span)) < 1.0e-6 && span >= 1.0 && span <= 31.0)
+    {
+        json choices = json::array();
+
+        for (int i = 0; i <= (int) std::lround (span); ++i)
+        {
+            const auto t = toStd (ap.valueToString (range.getStart() + (float) i));
+
+            if (t.empty() || std::isdigit ((unsigned char) t[0]) || t[0] == '-' || t[0] == '+' || t[0] == '.')
+            {
+                choices = nullptr;
+                break;
+            }
+
+            choices.push_back (t);
+        }
+
+        if (choices.is_array())
+            out["choices"] = std::move (choices);
+    }
 
     // the value a reset (web: double-click) goes back to; absent when the plugin does not say
     if (const auto d = ap.getDefaultValue())

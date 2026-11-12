@@ -72,6 +72,13 @@ const params = Array.from({ length: 15 }, (_, i) => ({
   max_text: '30 dB',
 }));
 
+// discrete parameters with named states (value = min + index)
+const choiceParams = [
+  { ident: 'on', name: 'Enabled', value: 1, default: 1, min: 0, max: 1, text: 'on', display: 'on', choices: ['off', 'on'] },
+  { ident: 'mode', name: 'Mode', value: 0, default: 0, min: 0, max: 2, text: 'peak', display: 'peak', choices: ['peak', 'rms', 'feedforward'] },
+  { ident: 'ratio', name: 'Ratio', value: 4, default: 2, min: 1, max: 20, text: '4.0', display: '4.0' },
+];
+
 function answer(msg: Record<string, any>, ws: FakeWebSocket): void {
   if (msg.t === 'hello') {
     ws.push({ t: 'welcome', session: 'ws_1', server_version: '0.1.0', audio: { mode: 'browser-stream', available: true }, source_url: 'https://example.invalid/src' });
@@ -90,7 +97,7 @@ function answer(msg: Record<string, any>, ws: FakeWebSocket): void {
       case 'project.activity':
         return reply({ activity: [] });
       case 'fx.params':
-        return reply({ fx: { plugin_id: msg.params.plugin_id, params } });
+        return reply({ fx: { plugin_id: msg.params.plugin_id, params: msg.params.plugin_id === 'fx_comp' ? choiceParams : params } });
       case 'fx.update': {
         const key = Object.keys(msg.params.params ?? {})[0];
         const out = params.map((p) => (p.ident === key ? { ...p, value: msg.params.params[key], text: `${msg.params.params[key]} dB` } : p));
@@ -239,5 +246,29 @@ describe('FX popover', () => {
     await tick();
     expect(sentCmds(ws, 'fx.update').at(-1)!.params).toEqual({ plugin_id: 'fx_eq', enabled: false });
     expect(document.querySelector('.popover .fxtoggle')!.textContent).toBe('off');
+  });
+  it('shows named states as a switch or a select instead of a slider and sends value = min + index', async () => {
+    const { ws, heads } = await openFx();
+    heads[1]!.click();
+    await tick();
+    const rows = [...document.querySelectorAll<HTMLElement>('.popover .fxparam')];
+    expect(rows).toHaveLength(3);
+    const sw = rows[0]!.querySelector<HTMLButtonElement>('button.fxswitch')!;
+    expect(rows[0]!.querySelector('input[type=range]')).toBeNull();
+    expect(sw.getAttribute('aria-pressed')).toBe('true');
+    sw.click();
+    await tick();
+    expect(sentCmds(ws, 'fx.update').at(-1)!.params).toMatchObject({ plugin_id: 'fx_comp', params: { on: 0 } });
+    expect(sw.getAttribute('aria-pressed')).toBe('false');
+    expect(sw.textContent).toBe('off');
+
+    const sel = rows[1]!.querySelector<HTMLSelectElement>('select.fxselect')!;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(['peak', 'rms', 'feedforward']);
+    sel.value = '2';
+    sel.dispatchEvent(new Event('change'));
+    await tick();
+    expect(sentCmds(ws, 'fx.update').at(-1)!.params).toMatchObject({ params: { mode: 2 } });
+
+    expect(rows[2]!.querySelector('input[type=range]')).not.toBeNull(); // a plain number stays a slider
   });
 });
