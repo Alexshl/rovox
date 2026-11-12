@@ -457,7 +457,7 @@ Result<void> ProjectManager::remove (const std::string& id, const std::string& t
     auto* p = find (id, tenant);
 
     if (p == nullptr)
-        return makeError (errc::notFound, "no open project " + id);
+        return removeClosed (id, tenant);
 
     if (p->activeJobs() > 0)
         return makeError (errc::busy, "a job is running on project " + id);
@@ -473,6 +473,34 @@ Result<void> ProjectManager::remove (const std::string& id, const std::string& t
     const bool managed = dir.filename() == "project.rvx" && dir.parent_path().filename() == id;
     fs::remove_all (managed ? dir.parent_path() : dir, ec);
     return ec ? Result<void> (makeError (errc::io, "cannot delete " + dir.string() + ": " + ec.message())) : Result<void>();
+}
+
+Result<void> ProjectManager::removeClosed (const std::string& id, const std::string& tenant)
+{
+    // an id is a directory name inside the tenant's projects directory, never a path
+    if (id.empty() || id.find_first_of ("/\\") != std::string::npos || id == "." || id == "..")
+        return makeError (errc::notFound, "no project " + id);
+
+    const auto rvx = projectDir (tenant, id);
+    std::ifstream in (rvx / manifestFileName);
+    const auto doc = in ? json::parse (in, nullptr, false) : json();
+
+    if (! doc.is_object() || doc.value ("project_id", "") != id || doc.value ("tenant_id", "local") != tenant)
+        return makeError (errc::notFound, "no project " + id);
+
+    // a process that has the project open holds its flock
+    auto lock = acquireLock (rvx);
+
+    if (! lock.ok())
+        return makeError (errc::busy, "project " + id + " is open in another process");
+
+    if (storage_ != nullptr && ! doc.value ("ephemeral", false))
+        storage_->forget (tenant, id);
+
+    std::error_code ec;
+    fs::remove_all (rvx.parent_path(), ec);
+    ::close (lock.value());         // held until the files are gone
+    return ec ? Result<void> (makeError (errc::io, "cannot delete " + rvx.parent_path().string() + ": " + ec.message())) : Result<void>();
 }
 
 Project* ProjectManager::find (const std::string& id)
@@ -539,7 +567,7 @@ json ProjectManager::catalog (const std::string& tenant, bool includeEphemeral) 
         if (ephemeral && ! includeEphemeral && open.count (id) == 0)
             continue;
 
-        json item { { "project_id", id }, { "name", doc.value ("name", "Untitled") }, { "tenant_id", tenant }, { "revision", doc.value ("revision", 0) }, { "dirty", false },
+        json item { { "project_id", id }, { "name", doc.value ("name", "Untitled") }, { "tenant_id", tenant }, { "revision", doc.value ("revision", 0) }, { "dirty", false }, { "unsaved", false },
                     { "path", dir.string() }, { "ephemeral", ephemeral }, { "ttl_s", doc.value ("ttl_s", json (nullptr)) }, { "open", false },
                     { "created_at", doc.value ("created_at", "") }, { "saved_at", doc.value ("saved_at", "") },
                     { "modified", epoch (dir / editFileName) }, { "tracks", 0 } };
@@ -550,21 +578,25 @@ json ProjectManager::catalog (const std::string& tenant, bool includeEphemeral) 
             item["name"] = o->second.name;
             item["revision"] = o->second.revision;
             item["dirty"] = o->second.dirty;
+            item["unsaved"] = o->second.dirty;
             item["tracks"] = o->second.tracks;
+            item["duration_s"] = o->second.durationS;
             item["path"] = o->second.dir.string();
         }
-        else if (std::error_code sz; fs::file_size (dir / editFileName, sz) < 64u * 1024u * 1024u && ! sz)
+        else
         {
-            if (auto xml = juce::parseXML (toFile (dir / editFileName)))
+            // an imported project that was never saved has its content only in the newest autosave (open() recovers it the same way)
+            auto editPath = dir / editFileName;
+
+            if (const auto autosaves = listAutosaves (dir); ! autosaves.empty() && autosaves.back() > doc.value ("revision", (std::uint64_t) 0))
             {
-                int tracks = 0;
-
-                for (auto* c : xml->getChildIterator())
-                    if (c->hasTagName ("TRACK"))
-                        ++tracks;
-
-                item["tracks"] = tracks;
+                editPath = dir / "autosave" / (std::to_string (autosaves.back()) + ".rvx") / editFileName;
+                item["unsaved"] = true;
             }
+
+            const auto summary = summarizeEdit (editPath);
+            item["tracks"] = summary.tracks;
+            item["duration_s"] = summary.durationS;
         }
 
         seen.insert (id);
@@ -576,6 +608,8 @@ json ProjectManager::catalog (const std::string& tenant, bool includeEphemeral) 
         {
             auto item = s.toJson();
             item["open"] = true;
+            item["unsaved"] = s.dirty;
+            item["duration_s"] = s.durationS;
             item["modified"] = (long long) std::time (nullptr);
             items.push_back (std::move (item));
         }
@@ -624,6 +658,10 @@ void ProjectManager::refreshSnapshot (Project& p)
     s.ephemeral = p.manifest().ephemeral;
     s.ttlS = p.manifest().ttlS;
     s.tracks = (int) te::getAudioTracks (p.edit()).size();
+
+    for (auto* ct : te::getClipTracks (p.edit()))
+        for (auto* c : ct->getClips())
+            s.durationS = std::max (s.durationS, c->getPosition().getEnd().inSeconds());
 
     std::lock_guard<std::mutex> lock (snapshotMutex_);
     snapshot_[s.id] = std::move (s);

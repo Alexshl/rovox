@@ -14,6 +14,8 @@
 #include <array>
 #include <cmath>
 #include <set>
+#include <filesystem>
+#include <map>
 
 namespace rovox
 {
@@ -39,9 +41,15 @@ json boolean()                      { return { { "type", "boolean" } }; }
 json anyObject()                    { return { { "type", "object" } }; }
 json arrayOf (json items)           { return { { "type", "array" }, { "items", std::move (items) } }; }
 
+json pitchSchema()
+{
+    return { { "type", json::array ({ "integer", "string" }) }, { "minimum", 0 }, { "maximum", 127 },
+             { "description", "MIDI note number 0..127 or a name such as \"C4\" (60), \"F#2\", \"Bb3\"" } };
+}
+
 json noteSchema()
 {
-    return obj ({ { "pitch", { { "description", "MIDI note number 0..127 or a name such as \"C4\" (60), \"F#2\", \"Bb3\"" } } }, { "start_qn", numMin (0) }, { "length_qn", numMin (0.001) },
+    return obj ({ { "pitch", pitchSchema() }, { "start_qn", numMin (0) }, { "length_qn", numMin (0.001) },
                   { "velocity", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 127 } } } },
                 { "pitch", "start_qn", "length_qn" });
 }
@@ -404,7 +412,7 @@ void registerMidiCommands (CommandRegistry& r)
 
     r.add (makeProjectCommand ("midi.edit",
         obj ({ { "item_id", strMin (1) }, { "add", arrayOf (noteSchema()) }, { "delete", arrayOf (str()) },
-               { "update", arrayOf (obj ({ { "note_id", strMin (1) }, { "pitch", {} }, { "start_qn", numMin (0) }, { "length_qn", numMin (0.001) },
+               { "update", arrayOf (obj ({ { "note_id", strMin (1) }, { "pitch", pitchSchema() }, { "start_qn", numMin (0) }, { "length_qn", numMin (0.001) },
                                           { "velocity", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 127 } } } }, { "note_id" })) } }, { "item_id" }),
         anyObject(), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
@@ -610,6 +618,158 @@ void registerMidiCommands (CommandRegistry& r)
             ChangeCollector::assignMissingIds (clip->state);
             addNotes (p, *clip, notes, false);
             return json { { "item_id", Project::idOf (clip->state) }, { "item", itemJson (p, *clip) }, { "imported_notes", (int) notes.size() } };
+        }));
+
+    r.add (makeProjectCommand ("midi.export_file",
+        obj ({ { "item_id", strMin (1) }, { "track_id", strMin (1) }, { "format", { { "type", "integer" }, { "enum", { 0, 1 } } } }, { "name", str() } }),
+        anyObject(), false,
+        [] (Project& p, const json& params, const CommandContext&) -> Result<json>
+        {
+            if (params.contains ("item_id") && params.contains ("track_id"))
+                return makeError (errc::invalidParams, "give item_id or track_id, not both (neither = the whole project)");
+
+            const int format = params.value ("format", 1);
+            auto& ts = p.edit().tempoSequence;
+            constexpr int ppq = 960;
+            std::vector<te::MidiClip*> clips;
+
+            if (params.contains ("item_id"))
+            {
+                Error error;
+                auto* mc = midiClip (p, params["item_id"].get<std::string>(), error);
+
+                if (mc == nullptr)
+                    return error;
+
+                clips.push_back (mc);
+            }
+            else if (params.contains ("track_id"))
+            {
+                auto* ct = dynamic_cast<te::ClipTrack*> (p.findTrack (params["track_id"].get<std::string>()));
+
+                if (ct == nullptr)
+                    return makeError (errc::notFound, "no track " + params["track_id"].get<std::string>(), json { { "track_id", params["track_id"] } });
+
+                for (auto* c : ct->getClips())
+                    if (auto* mc = dynamic_cast<te::MidiClip*> (c))
+                        clips.push_back (mc);
+            }
+            else
+            {
+                for (auto* ct : te::getClipTracks (p.edit()))
+                    for (auto* c : ct->getClips())
+                        if (auto* mc = dynamic_cast<te::MidiClip*> (c))
+                            clips.push_back (mc);
+            }
+
+            // tempo and time signature map (track 0 in format 1, merged into the single track in format 0)
+            juce::MidiMessageSequence conductor;
+
+            for (int i = 0; i < ts.getNumTempos(); ++i)
+            {
+                auto* t = ts.getTempo (i);
+                auto m = juce::MidiMessage::tempoMetaEvent ((int) std::lround (60000000.0 / t->getBpm()));
+                m.setTimeStamp (t->getStartBeat().inBeats() * ppq);
+                conductor.addEvent (m);
+            }
+
+            for (auto* sig : ts.getTimeSigs())
+            {
+                auto m = juce::MidiMessage::timeSignatureMetaEvent (sig->numerator.get(), sig->denominator.get());
+                m.setTimeStamp (sig->getStartBeat().inBeats() * ppq);
+                conductor.addEvent (m);
+            }
+
+            // format 1 tracks follow the project's track order
+            std::map<int, juce::MidiMessageSequence> perTrack;
+            juce::MidiMessageSequence merged;
+            int noteCount = 0;
+            const auto clipTracks = te::getClipTracks (p.edit());
+
+            for (auto* mc : clips)
+            {
+                const double clipStartQn = ts.toBeats (mc->getPosition().getStart()).inBeats();
+                const double visibleFrom = mc->getOffsetInBeats().inBeats();                    // content beat at the start of the clip
+                const double visibleTo = visibleFrom + clipLengthQn (p, *mc);
+                const auto trackIndex = (int) (std::find (clipTracks.begin(), clipTracks.end(), mc->getClipTrack()) - clipTracks.begin());
+                auto& seq = format == 0 ? merged : perTrack[trackIndex];
+
+                for (auto* n : mc->getSequenceLooped().getNotes())
+                {
+                    const double noteFrom = n->getStartBeat().inBeats();
+                    const double noteTo = noteFrom + n->getLengthBeats().inBeats();
+
+                    if (noteTo <= visibleFrom || noteFrom >= visibleTo)         // outside the part of the item that plays
+                        continue;
+
+                    const double on = (clipStartQn + std::max (noteFrom, visibleFrom) - visibleFrom) * ppq;
+                    const double off = (clipStartQn + std::min (noteTo, visibleTo) - visibleFrom) * ppq;
+                    auto mOn = juce::MidiMessage::noteOn (1, n->getNoteNumber(), (juce::uint8) n->getVelocity());
+                    mOn.setTimeStamp (std::round (on));
+                    auto mOff = juce::MidiMessage::noteOff (1, n->getNoteNumber());
+                    mOff.setTimeStamp (std::max (std::round (on) + 1.0, std::round (off)));
+                    seq.addEvent (mOn);
+                    seq.addEvent (mOff);
+                    ++noteCount;
+                }
+            }
+
+            if (noteCount == 0)
+                return makeError (errc::preconditionFailed, "there are no MIDI notes to export");
+
+            juce::MidiFile file;
+            file.setTicksPerQuarterNote (ppq);
+
+            if (format == 0)
+            {
+                merged.addSequence (conductor, 0.0);
+                merged.sort();
+                merged.updateMatchedPairs();
+                file.addTrack (merged);
+            }
+            else
+            {
+                conductor.sort();
+                file.addTrack (conductor);
+
+                for (auto& [index, seq] : perTrack)
+                {
+                    seq.sort();
+                    seq.updateMatchedPairs();
+                    file.addTrack (seq);
+                }
+            }
+
+            std::string name = params.value ("name", "export");
+
+            for (auto& ch : name)
+                if (! std::isalnum ((unsigned char) ch) && ch != '-' && ch != '_')
+                    ch = '_';
+
+            if (name.empty() || name[0] == '.')
+                name = "export";
+
+            const auto dir = p.rendersDir();
+            std::error_code ec;
+            std::filesystem::create_directories (dir, ec);
+            const auto finalPath = dir / (name + ".mid");
+            const auto partPath = dir / ("." + name + ".mid.part");
+            {
+                juce::File tmp (toJuce (partPath.string()));
+                tmp.deleteFile();
+                juce::FileOutputStream out (tmp);
+
+                if (! out.openedOk() || ! file.writeTo (out, format))
+                    return makeError (errc::io, "cannot write " + partPath.string());
+            }
+            std::filesystem::rename (partPath, finalPath, ec);
+
+            if (ec)
+                return makeError (errc::io, "cannot publish " + finalPath.string() + ": " + ec.message());
+
+            const auto bytes = (std::int64_t) std::filesystem::file_size (finalPath, ec);
+            return json { { "path", "renders/" + name + ".mid" }, { "abs_path", finalPath.string() }, { "uri", "rovox://project/" + p.id() + "/renders/" + name + ".mid" },
+                          { "url", "/api/projects/" + p.id() + "/renders/" + name + ".mid" }, { "bytes", bytes }, { "notes", noteCount }, { "format", format }, { "ticks_per_quarter", ppq } };
         }));
 }
 

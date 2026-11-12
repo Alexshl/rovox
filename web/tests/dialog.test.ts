@@ -81,7 +81,7 @@ describe('projectPicker', () => {
     const rows = picker.el.querySelectorAll<HTMLButtonElement>('.project-row');
     expect(rows).toHaveLength(2);
     expect(rows[0]!.textContent).toContain('Alpha');
-    expect(rows[0]!.textContent).toContain('3 доріжок');
+    expect(rows[0]!.textContent?.replace(/\u00a0/g, ' ')).toContain('3 доріжки');
     expect(rows[1]!.classList.contains('open')).toBe(true);
     expect(rows[1]!.textContent).toContain('відкрито');
     rows[0]!.click();
@@ -111,6 +111,22 @@ describe('projectPicker', () => {
     expect(openProject).toHaveBeenCalledWith('a');
   });
 
+  it('tells same-named projects apart by creation time and marks unsaved ones; unique names get no date', async () => {
+    const projects = [
+      { project_id: 'a', name: 'mykola', tracks: 10, duration_s: 222, created_at: '2026-11-02T16:33:00', unsaved: true },
+      { project_id: 'b', name: 'mykola', tracks: 1, created_at: '2026-11-03T09:05:00' },
+      { project_id: 'c', name: 'solo', tracks: 2, created_at: '2026-11-04T10:00:00' },
+    ];
+    const app = { projects: new Map(), cmd: async () => ({ ok: true, data: { projects } }), openProject: vi.fn(), setActive: vi.fn() } as unknown as App;
+    const picker = projectPicker(app);
+    document.body.append(picker.el);
+    await tick();
+    const meta = [...picker.el.querySelectorAll('.project-row .pmeta')].map((e) => (e.textContent ?? '').replace(/\u00a0/g, ' '));
+    expect(meta[0]).toBe('10 доріжок · 3:42 · створено 02.11 16:33 · незбережено');
+    expect(meta[1]).toBe('1 доріжка · створено 03.11 09:05');
+    expect(meta[2]).toBe('2 доріжки');
+  });
+
   it('opens by path with Enter and ArrowDown moves focus', async () => {
     const { app, openProject } = fakeApp([]);
     const picker = projectPicker(app);
@@ -126,8 +142,34 @@ describe('projectPicker', () => {
     expect(openProject).toHaveBeenCalledWith('/tmp/x.rvx');
   });
 
+  it('projectMeta shows "змінено" as DD.MM HH:MM and drops a creation time that says the same', () => {
+    const created = '2026-11-02T16:05:00';
+    const modified = new Date(created).getTime() / 1000 + 20;   // same minute
+    const later = new Date('2026-11-03T09:30:00').getTime() / 1000;
+    const nb = (s: string) => s.replace(/\u00a0/g, ' ');
+    expect(nb(projectMeta({ project_id: 'a', name: 'A', modified, created_at: created }, true))).toBe('змінено 02.11 16:05');
+    expect(nb(projectMeta({ project_id: 'a', name: 'A', modified: later, created_at: created }, true))).toBe('змінено 03.11 09:30 · створено 02.11 16:05');
+  });
+
+  it('same-named rows that read alike at minute precision get seconds', async () => {
+    const at = (s: string) => new Date(s).getTime() / 1000;
+    const projects = [
+      { project_id: 'a', name: 'mykola', tracks: 10, modified: at('2026-11-02T16:04:19'), created_at: '2026-11-02T16:04:19' },
+      { project_id: 'b', name: 'mykola', tracks: 10, modified: at('2026-11-02T16:04:23'), created_at: '2026-11-02T16:04:23' },
+      { project_id: 'c', name: 'mykola', tracks: 10, modified: at('2026-11-02T16:00:56'), created_at: '2026-11-02T16:00:56' },
+    ];
+    const app = { projects: new Map(), cmd: async () => ({ ok: true, data: { projects } }), openProject: vi.fn(), setActive: vi.fn() } as unknown as App;
+    const picker = projectPicker(app);
+    document.body.append(picker.el);
+    await tick();
+    const meta = [...picker.el.querySelectorAll('.project-row .pmeta')].map((e) => (e.textContent ?? '').replace(/\u00a0/g, ' '));
+    expect(meta[0]).toBe('10 доріжок · змінено 02.11 16:04:19');
+    expect(meta[1]).toBe('10 доріжок · змінено 02.11 16:04:23');
+    expect(meta[2]).toBe('10 доріжок · змінено 02.11 16:00');
+  });
+
   it('projectMeta skips fields the server does not send', () => {
-    expect(projectMeta({ project_id: 'a', name: 'A', tracks: 2 })).toBe('2 доріжок');
-    expect(projectMeta({ project_id: 'a', name: 'A', tracks: 2, duration_s: 75 })).toBe('2 доріжок · 1:15');
+    expect(projectMeta({ project_id: 'a', name: 'A', tracks: 2 }).replace(/\u00a0/g, ' ')).toBe('2 доріжки');
+    expect(projectMeta({ project_id: 'a', name: 'A', tracks: 2, duration_s: 75 }).replace(/\u00a0/g, ' ')).toBe('2 доріжки · 1:15');
   });
 });

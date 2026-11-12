@@ -735,6 +735,34 @@ ROVOX_TEST (stock, catalog_lists_the_stock_effects_and_fx_add_takes_them_by_id_o
     CHECK_NEAR (findParam (env.ok (id, "fx.params", { { "plugin_id", eqId } })["fx"], "b2_gain")["value"].get<double>(), -4.5, 1e-4);
     env.ok (id, "undo");
 
+    // native mode reports and accepts +-30 dB only; -150 (-inf) belongs to reaper_compat
+    CHECK_NEAR (findParam (env.ok (id, "fx.params", { { "plugin_id", eqId } })["fx"], "b2_gain")["min"].get<double>(), -30.0, 1e-9);
+    CHECK_NEAR (findParam (env.ok (id, "fx.params", { { "plugin_id", eqId } })["fx"], "b2_gain")["max"].get<double>(), 30.0, 1e-9);
+    CHECK (! env.run (id, "fx.update", { { "plugin_id", eqId }, { "params", { { "b2_gain", -150.0 } } } }).ok);
+    env.ok (id, "fx.update", { { "plugin_id", eqId }, { "params", { { "reaper_compat", 1 }, { "b2_gain", -150.0 } } } });
+    CHECK_NEAR (findParam (env.ok (id, "fx.params", { { "plugin_id", eqId } })["fx"], "b2_gain")["min"].get<double>(), -150.0, 1e-9);
+    env.ok (id, "fx.update", { { "plugin_id", eqId }, { "params", { { "reaper_compat", 0 }, { "b2_gain", 0.0 } } } });
+    env.ok (id, "undo");
+    env.ok (id, "undo");
+
+    // the pending reaper_compat is found by name as well as by id: -inf is accepted when the same call switches it on by its display name
+    env.ok (id, "fx.update", { { "plugin_id", eqId }, { "params", { { "ReaEQ filter design", 1 }, { "b2_gain", -150.0 } } } });
+
+    // ... and it cannot be switched off while a band gain is below -30 dB; nothing changes then
+    auto stranded = env.run (id, "fx.update", { { "plugin_id", eqId }, { "params", { { "reaper_compat", 0 } } } });
+    CHECK (! stranded.ok);
+    REQUIRE (stranded.error.has_value());
+    CHECK (stranded.error->code == errc::invalidParams);
+    auto strandedByName = env.run (id, "fx.update", { { "plugin_id", eqId }, { "params", { { "ReaEQ filter design", 0 } } } });
+    CHECK (! strandedByName.ok);
+    CHECK_NEAR (findParam (env.ok (id, "fx.params", { { "plugin_id", eqId } })["fx"], "b2_gain")["value"].get<double>(), -150.0, 1e-9);
+    CHECK (findParam (env.ok (id, "fx.params", { { "plugin_id", eqId } })["fx"], "reaper_compat")["value"].get<double>() >= 0.5);
+
+    // raising the gain in the same call makes it valid
+    env.ok (id, "fx.update", { { "plugin_id", eqId }, { "params", { { "reaper_compat", 0 }, { "b2_gain", -6.0 } } } });
+    env.ok (id, "undo");
+    env.ok (id, "undo");
+
     // comp: meter and units
     auto compInfo = env.ok (id, "fx.params", { { "plugin_id", comp["plugin_id"] } })["fx"];
     CHECK (compInfo["meters"].contains ("gain_reduction_db"));

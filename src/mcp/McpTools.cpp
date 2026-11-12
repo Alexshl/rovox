@@ -175,6 +175,7 @@ const CommandToolSpec commandTools[] = {
     { "midi.transpose", "Transpose MIDI notes", "Shifts the pitches of an item (or the given note_ids) by semitones.", false },
     { "midi.quantize", "Quantize MIDI notes", "Snaps note starts (and optionally lengths) to a grid in quarter notes; strength 0..1 moves partway.", false },
     { "midi.import_file", "Import MIDI file", "Reads a standard MIDI file on the server into a new MIDI item on a track.", false },
+    { "midi.export_file", "Export MIDI file", "Writes the notes of an item (item_id), a track (track_id) or the whole project (neither) as a standard MIDI file (format 0 or 1, 960 ticks per quarter, with the tempo and time signature map) to renders/<name>.mid; read it as the resource rovox://project/{id}/renders/<name>.mid.", false },
     { "routing.list", "List sends", "Aux sends (send_id, from track, to_track_id, gain_db, pre_fader) and the return tracks of the project.", true },
     { "routing.send_create", "Create send", "Sends a track to a bus track (reverb, parallel compression). The bus track gets a return automatically; put the effect on that track with fx.add.", false },
     { "routing.send_update", "Update send", "Changes gain_db, mute, pre_fader or the destination of a send.", false },
@@ -410,7 +411,15 @@ void McpServer::buildTools()
             { "wait_s", { { "type", "number" }, { "minimum", 0 }, { "maximum", 60 }, { "description", "Wait up to this long for the job and return its result in the same call." } } }
         };
 
-        (void) preflight;
+        if (! preflight)
+            p["callback"] = { { "type", "object" },
+                              { "description", "Optional completion webhook: when the job finishes (any final state) the server POSTs the job as JSON to url, signed with X-Rovox-Timestamp and "
+                                               "X-Rovox-Signature = sha256=HMAC-SHA256(secret, timestamp + \".\" + body). Up to 5 attempts (pauses 1, 5, 30, 120 s), then job.get shows callback.state "
+                                               "callback_failed (the job itself stays as it finished). The host must be in [callbacks] allow_hosts of the server configuration; private "
+                                               "addresses are refused unless allow_private is set; secret_ref names a [callbacks.secrets.<name>] entry (never returned)." },
+                              { "properties", { { "url", str ("http(s) URL of the receiver") }, { "secret_ref", str ("Name of the secret in [callbacks.secrets]") } } },
+                              { "required", { "url", "secret_ref" } }, { "additionalProperties", false } };
+
         return schema (p, { "project_id" });
     };
 
@@ -440,7 +449,8 @@ void McpServer::buildTools()
         t.name = "render.start";
         t.title = "Render";
         t.description = "Starts an offline render as a job (progress, cancel). With check=true it fails instead of warning; target_lufs normalizes the loudness (reported before/after). "
-                        "Pass wait_s (up to 60) to get the finished result in this call; otherwise poll job.get with wait_s. The file lands in the project's renders/ directory.";
+                        "Pass wait_s (up to 60) to get the finished result in this call; otherwise poll job.get with wait_s. The file lands in the project's renders/ directory. "
+                        "callback {url, secret_ref} posts the finished job to your webhook (HMAC-signed, retried; job.get shows callback {state, attempts}).";
         t.inputSchema = renderSchema (false);
         t.annotations = { { "readOnlyHint", false }, { "destructiveHint", false } };
         t.mayBlock = true;

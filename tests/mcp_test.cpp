@@ -5,6 +5,8 @@
 // events and external_changes, jobs (cancel, idempotency, restart), preview and analysis, HTTP transport.
 #include "Delivery.h"
 #include "HttpServer.h"
+#include "Hmac.h"
+#include "JobCallback.h"
 #include "JobManager.h"
 #include "Loudness.h"
 #include "McpHttp.h"
@@ -17,6 +19,8 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <set>
@@ -152,7 +156,113 @@ std::string sineTracks (test::Env& env, const std::vector<double>& dbfs, double 
     return id;
 }
 
+/** Deterministic pink noise at the given RMS: a fixed-seed xorshift white source through Paul Kellet's refined filter (+-0.05 dB from 9.2 Hz up at 44.1 kHz). */
+std::vector<float> pinkNoise (double seconds, double sampleRate, double rmsDbfs)
+{
+    std::uint64_t state = 0x9E3779B97F4A7C15ull;
+    auto white = [&]
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return (double) (state >> 11) / (double) (1ull << 52) - 1.0;        // [-1, 1)
+    };
+
+    const size_t n = (size_t) (seconds * sampleRate);
+    std::vector<double> x (n);
+    double b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, sum2 = 0;
+
+    for (auto& v : x)
+    {
+        const double w = white();
+        b0 = 0.99886 * b0 + w * 0.0555179;
+        b1 = 0.99332 * b1 + w * 0.0750759;
+        b2 = 0.96900 * b2 + w * 0.1538520;
+        b3 = 0.86650 * b3 + w * 0.3104856;
+        b4 = 0.55000 * b4 + w * 0.5329522;
+        b5 = -0.7616 * b5 - w * 0.0168980;
+        v = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362;
+        b6 = w * 0.115926;
+        sum2 += v * v;
+    }
+
+    const double gain = std::pow (10.0, rmsDbfs / 20.0) / std::sqrt (sum2 / (double) n);
+    std::vector<float> out (n);
+
+    for (size_t i = 0; i < n; ++i)
+        out[i] = (float) (x[i] * gain);
+
+    return out;
+}
+
+/** Pink noise has power ~ 1/f, so a band holds power proportional to its width in octaves. Band offsets relative to lowmid_250_2k, in dB, from the band edges of Spectrum.cpp. */
+double pinkOffsetDb (double lo, double hi)
+{
+    return 10.0 * std::log10 (std::log2 (hi / lo) / std::log2 (2000.0 / 250.0));
+}
+
+/** Server configuration with a [callbacks] table: hook.example is allowed, loopback only when `allowPrivate`. */
+mcp::McpConfig callbackConfig (bool allowPrivate)
+{
+    const auto file = test::makeTempDir ("mcp-callbacks") / "rovox.toml";
+    std::ofstream out (file);
+    out << "[callbacks]\nallow_hosts = [\"127.0.0.1\"]\nallow_private = " << (allowPrivate ? "true" : "false") << "\n\n[callbacks.secrets.hook]\nenv = \"ROVOX_TEST_CB_SECRET\"\n";
+    mcp::McpConfig cfg;
+    cfg.configFile = file;
+    return cfg;
+}
+
+/** Polls job.get until the callback of the job is in `state` (or 15 s pass); returns the job. */
+json waitCallback (Harness& h, const std::string& job, const std::string& state)
+{
+    json j;
+
+    for (int i = 0; i < 300; ++i)
+    {
+        j = h.data ("job.get", { { "job_id", job } });
+
+        if (j.contains ("callback") && j["callback"]["state"] == state)
+            break;
+
+        std::this_thread::sleep_for (std::chrono::milliseconds (50));
+    }
+
+    return j;
+}
+
 std::string firstTrackId (const json& trackList)    { return trackList["tracks"][0]["track_id"]; }
+
+/** The Anthropic API rejects a tool whose schema has a property (or items) that is not an object or boolean: `{ "pitch", {} }` once was JSON null. */
+void checkSchemaShapes (const json& schema, const std::string& path, const std::string& tool)
+{
+    if (schema.is_object())
+    {
+        for (auto& [key, value] : schema.items())
+        {
+            if (key == "properties" && value.is_object())
+                for (auto& [prop, sub] : value.items())
+                {
+                    if (! sub.is_object() && ! sub.is_boolean())
+                        std::cerr << "    " << tool << ": " << path << "/properties/" << prop << " is " << sub.type_name() << "\n";
+
+                    CHECK (sub.is_object() || sub.is_boolean());
+                }
+
+            if (key == "items")
+            {
+                if (! value.is_object() && ! value.is_boolean())
+                    std::cerr << "    " << tool << ": " << path << "/items is " << value.type_name() << "\n";
+
+                CHECK (value.is_object() || value.is_boolean());
+            }
+
+            checkSchemaShapes (value, path + "/" + key, tool);
+        }
+    }
+    else if (schema.is_array())
+        for (size_t i = 0; i < schema.size(); ++i)
+            checkSchemaShapes (schema[i], path + "/" + std::to_string (i), tool);
+}
 } // namespace
 
 //==============================================================================
@@ -869,6 +979,39 @@ ROVOX_TEST (mcp, long_work_does_not_block_other_calls)
     h.waitJob (job);
 }
 
+ROVOX_TEST (mcp, preview_of_pink_noise_has_band_levels_by_octave_width_and_steady_bars)
+{
+    Harness h;
+    const auto id = h.env.newProject ("pink");
+    const auto dir = test::makeTempDir ("mcp-pink");
+    test::writeWav (dir / "pink.wav", { pinkNoise (20.0, 44100.0, -20.0) }, 44100.0, 24);
+    auto plan = h.env.ok (id, "import.plan", { { "paths", json::array ({ (dir / "pink.wav").string() }) } });
+    h.env.ok (id, "import.apply", { { "plan_id", plan["plan_id"] } });
+
+    auto r = h.tool ("render.preview", { { "project_id", id }, { "range", { { "start", { { "bar", 1 } } }, { "end", { { "bar", 9 } } } } }, { "format", "wav" },
+                                         { "analysis", json::array ({ "loudness", "spectrum_bands", "per_bar" }) }, { "wait_s", 60 } });
+    REQUIRE (r["ok"] == true);
+    REQUIRE (r["data"]["state"] == "succeeded");
+    const auto& res = r["data"]["result"];
+    const auto& b = res["spectrum_bands_db"];
+    const double lowMid = b["lowmid_250_2k"];
+
+    // 1/f noise holds equal power per octave: a band's offset from lowmid is 10*log10 of its width in octaves, not a monotonic slope
+    CHECK_NEAR (b["sub_20_60"].get<double>() - lowMid, pinkOffsetDb (20, 60), 1.0);
+    CHECK_NEAR (b["low_60_250"].get<double>() - lowMid, pinkOffsetDb (60, 250), 1.0);
+    CHECK_NEAR (b["highmid_2k_6k"].get<double>() - lowMid, pinkOffsetDb (2000, 6000), 1.0);
+    CHECK_NEAR (b["high_6k_20k"].get<double>() - lowMid, pinkOffsetDb (6000, 20000), 1.0);
+
+    REQUIRE (res["per_bar"].size() == 8);
+    double mean = 0;
+
+    for (auto& bar : res["per_bar"])
+        mean += bar["lufs"].get<double>() / 8.0;
+
+    for (auto& bar : res["per_bar"])
+        CHECK_NEAR (bar["lufs"].get<double>(), mean, 0.5);
+}
+
 ROVOX_TEST (mcp, preview_gives_a_clip_and_analysis_and_keeps_at_most_ten_files)
 {
     Harness h;
@@ -1375,7 +1518,7 @@ ROVOX_TEST (mcp, m4_m5_tools_exist_with_schemas_and_are_no_longer_reserved)
         names.insert (t->name);
 
     for (auto* n : { "plugin.catalog", "plugin.rescan", "plugin.probe", "plugin.tag", "project.catalog", "fx.presets", "fx.preset_load", "fx.preset_save", "fx.move",
-                     "item.create_midi", "item.duplicate", "midi.get", "midi.write", "midi.edit", "midi.transpose", "midi.quantize", "midi.import_file",
+                     "item.create_midi", "item.duplicate", "midi.get", "midi.write", "midi.edit", "midi.transpose", "midi.quantize", "midi.import_file", "midi.export_file",
                      "routing.list", "routing.send_create", "routing.send_update", "routing.send_delete", "track.duplicate",
                      "template.list", "template.get", "template.save", "template.apply", "template.delete",
                      "delivery.list_adapters", "delivery.send", "delivery.release", "delivery.list",
@@ -1406,6 +1549,247 @@ ROVOX_TEST (mcp, m4_m5_tools_exist_with_schemas_and_are_no_longer_reserved)
     auto bad = h.tool ("midi.write", { { "project_id", project }, { "item_id", "itm_x" }, { "notes", json::array ({ { { "pitch", 60 } } }) } });
     CHECK (bad["ok"] == false);
     CHECK (bad["error"]["code"] == "INVALID_PARAMS");
+}
+
+ROVOX_TEST (mcp, every_tool_schema_has_only_objects_or_booleans_under_properties_and_items)
+{
+    Harness h;
+    auto r = h.rpc ("tools/list");
+
+    for (auto& t : r["result"]["tools"])
+        checkSchemaShapes (t["inputSchema"], "", t["name"].get<std::string>());
+}
+
+ROVOX_TEST (mcp, midi_export_file_round_trips_notes_and_the_tempo_map)
+{
+    Harness h;
+    const auto project = h.newProject();
+    h.data ("tempo.set", { { "project_id", project }, { "points", json::array ({ { { "bpm", 90 } }, { { "bpm", 140 }, { "bar", 3 } } }) } });
+    const auto track = h.data ("track.create", { { "project_id", project }, { "name", "Keys" } })["track_id"].get<std::string>();
+    const json notes = json::array ({ { { "pitch", 60 }, { "start_qn", 0.0 }, { "length_qn", 1.0 }, { "velocity", 90 } },
+                                      { { "pitch", 64 }, { "start_qn", 1.5 }, { "length_qn", 0.5 }, { "velocity", 111 } },
+                                      { { "pitch", 67 }, { "start_qn", 6.0 }, { "length_qn", 2.0 }, { "velocity", 40 } } });
+    auto created = h.data ("item.create_midi", { { "project_id", project }, { "track_id", track }, { "notes", notes } });
+    const auto item = created["item_id"].get<std::string>();
+
+    auto exported = h.data ("midi.export_file", { { "project_id", project }, { "item_id", item }, { "name", "roundtrip" } });
+    CHECK (exported["path"] == "renders/roundtrip.mid");
+    CHECK (exported["notes"] == 3);
+    const auto abs = exported["abs_path"].get<std::string>();
+
+    // the standard MIDI file itself: 960 PPQ and the tempo map
+    juce::MidiFile file;
+    juce::FileInputStream in { juce::File (juce::String (abs)) };
+    REQUIRE (in.openedOk());
+    REQUIRE (file.readFrom (in));
+    CHECK (file.getTimeFormat() == 960);
+    juce::MidiMessageSequence tempi;
+    file.findAllTempoEvents (tempi);
+    REQUIRE (tempi.getNumEvents() == 2);
+    CHECK_NEAR (60.0 / tempi.getEventPointer (0)->message.getTempoSecondsPerQuarterNote(), 90.0, 0.01);
+    CHECK_NEAR (60.0 / tempi.getEventPointer (1)->message.getTempoSecondsPerQuarterNote(), 140.0, 0.01);
+    CHECK_NEAR (tempi.getEventPointer (1)->message.getTimeStamp(), 8.0 * 960.0, 1.0);        // bar 3 of 4/4
+
+    // import it again on another track: the same notes
+    const auto track2 = h.data ("track.create", { { "project_id", project }, { "name", "Copy" } })["track_id"].get<std::string>();
+    auto imported = h.data ("midi.import_file", { { "project_id", project }, { "track_id", track2 }, { "file", abs } });
+    CHECK (imported["imported_notes"] == 3);
+    auto a = h.data ("midi.get", { { "project_id", project }, { "item_id", item } })["notes"];
+    auto b = h.data ("midi.get", { { "project_id", project }, { "item_id", imported["item_id"] } })["notes"];
+    REQUIRE (b.size() == a.size());
+
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        CHECK (a[i]["pitch"] == b[i]["pitch"]);
+        CHECK (a[i]["velocity"] == b[i]["velocity"]);
+        CHECK_NEAR (a[i]["start_qn"].get<double>(), b[i]["start_qn"].get<double>(), 1e-6);
+        CHECK_NEAR (a[i]["length_qn"].get<double>(), b[i]["length_qn"].get<double>(), 1e-6);
+    }
+
+    // the file is a resource, and the whole project / format 0 work too
+    auto res = h.rpc ("resources/read", { { "uri", "rovox://project/" + project + "/renders/roundtrip.mid" } });
+    CHECK (res["result"]["contents"][0]["mimeType"] == "audio/midi");
+    auto whole = h.data ("midi.export_file", { { "project_id", project }, { "format", 0 }, { "name", "all" } });
+    CHECK (whole["notes"] == 6);
+    CHECK (! h.tool ("midi.export_file", { { "project_id", project }, { "item_id", item }, { "track_id", track } })["ok"].get<bool>());
+}
+
+ROVOX_TEST (mcp, midi_export_file_honours_the_trim_and_orders_tracks_like_the_project)
+{
+    Harness h;
+    const auto project = h.newProject();
+    h.data ("tempo.set", { { "project_id", project }, { "points", json::array ({ { { "bpm", 120 } } }) } });
+    const auto first = h.data ("track.create", { { "project_id", project }, { "name", "First" } })["track_id"].get<std::string>();
+    const auto second = h.data ("track.create", { { "project_id", project }, { "name", "Second" } })["track_id"].get<std::string>();
+
+    // 120 bpm: 1 s = 2 qn. The item is 8 qn long; splitting at 1 s leaves a right part that starts 2 qn into its content
+    const json notes = json::array ({ { { "pitch", 60 }, { "start_qn", 0.0 }, { "length_qn", 1.0 }, { "velocity", 90 } },
+                                      { { "pitch", 62 }, { "start_qn", 1.5 }, { "length_qn", 1.0 }, { "velocity", 90 } },
+                                      { { "pitch", 64 }, { "start_qn", 5.0 }, { "length_qn", 2.0 }, { "velocity", 90 } } });
+    // created on the second track first: file order must still follow the track order
+    h.data ("item.create_midi", { { "project_id", project }, { "track_id", second }, { "start_s", 20.0 }, { "length_s", 1.0 },
+                                  { "notes", json::array ({ { { "pitch", 72 }, { "start_qn", 0.0 }, { "length_qn", 1.0 }, { "velocity", 80 } } }) } });
+    auto created = h.data ("item.create_midi", { { "project_id", project }, { "track_id", first }, { "start_s", 0.0 }, { "length_s", 4.0 }, { "notes", notes } });
+    auto split = h.data ("item.split", { { "project_id", project }, { "item_id", created["item_id"] }, { "at", { { "s", 1.0 } } } });
+    const auto right = split["right_id"].get<std::string>();
+
+    auto readFile = [] (const std::string& abs)
+    {
+        juce::MidiFile file;
+        juce::FileInputStream in { juce::File (juce::String (abs)) };
+        REQUIRE (in.openedOk());
+        REQUIRE (file.readFrom (in));
+        return file;
+    };
+
+    auto trimmed = h.data ("midi.export_file", { { "project_id", project }, { "item_id", right }, { "name", "trimmed" } });
+    CHECK (trimmed["notes"] == 2);                      // the note that ended before the trim point is gone
+    auto file = readFile (trimmed["abs_path"].get<std::string>());
+    REQUIRE (file.getNumTracks() == 2);
+    auto* seq = file.getTrack (1);
+    std::map<int, std::pair<double, double>> byPitch;
+
+    for (int i = 0; i < seq->getNumEvents(); ++i)
+    {
+        auto* e = seq->getEventPointer (i);
+
+        if (e->message.isNoteOn() && e->noteOffObject != nullptr)
+            byPitch[e->message.getNoteNumber()] = { e->message.getTimeStamp(), e->noteOffObject->message.getTimeStamp() };
+    }
+
+    REQUIRE (byPitch.size() == 2);
+    CHECK (byPitch.count (60) == 0);
+    CHECK_NEAR (byPitch[62].first, 2.0 * 960.0, 1.0);            // clamped to the start of the item at 1 s = 2 qn
+    CHECK_NEAR (byPitch[62].second, 2.5 * 960.0, 1.0);
+    CHECK_NEAR (byPitch[64].first, 5.0 * 960.0, 1.0);            // content beat 5 sits 3 qn into the item that starts at qn 2
+    CHECK_NEAR (byPitch[64].second, 7.0 * 960.0, 1.0);
+
+    // the left part only plays up to its end: the 1.5..2.5 qn note is cut at 2 qn
+    auto left = h.data ("midi.export_file", { { "project_id", project }, { "item_id", split["left_id"] }, { "name", "left" } });
+    auto leftFile = readFile (left["abs_path"].get<std::string>());
+    REQUIRE (leftFile.getNumTracks() == 2);
+    double cutEnd = 0;
+
+    for (int i = 0; i < leftFile.getTrack (1)->getNumEvents(); ++i)
+        if (auto* e = leftFile.getTrack (1)->getEventPointer (i); e->message.isNoteOn() && e->message.getNoteNumber() == 62 && e->noteOffObject != nullptr)
+            cutEnd = e->noteOffObject->message.getTimeStamp();
+
+    CHECK_NEAR (cutEnd, 2.0 * 960.0, 1.0);
+
+    // the whole project: track 1 of the file is the first project track, whatever the creation order
+    auto whole = h.data ("midi.export_file", { { "project_id", project }, { "name", "whole" } });
+    auto wholeFile = readFile (whole["abs_path"].get<std::string>());
+    REQUIRE (wholeFile.getNumTracks() == 3);
+
+    auto firstPitch = [&] (int track)
+    {
+        for (int i = 0; i < wholeFile.getTrack (track)->getNumEvents(); ++i)
+            if (wholeFile.getTrack (track)->getEventPointer (i)->message.isNoteOn())
+                return wholeFile.getTrack (track)->getEventPointer (i)->message.getNoteNumber();
+
+        return -1;
+    };
+
+    CHECK (firstPitch (1) != 72);
+    CHECK (firstPitch (2) == 72);
+}
+
+ROVOX_TEST (mcp, job_callback_is_posted_signed_and_a_changed_body_does_not_verify)
+{
+    ::setenv ("ROVOX_TEST_CB_SECRET", "cb-secret-value-0001", 1);
+    Mock mock;
+    mock.defaultReply = { 200, "{}" };
+    Harness h ({}, callbackConfig (true));
+    const auto project = sineTracks (h.env, { -18.0 }, 3.0, "cb");
+
+    auto started = h.data ("render.start", { { "project_id", project }, { "name", "cb" }, { "format", { { "container", "wav" } } }, { "wait_s", 30 },
+                                             { "callback", { { "url", mock.url() + "/hook" }, { "secret_ref", "hook" } } } });
+    REQUIRE (started["state"] == "succeeded");
+    auto job = waitCallback (h, started["job_id"], "delivered");
+    CHECK (job["callback"]["state"] == "delivered");
+    CHECK (job["callback"]["attempts"] == 1);
+    CHECK (job.dump().find ("cb-secret-value-0001") == std::string::npos);
+
+    REQUIRE (mock.count() == 1);
+    const auto req = mock.at (0);
+    CHECK (req.path == "/hook");
+    const auto ts = test::header (req, "X-Rovox-Timestamp");
+    const auto sig = test::header (req, "X-Rovox-Signature");
+    CHECK (! ts.empty());
+    CHECK (sig == "sha256=" + hmacSha256Hex ("cb-secret-value-0001", ts + "." + req.body));
+    auto body = json::parse (req.body);
+    CHECK (body["job_id"] == started["job_id"]);
+    CHECK (body["state"] == "succeeded");
+
+    // one changed byte no longer verifies
+    auto tampered = req.body;
+    tampered[tampered.size() / 2] ^= 1;
+    CHECK (sig != "sha256=" + hmacSha256Hex ("cb-secret-value-0001", ts + "." + tampered));
+}
+
+ROVOX_TEST (mcp, job_callback_retries_and_gives_up_without_touching_the_job_state)
+{
+    ::setenv ("ROVOX_TEST_CB_SECRET", "cb-secret-value-0001", 1);
+    Mock mock;
+    mock.script = { { 500, "{}" }, { 500, "{}" } };         // then 200
+    Harness h ({}, callbackConfig (true));
+    h.server.jobService().callbacks().setDelayScale (0.002);
+    const auto project = sineTracks (h.env, { -18.0 }, 3.0, "cb-retry");
+    const json callback { { "url", mock.url() }, { "secret_ref", "hook" } };
+
+    auto ok = h.data ("render.start", { { "project_id", project }, { "name", "r1" }, { "format", { { "container", "wav" } } }, { "wait_s", 30 }, { "callback", callback } });
+    auto job = waitCallback (h, ok["job_id"], "delivered");
+    CHECK (job["callback"]["state"] == "delivered");
+    CHECK (job["callback"]["attempts"] == 3);
+    CHECK (mock.count() == 3);
+
+    // every attempt fails: callback_failed after the last retry, the job stays succeeded
+    {
+        std::lock_guard<std::mutex> lock (mock.mutex);
+        mock.script.clear();
+        mock.defaultReply = { 500, "{}" };
+    }
+
+    const auto before = mock.count();
+    auto bad = h.data ("render.start", { { "project_id", project }, { "name", "r2" }, { "format", { { "container", "wav" } } }, { "wait_s", 30 }, { "callback", callback } });
+    job = waitCallback (h, bad["job_id"], "callback_failed");
+    CHECK (job["callback"]["state"] == "callback_failed");
+    CHECK (job["callback"]["attempts"] == 5);
+    CHECK (job["state"] == "succeeded");
+    CHECK (mock.count() == before + 5);
+}
+
+ROVOX_TEST (mcp, job_callback_to_loopback_is_refused_unless_allowed_and_plain_jobs_are_unchanged)
+{
+    ::setenv ("ROVOX_TEST_CB_SECRET", "cb-secret-value-0001", 1);
+    Mock mock;
+    Harness h ({}, callbackConfig (false));
+    const auto project = sineTracks (h.env, { -18.0 }, 3.0, "cb-private");
+
+    auto refused = h.tool ("render.start", { { "project_id", project }, { "name", "x" }, { "callback", { { "url", mock.url() }, { "secret_ref", "hook" } } } });
+    CHECK (refused["ok"] == false);
+    CHECK (refused["error"]["code"] == "INVALID_PARAMS");
+
+    auto notHttp = h.tool ("render.start", { { "project_id", project }, { "name", "x" }, { "callback", { { "url", "ftp://127.0.0.1/x" }, { "secret_ref", "hook" } } } });
+    CHECK (notHttp["error"]["code"] == "INVALID_PARAMS");
+    auto unknownSecret = h.tool ("render.start", { { "project_id", project }, { "name", "x" }, { "callback", { { "url", mock.url() }, { "secret_ref", "nope" } } } });
+    CHECK (unknownSecret["error"]["code"] == "INVALID_PARAMS");
+    CHECK (isPrivateAddress ("10.1.2.3"));
+    CHECK (isPrivateAddress ("172.16.0.1"));
+    CHECK (isPrivateAddress ("192.168.1.1"));
+    CHECK (isPrivateAddress ("169.254.1.1"));
+    CHECK (isPrivateAddress ("::1"));
+    CHECK (isPrivateAddress ("fd00::1"));
+    CHECK (isPrivateAddress ("fe80::1"));
+    CHECK (! isPrivateAddress ("93.184.216.34"));
+    CHECK (! isPrivateAddress ("172.32.0.1"));
+
+    auto plain = h.data ("render.start", { { "project_id", project }, { "name", "plain" }, { "format", { { "container", "wav" } } }, { "wait_s", 30 } });
+    CHECK (plain["state"] == "succeeded");
+    CHECK (! plain.contains ("callback"));
+    CHECK (! h.data ("job.get", { { "job_id", plain["job_id"] } }).contains ("callback"));
+    std::this_thread::sleep_for (std::chrono::milliseconds (200));
+    CHECK (mock.count() == 0);
 }
 
 ROVOX_TEST (mcp, delivery_tools_hold_release_and_never_show_secrets)

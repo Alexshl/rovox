@@ -64,6 +64,7 @@ json JobInfo::toJson() const
     if (! origin.is_null())         j["origin"] = origin;
     if (! result.is_null())         j["result"] = result;
     if (error)                      j["error"] = error->toJson();
+    if (! callback.is_null())       j["callback"] = callback;
     return j;
 }
 
@@ -91,6 +92,7 @@ std::optional<JobInfo> JobInfo::fromJson (const json& j)
     i.finished = j.value ("finished", "");
     i.origin = j.value ("origin", json (nullptr));
     i.result = j.value ("result", json (nullptr));
+    i.callback = j.value ("callback", json (nullptr));
 
     if (j.contains ("error") && j["error"].is_object())
         i.error = Error { j["error"].value ("code", errc::internal), j["error"].value ("message", ""), j["error"].value ("details", json (nullptr)) };
@@ -106,6 +108,7 @@ struct JobManager::Entry
     std::uint64_t seq = 0;
     std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>> (false);
     double lastReported = 0;
+    std::function<void (const JobInfo&)> onFinished;
 };
 
 struct JobManager::Pool
@@ -211,6 +214,12 @@ void JobManager::shutdown()
                 e->info.state = JobState::cancelled;
                 e->info.error = makeError (errc::cancelled, "the server is shutting down");
                 e->info.finished = isoNow();
+                e->fn = nullptr;
+
+                if (! e->info.callback.is_null())           // nobody will deliver it any more: finalise its callback state
+                    e->info.callback = { { "state", "callback_failed" }, { "attempts", 0 }, { "last_error", "shutdown" } };
+
+                e->onFinished = nullptr;
                 dropped.push_back (e);
             }
 
@@ -259,6 +268,8 @@ JobManager::Submitted JobManager::submit (JobSpec spec, JobFn fn)
         entry->info.pool = pit->first;
         entry->info.clientRequestId = spec.clientRequestId;
         entry->info.origin = spec.origin;
+        entry->info.callback = spec.callback;
+        entry->onFinished = std::move (spec.onFinished);
         entry->info.created = isoNow();
         entry->info.stage = "queued";
         jobs_[entry->info.id] = entry;
@@ -291,6 +302,7 @@ bool JobManager::cancel (const std::string& id)
 {
     JobInfo snapshot;
     bool queuedCancel = false;
+    std::function<void (const JobInfo&)> finishedFn;
 
     {
         std::lock_guard<std::mutex> lock (mutex_);
@@ -311,6 +323,7 @@ bool JobManager::cancel (const std::string& id)
             e->info.finished = isoNow();
             e->info.stage = "cancelled";
             e->fn = nullptr;
+            finishedFn = std::move (e->onFinished);
             queuedCancel = true;
             snapshot = e->info;
         }
@@ -321,6 +334,9 @@ bool JobManager::cancel (const std::string& id)
         cv_.notify_all();
         persist (snapshot);
         report (snapshot);
+
+        if (finishedFn)
+            finishedFn (snapshot);
     }
 
     return true;
@@ -423,6 +439,7 @@ void JobManager::worker (Pool& pool)
         }
 
         JobInfo done;
+        std::function<void (const JobInfo&)> finishedFn;
 
         {
             std::lock_guard<std::mutex> lock (mutex_);
@@ -450,13 +467,36 @@ void JobManager::worker (Pool& pool)
             }
 
             e->fn = nullptr;            // drop captured snapshots now
+            finishedFn = std::move (e->onFinished);
             done = i;
         }
 
         cv_.notify_all();
         persist (done);
         report (done);
+
+        if (finishedFn)
+            finishedFn (done);
     }
+}
+
+void JobManager::setCallbackState (const std::string& id, const json& state)
+{
+    JobInfo snapshot;
+
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        auto it = jobs_.find (id);
+
+        if (it == jobs_.end())
+            return;
+
+        it->second->info.callback = state;
+        snapshot = it->second->info;
+    }
+
+    cv_.notify_all();
+    persist (snapshot);
 }
 
 void JobManager::setProgress (const std::string& id, double fraction, const std::string& stage)

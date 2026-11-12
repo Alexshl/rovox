@@ -23,6 +23,7 @@ struct Options
     std::string toolNames = "dots", sourceUrl;
     bool reaperCompat = false;
     std::vector<std::string> allowOrigins;
+    std::string connectUrl;             // mcp --connect: URL of a running `rovox serve`
 
     // render
     std::string target, out, renderName, range, format, scope = "master", seed;
@@ -31,6 +32,10 @@ struct Options
     bool limiter = false, noLimiter = false;
     bool normalize = false, check = false, json = false, preflightOnly = false;
     std::vector<std::string> trackIds;
+
+    // bench
+    std::string benchScenario = "s1";
+    double benchSeconds = 20.0;
 
     // hidden child commands (plugin-probe, render-child)
     std::string probeFile, snapshotDir, requestFile;
@@ -50,7 +55,7 @@ int runImport (const Options&);
 int runUpload (const Options&);
 int runPlugins (const Options&);
 int runStoragePush (const Options&);
-int runMcp (const Options&);
+int runMcp (const Options&);          // in-process, or (with --connect) a stdio proxy to a running server
 int runPluginProbe (const Options&);
 int runRenderChildCommand (const Options&);
 

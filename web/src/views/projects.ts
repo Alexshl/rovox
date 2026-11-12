@@ -3,6 +3,7 @@
 
 // Project picker: every project of the server, open or only on disk (project.catalog), to open with a click or Enter, plus opening by path / id / name.
 import { clear, h } from '../lib/dom';
+import { pluralUk } from '../lib/units';
 import type { App } from '../store/session';
 import { openModal } from './dialog';
 
@@ -12,6 +13,9 @@ export interface ServerProject {
   tracks?: number;
   path?: string;
   dirty?: boolean;
+  /** the newest content exists only in an autosave (closed) or is not saved yet (open). */
+  unsaved?: boolean;
+  created_at?: string;
   duration_s?: number;
   modified?: number | string;
   /** true while the server has the project open; false for a project that only exists on disk. */
@@ -23,21 +27,36 @@ function formatDuration(s: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
-function formatModified(v: number | string): string {
-  const d = new Date(typeof v === 'number' && v < 1e11 ? v * 1000 : v);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('uk-UA');
+/** DD.MM HH:MM (HH:MM:SS with `seconds`), local time, 24 h; '' for an unparsable value. */
+function formatShort(d: Date, seconds = false): string {
+  if (Number.isNaN(d.getTime())) return '';
+  const date = d.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit' });
+  const time = d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), hour12: false });
+  return `${date} ${time}`;
 }
 
-/** The one-line description under a project name: tracks, duration and last modification when the server reports them. */
-export function projectMeta(p: ServerProject): string {
+function formatModified(v: number | string, seconds = false): string {
+  return formatShort(new Date(typeof v === 'number' && v < 1e11 ? v * 1000 : v), seconds);
+}
+
+/**
+ * The one-line description under a project name: tracks, duration and last modification when the server reports them.
+ * `showCreated` adds the creation time (for same-named projects); `seconds` adds seconds to the times (when rows would still look alike).
+ */
+export function projectMeta(p: ServerProject, showCreated = false, seconds = false): string {
   const parts: string[] = [];
-  if (typeof p.tracks === 'number') parts.push(`${p.tracks} доріжок`);
+  if (typeof p.tracks === 'number') parts.push(`${p.tracks} ${pluralUk(p.tracks, 'доріжка', 'доріжки', 'доріжок')}`);
   if (typeof p.duration_s === 'number') parts.push(formatDuration(p.duration_s));
-  if (p.modified !== undefined) {
-    const m = formatModified(p.modified);
-    if (m) parts.push(`змінено ${m}`);
+  const modified = p.modified !== undefined ? formatModified(p.modified, seconds) : '';
+  if (modified) parts.push(`змінено ${modified}`);
+  if (showCreated && p.created_at) {
+    // same-named projects are told apart by creation time; skipped when it says the same as "змінено"
+    const created = formatShort(new Date(p.created_at), seconds);
+    if (created && created !== modified) parts.push(`створено ${created}`);
   }
-  return parts.join(' · ');
+  if (p.unsaved) parts.push('незбережено');
+  // a part never breaks inside ("створено 02.11 18:05" stays on one line); the row wraps only between parts
+  return parts.map((s) => s.replace(/ /g, '\u00a0')).join(' · ');
 }
 
 export async function fetchServerProjects(app: App): Promise<ServerProject[]> {
@@ -92,9 +111,20 @@ export function projectPicker(app: App, onOpened?: () => void): ProjectPicker {
     const projects = await fetchServerProjects(app);
     clear(list);
     if (!projects.length) list.append(h('div', { class: 'none', text: 'На сервері ще немає проектів.' }));
+    const nameCount = new Map<string, number>();
+    for (const p of projects) nameCount.set(p.name, (nameCount.get(p.name) ?? 0) + 1);
+    // same-named rows that still read alike at minute precision (imports seconds apart) get seconds
+    const shortMeta = new Map(projects.map((p) => [p.project_id, projectMeta(p, (nameCount.get(p.name) ?? 0) > 1)]));
+    const rowCount = new Map<string, number>();
+    for (const p of projects) {
+      const k = `${p.name}\n${shortMeta.get(p.project_id)}`;
+      rowCount.set(k, (rowCount.get(k) ?? 0) + 1);
+    }
     for (const p of projects) {
       const isOpen = app.projects.has(p.project_id) || p.open === true;
-      const meta = projectMeta(p);
+      const dup = (nameCount.get(p.name) ?? 0) > 1;
+      const alike = (rowCount.get(`${p.name}\n${shortMeta.get(p.project_id)}`) ?? 0) > 1;
+      const meta = alike ? projectMeta(p, dup, true) : shortMeta.get(p.project_id)!;
       const row = h(
         'button',
         { class: `project-row${isOpen ? ' open' : ''}`, attrs: { role: 'option', 'aria-selected': String(isOpen), type: 'button' }, title: p.path ?? p.project_id },

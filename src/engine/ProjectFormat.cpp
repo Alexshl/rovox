@@ -31,12 +31,11 @@ EditSummary summarizeEdit (const fs::path& editXml)
     if (xml == nullptr)
         return out;
 
-    for (auto* c : xml->getChildIterator())
-        if (c->hasTagName ("TRACK"))
-            ++out.tracks;
-
     std::function<void (const juce::XmlElement&)> visit = [&] (const juce::XmlElement& e)
     {
+        if (e.hasTagName ("TRACK"))
+            ++out.tracks;
+
         if (e.getTagName().containsIgnoreCase ("CLIP") && e.hasAttribute ("start") && e.hasAttribute ("length"))
             out.durationS = std::max (out.durationS, e.getDoubleAttribute ("start") + e.getDoubleAttribute ("length"));
 

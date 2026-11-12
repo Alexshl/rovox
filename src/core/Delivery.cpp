@@ -65,43 +65,6 @@ std::string scrubSecrets (std::string text, const std::vector<std::string>& secr
     return text;
 }
 
-namespace
-{
-std::string lowerExt (const fs::path& p)
-{
-    auto e = p.extension().string();
-    std::transform (e.begin(), e.end(), e.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
-    return e;
-}
-
-std::string mimeFor (const fs::path& p)
-{
-    const auto e = lowerExt (p);
-    if (e == ".mp3")    return "audio/mpeg";
-    if (e == ".wav")    return "audio/wav";
-    if (e == ".flac")   return "audio/flac";
-    if (e == ".m4a")    return "audio/mp4";
-    if (e == ".ogg" || e == ".opus") return "audio/ogg";
-    if (e == ".json")   return "application/json";
-    if (e == ".zip")    return "application/zip";
-    return "application/octet-stream";
-}
-
-std::string readFile (const fs::path& p)
-{
-    std::ifstream in (p, std::ios::binary);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
-}
-
-struct Url
-{
-    std::string scheme, host, path, origin;     // origin = scheme://host[:port]
-    int port = 0;
-    bool valid = false;
-};
-
 Url parseUrl (const std::string& url)
 {
     Url u;
@@ -131,6 +94,36 @@ Url parseUrl (const std::string& url)
     u.host = hostPort;
     u.valid = ! u.host.empty();
     return u;
+}
+
+namespace
+{
+std::string lowerExt (const fs::path& p)
+{
+    auto e = p.extension().string();
+    std::transform (e.begin(), e.end(), e.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
+    return e;
+}
+
+std::string mimeFor (const fs::path& p)
+{
+    const auto e = lowerExt (p);
+    if (e == ".mp3")    return "audio/mpeg";
+    if (e == ".wav")    return "audio/wav";
+    if (e == ".flac")   return "audio/flac";
+    if (e == ".m4a")    return "audio/mp4";
+    if (e == ".ogg" || e == ".opus") return "audio/ogg";
+    if (e == ".json")   return "application/json";
+    if (e == ".zip")    return "application/zip";
+    return "application/octet-stream";
+}
+
+std::string readFile (const fs::path& p)
+{
+    std::ifstream in (p, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
 }
 
 std::string trimTrailingSlash (std::string s)

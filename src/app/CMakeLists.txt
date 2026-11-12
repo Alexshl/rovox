@@ -6,6 +6,6 @@ juce_add_console_app(rovox
     NEEDS_CURL FALSE
     NEEDS_WEB_BROWSER FALSE)
 
-target_sources(rovox PRIVATE Main.cpp Cli.cpp)
+target_sources(rovox PRIVATE Main.cpp Cli.cpp Bench.cpp)
 
 target_link_libraries(rovox PRIVATE rovox_mcp CLI11::CLI11)

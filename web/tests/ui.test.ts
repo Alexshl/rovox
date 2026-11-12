@@ -331,3 +331,13 @@ describe.skipIf(!hasCanvas)('canvas drawing', () => {
     expect(colored).toBeGreaterThan(1000);
   });
 });
+
+describe('pluralUk', async () => {
+  const { pluralUk } = await import('../src/lib/units');
+  it('picks the Ukrainian plural form', () => {
+    const f = (n: number) => pluralUk(n, 'доріжка', 'доріжки', 'доріжок');
+    for (const n of [1, 21]) expect(f(n)).toBe('доріжка');
+    for (const n of [2, 4, 22]) expect(f(n)).toBe('доріжки');
+    for (const n of [0, 5, 11, 12, 14, 25, 111]) expect(f(n)).toBe('доріжок');
+  });
+});

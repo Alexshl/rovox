@@ -175,6 +175,7 @@ McpServer::McpServer (ProjectManager& p, CommandBus& b, EventHub& h, JobManager&
             configFile = std::getenv ("ROVOX_CONFIG") != nullptr ? fs::path (std::getenv ("ROVOX_CONFIG")) : projects_.host().dataDir() / "config" / "rovox.toml";
 
         delivery_ = std::make_unique<DeliveryService> (projects_, jobs_, bus_.executor(), configFile);
+        jobService_.setConfigFile (configFile);
     }
 
     buildTools();
@@ -996,7 +997,7 @@ json McpServer::readResource (Session& s, const std::string& uri, std::optional<
                 return fail (errc::notFound, "no such file");
 
             const auto ext = file.extension().string();
-            const std::string mime = ext == ".mp3" ? "audio/mpeg" : (ext == ".flac" ? "audio/flac" : (ext == ".wav" ? "audio/wav" : "application/octet-stream"));
+            const std::string mime = ext == ".mp3" ? "audio/mpeg" : (ext == ".flac" ? "audio/flac" : (ext == ".wav" ? "audio/wav" : (ext == ".mid" ? "audio/midi" : "application/octet-stream")));
             const auto size = (std::uint64_t) fs::file_size (file, ec);
 
             if (size > 4u * 1024 * 1024)

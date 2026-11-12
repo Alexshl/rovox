@@ -124,30 +124,52 @@ ROVOX_TEST (transport, meters_move_while_playing_and_packets_are_decodable_in_or
         packets.push_back (p);
     });
 
-    const auto started = std::chrono::steady_clock::now();
-    env.ok (f.project, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
-    test::pumpMessages (100);
-    env.ok (f.project, "mixer.get_meters");         // drop what was measured while the stream started
-    test::pumpMessages (700);
-
-    // The stream is driven by a timer thread in real time, so on a loaded machine it can start late (or the meter taps attach late, after
-    // the playback graph was rebuilt): wait until the sine has been measured and enough packets were sent instead of assuming a fixed time.
-    auto meters = env.ok (f.project, "mixer.get_meters");
+    using Clock = std::chrono::steady_clock;
     auto packetCount = [&] { std::lock_guard<std::mutex> lock (m); return packets.size(); };
+    auto peakOf = [] (const json& j) { return j["tracks"][0]["peak_db"][0].get<double>(); };
+    auto since = [] (Clock::time_point t) { return std::chrono::duration<double> (Clock::now() - t).count(); };
 
-    for (int i = 0; i < 40 && (meters["tracks"][0]["peak_db"][0].get<double>() <= -16.0 || packetCount() < 20); ++i)
+    // The stream is driven by a timer thread in real time, so on a loaded machine it can start late (or the meter taps attach late, after the
+    // playback graph was rebuilt). Wait for events (first packet, first meter above -16 dB, enough packets) with a generous deadline instead of
+    // fixed times; the 6 s sine outlasts the deadline, so the clip never ends while we wait.
+    constexpr double deadlineS = 4.5;
+    const auto started = Clock::now();
+    env.ok (f.project, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
+
+    double firstPacketS = -1.0, firstMeterS = -1.0;
+    json meters = env.ok (f.project, "mixer.get_meters");       // drops what was measured while the stream started
+    double bestPeak = -1000.0;
+    json best = meters;
+
+    while (since (started) < deadlineS && (firstMeterS < 0.0 || packetCount() < 20))
     {
-        test::pumpMessages (100);
+        test::pumpMessages (20);
+
+        if (firstPacketS < 0.0 && packetCount() > 0)
+            firstPacketS = since (started);
+
         auto more = env.ok (f.project, "mixer.get_meters");
 
-        if (more["tracks"][0]["peak_db"][0].get<double>() > meters["tracks"][0]["peak_db"][0].get<double>())
-            meters = more;
+        if (more["tracks"].size() == 1 && peakOf (more) > bestPeak)
+        {
+            bestPeak = peakOf (more);
+            best = more;
+        }
+
+        if (firstMeterS < 0.0 && bestPeak > -16.0)
+            firstMeterS = since (started);
     }
 
-    const auto playedS = std::chrono::duration<double> (std::chrono::steady_clock::now() - started).count();
+    meters = best;
+    const auto playedS = since (started);
+    const auto packetsAtStop = packetCount();       // what the bound below is about: packets sent during playedS, not during the stop that follows
     env.ok (f.project, "transport.set", { { "state", "stopped" } });
     test::pumpMessages (200);
     stream->setPacketSink ({});
+
+    // on failure this is what tells a late stream from a late meter tap from a dead encoder
+    std::cerr << "    first packet at " << firstPacketS << " s, first meter above -16 dB at " << firstMeterS << " s, " << packetsAtStop
+              << " packets in " << playedS << " s (deadline " << deadlineS << " s)\n";
 
     REQUIRE (meters["tracks"].size() == 1);
     const double trackPeak = meters["tracks"][0]["peak_db"][0].get<double>();
@@ -158,9 +180,10 @@ ROVOX_TEST (transport, meters_move_while_playing_and_packets_are_decodable_in_or
     CHECK (meters["master"]["peak_db"][0].get<double>() > -20.0);
 
     std::lock_guard<std::mutex> lock (m);
-    std::cerr << "    " << packets.size() << " audio packets in " << playedS << " s\n";
-    CHECK (packets.size() >= 20);
-    CHECK ((double) packets.size() <= 60.0 * (playedS + 0.2));      // 40 per second at most (a packet every ~25 ms)
+    CHECK (firstPacketS >= 0.0);
+    CHECK (firstMeterS >= 0.0);
+    CHECK (packetsAtStop >= 20);
+    CHECK ((double) packetsAtStop <= 60.0 * (playedS + 0.2));      // frames are 20 ms: 50 per second at most, 60 allows for a catch-up burst
 
     std::uint32_t lastSeq = 0;
     bool first = true, ordered = true, headersOk = true;

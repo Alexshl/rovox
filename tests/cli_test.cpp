@@ -369,15 +369,112 @@ ROVOX_TEST (cli, mcp_speaks_json_rpc_on_stdout_and_exits_at_end_of_input)
     CHECK (responses == 3);
 }
 
-ROVOX_TEST (cli, bench_is_reported_as_not_available_and_open_binds_need_a_token)
+ROVOX_TEST (cli, bench_runs_a_scenario_and_prints_json)
 {
     if (! haveCli())
         return;
 
     int code = -1;
-    auto b = run ({ "bench" }, test::makeTempDir ("d"), 20, code);
-    CHECK (code == 2);
+    const auto data = test::makeTempDir ("d");
+    fs::create_directories (data / "bench");                        // someone else's directory with this name must survive
+    std::ofstream (data / "bench" / "keep.txt") << "x";
+    auto b = run ({ "bench", "--scenario", "s1", "--seconds", "2", "--json" }, data, 180, code);
+    CHECK (code == 0);
+    CHECK (fs::exists (data / "bench" / "keep.txt"));
 
+    for (auto& e : fs::directory_iterator (data))
+        CHECK (e.path().filename().string().rfind ("bench-", 0) != 0);      // the run's own directory is removed
+
+    auto report = json::parse (b.out, nullptr, false);
+    REQUIRE (! report.is_discarded());
+    REQUIRE (report["results"].size() == 1);
+    CHECK (report["results"][0]["scenario"] == "s1");
+    CHECK (report["results"][0]["offline"]["error"] == "");
+}
+
+ROVOX_TEST (cli, mcp_connect_proxies_stdio_to_a_running_server)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("mcp-connect");
+    auto server = spawn ({ "serve", "--port", "0", "--token", "tok123" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const auto at = server.out.find ("http://127.0.0.1:");
+    REQUIRE (at != std::string::npos);
+    const int port = std::stoi (server.out.substr (at + 17));
+
+    httplib::Client c ("127.0.0.1", port);
+    const httplib::Headers auth { { "Authorization", "Bearer tok123" } };
+    auto created = c.Post ("/api/projects", auth, R"({"name":"via-proxy"})", "application/json");
+    REQUIRE (created != nullptr);
+    REQUIRE (created->status == 200);
+    const auto projectId = json::parse (created->body)["data"]["project_id"].get<std::string>();
+
+    int code = -1;
+    const std::string input =
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})" "\n"
+        R"({"jsonrpc":"2.0","id":1001,"method":"tools/call","params":{"name":"track.create","arguments":{"project_id":")" + projectId + R"(","name":"from-stdio"}}})" "\n";
+    auto m = run ({ "mcp", "--connect", "http://127.0.0.1:" + std::to_string (port), "--token", "tok123" }, test::makeTempDir ("d"), 60, code, input);
+    CHECK (code == 0);
+
+    std::istringstream lines (m.out);
+    std::string line;
+    int responses = 0;
+
+    while (std::getline (lines, line))
+    {
+        auto j = json::parse (line, nullptr, false);
+        REQUIRE (! j.is_discarded());
+        ++responses;
+
+        if (j["id"] == 1001)
+            CHECK (! j["result"]["isError"].get<bool>());
+    }
+
+    CHECK (responses == 2);
+
+    // the change made through stdio is visible in the server's own API
+    auto got = c.Post ("/api/projects/" + projectId + "/commands", auth, R"({"name":"track.list","params":{}})", "application/json");
+    REQUIRE (got != nullptr);
+    CHECK (got->status == 200);
+    CHECK (got->body.find ("from-stdio") != std::string::npos);
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
+ROVOX_TEST (cli, mcp_connect_survives_a_second_initialize)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("mcp-connect2");
+    auto server = spawn ({ "serve", "--port", "0", "--token", "tok123" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const auto at = server.out.find ("http://127.0.0.1:");
+    REQUIRE (at != std::string::npos);
+    const int port = std::stoi (server.out.substr (at + 17));
+
+    int code = -1;
+    const std::string init1 = R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n";
+    const std::string init2 = R"({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n";
+    auto m = run ({ "mcp", "--connect", "http://127.0.0.1:" + std::to_string (port), "--token", "tok123" }, test::makeTempDir ("d"), 60, code, init1 + init2);
+    CHECK (code == 0);
+    CHECK (m.out.find ("\"id\":1") != std::string::npos);
+    CHECK (m.out.find ("\"id\":2") != std::string::npos);
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
+ROVOX_TEST (cli, open_binds_need_a_token)
+{
+    if (! haveCli())
+        return;
+
+    int code = -1;
     auto exposed = run ({ "serve", "--bind", "0.0.0.0", "--port", "0" }, test::makeTempDir ("d"), 20, code);
     CHECK (code == 1);
     CHECK (exposed.err.find ("--token") != std::string::npos);

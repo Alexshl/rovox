@@ -602,6 +602,101 @@ ROVOX_TEST (project, autosave_rotates_and_is_offered_for_recovery)
     CHECK (te::getAudioTracks (env.project (recovered.value()).edit()).size() == 25);
 }
 
+ROVOX_TEST (project, catalog_counts_tracks_of_a_closed_project_from_the_newest_autosave_including_folder_children)
+{
+    test::Env env;
+    const auto id = env.newProject ("catalog");
+    auto& p = env.project (id);
+    const auto dir = p.dir();
+    REQUIRE (p.save().ok());                                // saved while empty: edit.xml has no tracks
+
+    env.ok (id, "track.create", { { "name", "A" } });
+    env.ok (id, "track.create", { { "name", "B" } });
+    {
+        auto& edit = p.edit();                              // the track pointers must be released before close() destroys the Edit
+        auto folder = edit.insertNewFolderTrack (te::TrackInsertPoint (nullptr, nullptr), nullptr, false);
+        REQUIRE (folder != nullptr);
+        REQUIRE (edit.insertNewAudioTrack (te::TrackInsertPoint (folder.get(), nullptr), nullptr) != nullptr);
+    }
+    REQUIRE (p.autosave().ok());                            // the content exists only in autosave/<rev>.rvx
+    REQUIRE (env.pm.close (id, SaveMode::discard).ok());
+
+    const auto projects = env.pm.catalog ("local");
+    const auto it = std::find_if (projects.begin(), projects.end(), [&] (const json& j) { return j["project_id"] == id; });
+    REQUIRE (it != projects.end());
+    CHECK ((*it)["tracks"] == 3);
+    CHECK (it->contains ("duration_s"));
+    CHECK ((*it)["unsaved"] == true);                       // the content exists only in an autosave newer than the saved revision
+}
+
+ROVOX_TEST (project, catalog_of_an_open_project_matches_the_closed_one_with_a_folder_track)
+{
+    test::Env env;
+    const auto id = env.newProject ("catalog-open");
+    auto& p = env.project (id);
+    env.ok (id, "track.create", { { "name", "A" } });
+    {
+        auto& edit = p.edit();                              // the track pointers must be released before close() destroys the Edit
+        auto folder = edit.insertNewFolderTrack (te::TrackInsertPoint (nullptr, nullptr), nullptr, false);
+        REQUIRE (folder != nullptr);
+        REQUIRE (edit.insertNewAudioTrack (te::TrackInsertPoint (folder.get(), nullptr), nullptr) != nullptr);
+    }
+
+    const auto trackId = env.ok (id, "track.create", { { "name", "B" } })["track_id"];       // a command refreshes the open project's summary
+    env.ok (id, "item.create_midi", { { "track_id", trackId }, { "start_s", 2.0 }, { "length_s", 3.0 } });
+
+    auto entry = [&]
+    {
+        const auto projects = env.pm.catalog ("local");
+        const auto it = std::find_if (projects.begin(), projects.end(), [&] (const json& j) { return j["project_id"] == id; });
+        REQUIRE (it != projects.end());
+        return *it;
+    };
+
+    const auto open = entry();
+    CHECK (open["open"] == true);
+    CHECK (open["tracks"] == (int) te::getAudioTracks (p.edit()).size());
+    CHECK (open["tracks"] == 3);                            // A, the folder's child, B
+    REQUIRE (open.contains ("duration_s"));
+    CHECK_NEAR (open["duration_s"].get<double>(), 5.0, 1e-6);
+
+    REQUIRE (env.pm.close (id, SaveMode::save).ok());
+    const auto closed = entry();
+    CHECK (closed["open"] == false);
+    CHECK (closed["tracks"] == open["tracks"]);
+    CHECK_NEAR (closed["duration_s"].get<double>(), open["duration_s"].get<double>(), 1e-6);
+}
+
+ROVOX_TEST (project, delete_removes_a_closed_project_from_disk_and_catalog_flags_only_unsaved_content)
+{
+    test::Env env;
+    const auto id = env.newProject ("doomed");
+    const auto dir = env.project (id).dir();
+    REQUIRE (env.pm.close (id, SaveMode::save).ok());
+
+    auto find = [&]
+    {
+        const auto projects = env.pm.catalog ("local");
+        return std::find_if (projects.begin(), projects.end(), [&] (const json& j) { return j["project_id"] == id; }) != projects.end();
+    };
+    {
+        const auto projects = env.pm.catalog ("local");
+        const auto it = std::find_if (projects.begin(), projects.end(), [&] (const json& j) { return j["project_id"] == id; });
+        REQUIRE (it != projects.end());
+        CHECK ((*it)["unsaved"] == false);
+    }
+
+    CHECK (! env.pm.remove ("nope", "local").ok());
+    CHECK (! env.pm.remove ("../" + id, "local").ok());
+    CHECK (! env.pm.remove (id, "other-tenant").ok());
+    CHECK (fs::exists (dir));
+
+    REQUIRE (env.pm.remove (id, "local").ok());
+    CHECK (! fs::exists (dir));
+    CHECK (! fs::exists (dir.parent_path()));
+    CHECK (! find());
+}
+
 ROVOX_TEST (project, second_open_of_a_locked_project_is_refused)
 {
     test::Env env;

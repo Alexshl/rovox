@@ -59,7 +59,7 @@ double linearToDbSafe (double lin)  { return lin > 1.0e-6 ? 20.0 * std::log10 (l
 
 juce::Colour reaperColour (int value)
 {
-    // PEAKCOL / COLOR: low 24 bits, R in the lowest byte (the 0x1000000 flag only says "custom colour")
+    // PEAKCOL / COLOR: low 24 bits, R in the lowest byte (0x1000000 = custom colour; callers apply the colour only when it is set)
     return juce::Colour ((juce::uint8) (value & 0xff), (juce::uint8) ((value >> 8) & 0xff), (juce::uint8) ((value >> 16) & 0xff));
 }
 
@@ -909,7 +909,7 @@ struct Importer
             ++report.tracks;
 
             if (const auto* c = node.line ("PEAKCOL"); c != nullptr && c->size() > 1)
-                try { const int v = std::stoi ((*c)[1]); if (v != 0) track->setColour (reaperColour (v)); } catch (...) {}
+                try { const int v = std::stoi ((*c)[1]); if ((v & 0x1000000) != 0) track->setColour (reaperColour (v)); } catch (...) {}
 
             track->setMute (node.number ("MUTESOLO", 0, 0) != 0);
             track->setSolo (node.number ("MUTESOLO", 1, 0) != 0);

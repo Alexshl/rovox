@@ -53,6 +53,16 @@ struct SecretRef
     bool configured() const             { return ! env.empty() || ! file.empty(); }
 };
 
+/** An http(s) URL split into parts. `origin` is scheme://host[:port]; `valid` is false for other schemes or an empty host. */
+struct Url
+{
+    std::string scheme, host, path, origin;     // origin = scheme://host[:port]
+    int port = 0;
+    bool valid = false;
+};
+
+Url parseUrl (const std::string& url);
+
 /** Replaces every occurrence of a non-empty secret in `text` with "***". */
 std::string scrubSecrets (std::string text, const std::vector<std::string>& secrets);
 

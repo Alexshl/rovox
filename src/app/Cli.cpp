@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -761,8 +762,203 @@ int runServe (const Options& o)
 }
 
 //==============================================================================
+/** `mcp --connect`: stdio to Streamable HTTP. Each stdin line is POSTed to /mcp; JSON and SSE replies come back as one JSON per stdout line;
+    a GET /mcp stream forwards the notifications of the server; the session is deleted at the end of input. Logs go to stderr. */
+int runMcpProxy (const Options& o)
+{
+    httplib::Client client (o.connectUrl);
+    client.set_connection_timeout (10, 0);
+    client.set_read_timeout (600, 0);
+    const std::string token = ! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : "");
+
+    std::mutex outMutex;
+    auto emit = [&outMutex] (const std::string& line)
+    {
+        std::lock_guard<std::mutex> lock (outMutex);
+        std::cout << line << "\n";
+        std::cout.flush();
+    };
+    auto emitJson = [&emit] (const std::string& text)
+    {
+        auto j = json::parse (text, nullptr, false);
+
+        if (! j.is_discarded())
+            emit (j.dump());
+        else
+            std::cerr << "mcp proxy: ignoring a reply that is not JSON\n";
+    };
+    // data of every complete SSE event (lines starting "data:" joined by newlines), the rest stays in `pending`
+    auto drainSse = [&emitJson] (std::string& pending)
+    {
+        for (;;)
+        {
+            const auto end = pending.find ("\n\n");
+
+            if (end == std::string::npos)
+                return;
+
+            std::string event = pending.substr (0, end), data;
+            pending.erase (0, end + 2);
+            std::istringstream lines (event);
+            std::string line;
+
+            while (std::getline (lines, line))
+            {
+                if (! line.empty() && line.back() == '\r')
+                    line.pop_back();
+
+                if (line.rfind ("data:", 0) == 0)
+                    data += (data.empty() ? "" : "\n") + line.substr (line.size() > 5 && line[5] == ' ' ? 6 : 5);
+            }
+
+            if (! data.empty())
+                emitJson (data);
+        }
+    };
+
+    std::string sessionId;
+    std::atomic<bool> stopListener { false };
+    std::thread listener;
+    std::unique_ptr<httplib::Client> listenClient;
+
+    auto headers = [&] (bool withSession)
+    {
+        httplib::Headers h { { "Accept", "application/json, text/event-stream" } };
+
+        if (! token.empty())
+            h.emplace ("Authorization", "Bearer " + token);
+
+        if (withSession && ! sessionId.empty())
+            h.emplace ("Mcp-Session-Id", sessionId);
+
+        return h;
+    };
+
+    auto stopListenerThread = [&]
+    {
+        stopListener = true;
+
+        if (listenClient != nullptr)
+            listenClient->stop();
+
+        if (listener.joinable())
+            listener.join();
+
+        listenClient.reset();
+        stopListener = false;
+    };
+
+    auto startListener = [&]
+    {
+        stopListenerThread();
+        listenClient = std::make_unique<httplib::Client> (o.connectUrl);
+        listenClient->set_connection_timeout (10, 0);
+        listenClient->set_read_timeout (3600, 0);
+        listener = std::thread ([&]
+        {
+            std::string pending;
+            auto h = headers (true);
+            h.erase ("Accept");
+            h.emplace ("Accept", "text/event-stream");
+            auto res = listenClient->Get ("/mcp", h, [&] (const char* data, size_t n)
+            {
+                pending.append (data, n);
+                std::string normalised;
+
+                for (size_t i = 0; i < pending.size(); ++i)
+                    if (! (pending[i] == '\r' && i + 1 < pending.size() && pending[i + 1] == '\n'))
+                        normalised += pending[i];
+
+                pending = std::move (normalised);
+                drainSse (pending);
+                return ! stopListener.load();
+            });
+
+            if (! stopListener && (res == nullptr || res->status != 200))
+                std::cerr << "mcp proxy: server notifications are not available" << (res != nullptr ? " (HTTP " + std::to_string (res->status) + ")" : "") << "\n";
+        });
+    };
+
+    std::string line;
+
+    while (std::getline (std::cin, line))
+    {
+        if (line.find_first_not_of (" \t\r") == std::string::npos)
+            continue;
+
+        auto request = json::parse (line, nullptr, false);
+        const bool isInit = request.is_object() && request.value ("method", "") == "initialize";
+        const json id = request.is_object() && request.contains ("id") ? request["id"] : json (nullptr);
+
+        auto failRequest = [&] (const std::string& message)
+        {
+            std::cerr << "mcp proxy: " << message << "\n";
+
+            if (! id.is_null())
+                emit (json { { "jsonrpc", "2.0" }, { "id", id }, { "error", { { "code", -32603 }, { "message", message } } } }.dump());
+        };
+
+        auto res = client.Post ("/mcp", headers (! isInit), line, "application/json");
+
+        if (res == nullptr)
+        {
+            failRequest ("cannot reach " + o.connectUrl + ": " + httplib::to_string (res.error()));
+            continue;
+        }
+
+        if (isInit && res->status == 200 && res->has_header ("Mcp-Session-Id"))
+        {
+            sessionId = res->get_header_value ("Mcp-Session-Id");
+            startListener();
+        }
+
+        if (res->status == 202 || res->body.empty())
+            continue;
+
+        if (res->get_header_value ("Content-Type").find ("text/event-stream") != std::string::npos)
+        {
+            std::string pending;
+
+            for (size_t i = 0; i < res->body.size(); ++i)
+                if (! (res->body[i] == '\r' && i + 1 < res->body.size() && res->body[i + 1] == '\n'))
+                    pending += res->body[i];
+
+            pending += "\n\n";
+            drainSse (pending);
+        }
+        else if (res->status >= 200 && res->status < 300)
+        {
+            emitJson (res->body);
+        }
+        else
+        {
+            auto body = json::parse (res->body, nullptr, false);
+
+            if (body.is_object() && body.contains ("error") && ! id.is_null())
+            {
+                body["id"] = id;
+                emit (body.dump());
+            }
+            else
+            {
+                failRequest ("server answered HTTP " + std::to_string (res->status));
+            }
+        }
+    }
+
+    if (! sessionId.empty())
+        client.Delete ("/mcp", headers (true));
+
+    stopListenerThread();
+    return 0;
+}
+
+//==============================================================================
 int runMcp (const Options& o)
 {
+    if (! o.connectUrl.empty())
+        return runMcpProxy (o);
+
     // stdout carries the protocol and nothing else; JUCE and Tracktion log to stderr
     std::signal (SIGTERM, onSignal);
     std::signal (SIGINT, onSignal);

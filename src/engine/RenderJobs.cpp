@@ -105,7 +105,8 @@ struct JobService::Prepared
     std::string target = "master";
 };
 
-JobService::JobService (ProjectManager& p, JobManager& j, MessageThreadExecutor& e) : projects_ (p), jobs_ (j), executor_ (e) {}
+JobService::JobService (ProjectManager& p, JobManager& j, MessageThreadExecutor& e)
+    : projects_ (p), jobs_ (j), executor_ (e), callbacks_ ([&j] (const std::string& jobId, const json& state) { j.setCallbackState (jobId, state); }) {}
 
 //==============================================================================
 namespace
@@ -315,7 +316,8 @@ Result<std::shared_ptr<JobService::Prepared>> JobService::prepare (const JobCont
     }
 }
 
-Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::string& kind, const std::string& pool, int priority, const json& args, JobFn fn)
+Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::string& kind, const std::string& pool, int priority, const json& args, JobFn fn,
+                                       json callbackState, std::function<void (const JobInfo&)> onFinished)
 {
     JobSpec spec;
     spec.kind = kind;
@@ -325,6 +327,8 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
     spec.priority = priority;
     spec.clientRequestId = args.value ("client_request_id", "");
     spec.origin = who.origin.toJson();
+    spec.callback = std::move (callbackState);
+    spec.onFinished = std::move (onFinished);
     auto s = jobs_.submit (std::move (spec), std::move (fn));
     return StartedJob { s.id, s.created };
 }
@@ -332,6 +336,24 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
 //==============================================================================
 Result<StartedJob> JobService::startRender (const JobContextInfo& who, const json& args, bool preflightOnly)
 {
+    // a callback is checked before anything else, so that a refused one never starts (or reuses) a job
+    std::optional<CallbackTarget> callback;
+
+    if (args.contains ("callback"))
+    {
+        if (preflightOnly)
+            return makeError (errc::invalidParams, "callback is a render.start parameter", json { { "path", "/callback" } });
+
+        const auto settings = CallbackSettings::load (configFile_);
+        auto target = validateCallback (args["callback"], settings);
+
+        if (! target.ok())
+            return target.error();
+
+        callbacks_.setSecrets (settings.secrets);
+        callback = target.value();
+    }
+
     // idempotency first: a repeated request must not take another snapshot
     if (args.contains ("client_request_id"))
     {
@@ -374,7 +396,9 @@ Result<StartedJob> JobService::startRender (const JobContextInfo& who, const jso
             uploadRenders (projects_.storage(), who.tenant, who.projectId, result.value());
 
         return result;
-    });
+    },
+    callback ? json { { "state", "pending" }, { "attempts", 0 } } : json (nullptr),
+    callback ? std::function<void (const JobInfo&)> ([this, target = *callback] (const JobInfo& done) { callbacks_.enqueue (done, target); }) : nullptr);
 }
 
 //==============================================================================

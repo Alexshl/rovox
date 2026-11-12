@@ -7,6 +7,7 @@
 #pragma once
 
 #include "CommandBus.h"
+#include "JobCallback.h"
 #include "JobManager.h"
 #include "Render.h"
 
@@ -32,7 +33,8 @@ public:
     JobService (ProjectManager&, JobManager&, MessageThreadExecutor&);
 
     /** args: name, scope, track_ids, stems_through_master, range {start,end} (TimePos), format {container, bit_depth, bitrate_kbps, sample_rate, channels},
-        tail_s, target_lufs, normalize, tolerance_lu, true_peak_ceiling_dbtp, ceiling_dbtp, limiter, check, fail_on, warn_on, seed, client_request_id, stall_timeout_s. */
+        tail_s, target_lufs, normalize, tolerance_lu, true_peak_ceiling_dbtp, ceiling_dbtp, limiter, check, fail_on, warn_on, seed, client_request_id, stall_timeout_s,
+        callback {url, secret_ref} (checked against [callbacks] of the configuration file, see JobCallback.h). */
     Result<StartedJob> startRender (const JobContextInfo&, const json& args, bool preflightOnly);
 
     /** args: range {start,end}, track_ids, format (mp3 | wav | flac), analysis [loudness, spectrum_bands, per_bar, tracks_presence], embed_audio, client_request_id. */
@@ -44,6 +46,10 @@ public:
     /** args as the import.plan command. The plan is stored in the project exactly as the command does. */
     Result<StartedJob> startImportPlan (const JobContextInfo&, const json& args);
 
+    /** TOML file whose [callbacks] table says which hosts a job callback may target (read at every render.start; no file = no callbacks). */
+    void setConfigFile (fs::path file)      { configFile_ = std::move (file); }
+    JobCallbackDispatcher& callbacks()      { return callbacks_; }
+
     /** Keeps the newest `keep` previews younger than `maxAgeS` (task 240: 10 files, 24 h). Returns the number removed. */
     static int prunePreviews (const fs::path& dir, int keep = 10, double maxAgeS = 24 * 3600.0);
 
@@ -51,11 +57,14 @@ private:
     struct Prepared;
     Result<std::shared_ptr<Prepared>> prepare (const JobContextInfo&, const json& args, const std::string& kind, bool wantTrackIds);
     Result<json> runAnalysisJob (JobContext&, Prepared&, bool keepClip);
-    Result<StartedJob> submit (const JobContextInfo&, const std::string& kind, const std::string& pool, int priority, const json& args, JobFn);
+    Result<StartedJob> submit (const JobContextInfo&, const std::string& kind, const std::string& pool, int priority, const json& args, JobFn,
+                               json callbackState = nullptr, std::function<void (const JobInfo&)> onFinished = nullptr);
 
     ProjectManager& projects_;
     JobManager& jobs_;
     MessageThreadExecutor& executor_;
+    fs::path configFile_;
+    JobCallbackDispatcher callbacks_;
 };
 
 } // namespace rovox

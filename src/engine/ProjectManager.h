@@ -41,6 +41,7 @@ struct ProjectSummary
     bool dirty = false, ephemeral = false;
     std::optional<int> ttlS;
     int tracks = 0;
+    double durationS = 0.0;             // end of the last item, as summarizeEdit() reads it from a closed project
 
     json toJson() const;
 };
@@ -57,7 +58,8 @@ public:
         (the newest one if several share it). */
     Result<std::string> open (const std::string& target, const OpenOptions& = {});
     Result<void> close (const std::string& id, SaveMode);
-    /** Closes and deletes the project directory. Refused while a job is running on it. */
+    /** Closes and deletes the project directory (also of a closed project that exists only on disk). Refused while a job is running on it. */
+    /** Deletes an open project, or a closed one that only exists on disk (refused while a job runs or another process holds it). */
     Result<void> remove (const std::string& id, const std::string& tenant);
     void closeAll (SaveMode);
 
@@ -95,6 +97,7 @@ public:
 
 private:
     Result<std::string> attach (const fs::path& dir, LoadedProject, const OpenOptions&, bool created);
+    Result<void> removeClosed (const std::string& id, const std::string& tenant);
     Result<int> acquireLock (const fs::path& dir);
     void publish (Project&, const Project::PublishedEvent&);
     void refreshSnapshot (Project&);

@@ -4,6 +4,7 @@
 // rovox: serve | render | import | upload | plugins | mcp | bench   (task 170; mcp and the MCP endpoint of serve are task 200). Every subcommand that changes a project
 // goes through the CommandBus, the same layer the server, MCP and the web UI use.
 
+#include "Bench.h"
 #include "Cli.h"
 #include "PluginScan.h"
 #include "Version.h"
@@ -112,6 +113,8 @@ int main (int argc, char** argv)
     storagePush->callback ([&] { std::exit (rovox::cli::runStoragePush (o)); });
 
     auto* mcp = app.add_subcommand ("mcp", "MCP over stdio: the same tools as 'serve', for Claude Code and other local clients");
+    mcp->add_option ("--connect", o.connectUrl, "Proxy to a running 'rovox serve' (stdio to HTTP), e.g. http://127.0.0.1:4810, instead of opening the projects in this process");
+    mcp->add_option ("--token", o.token, "With --connect: Bearer token (default: $ROVOX_TOKEN)");
     mcp->add_option ("--plugins", o.pluginsDir, "Extra plugin directory (VST3/LV2)");
     mcp->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();
     mcp->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
@@ -132,8 +135,12 @@ int main (int argc, char** argv)
     renderChild->add_option ("request", o.requestFile, "request.json")->required();
     renderChild->callback ([&] { std::exit (rovox::cli::runRenderChildCommand (o)); });
 
-    auto* bench = app.add_subcommand ("bench", "Resource benchmark (the spike binary rovox_spikes bench covers it for now)");
-    bench->callback ([] { std::cerr << "rovox bench is not available yet; see spikes/p5_bench.\n"; std::exit (2); });
+    auto* bench = app.add_subcommand ("bench", "Resource benchmark: open, offline render and real-time playback of a generated project");
+    bench->add_option ("--scenario", o.benchScenario, "s1 (8 tracks, EQ + compressor) | s2 (+ synth, reverbs) | s3 (32 tracks) | s4 (3 projects, 2 rendering while 1 plays)")
+         ->check (CLI::IsMember ({ "s1", "s2", "s3", "s4" }))->capture_default_str();
+    bench->add_option ("--seconds", o.benchSeconds, "Song length, and the length of the real-time playback")->capture_default_str();
+    bench->add_flag ("--json", o.json, "Compact JSON only on stdout");
+    bench->callback ([&] { std::exit (rovox::cli::runBench (o)); });
 
     CLI11_PARSE (app, argc, argv);
     return 0;

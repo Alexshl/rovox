@@ -170,6 +170,12 @@ ROVOX_TEST (rpp, synthetic_project_maps_to_tracks_items_markers_tempo_and_sends)
     const auto& rep = r.data;
 
     CHECK (rep["imported"]["tracks"] == 4);
+
+    {   // PEAKCOL colours count only with the 0x1000000 "custom colour" flag; REAPER's default 16576 is not a colour
+        const auto tracks = env.ok (id, "track.list")["tracks"];
+        CHECK (tracks[0]["color"] != "#c04000");
+        CHECK (tracks[1]["color"] == "#ffffff");
+    }
     CHECK (rep["imported"]["folders"] == 1);
     CHECK (rep["imported"]["items"] == 4);
     CHECK (rep["imported"]["midi_items"] == 2);

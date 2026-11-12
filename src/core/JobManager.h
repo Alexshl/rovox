@@ -38,6 +38,7 @@ struct JobInfo
     std::optional<Error> error;
     json origin = nullptr;
     std::string created, started, finished;
+    json callback = nullptr;            // {state, attempts} of the completion callback (E4-04); null without one
 
     json toJson() const;
     static std::optional<JobInfo> fromJson (const json&);
@@ -52,6 +53,8 @@ struct JobSpec
     int priority = 0;                   // higher runs first inside a pool (preview 10, render 0)
     std::string clientRequestId;        // idempotency: same (tenant, project, client_request_id) returns the same job
     json origin = nullptr;
+    json callback = nullptr;            // initial callback state shown by job.get (null = the job has no callback)
+    std::function<void (const JobInfo&)> onFinished;    // called once, outside the manager's lock, when the job reaches a final state
 };
 
 class JobManager;
@@ -98,6 +101,9 @@ public:
     /** Queued jobs are cancelled at once; a running job sees cancelled() and normally finishes within a second.
         Returns false for an unknown or already finished job. */
     bool cancel (const std::string& id);
+
+    /** Replaces the callback state of a job (shown by job.get, persisted). The job's own state is not touched. */
+    void setCallbackState (const std::string& id, const json& state);
 
     /** `wait`: long-poll, returns as soon as the job is finished or the time is up (or `abort` becomes true). */
     std::optional<JobInfo> get (const std::string& id, std::chrono::milliseconds wait = std::chrono::milliseconds (0), const std::atomic<bool>* abort = nullptr);

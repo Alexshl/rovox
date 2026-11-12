@@ -76,6 +76,11 @@ json paramJson (te::AutomatableParameter& ap)
              { "min", (double) range.getStart() }, { "max", (double) range.getEnd() } };
 }
 
+bool isEqBandGain (const std::string& id)
+{
+    return id.size() > 6 && id[0] == 'b' && std::isdigit ((unsigned char) id[1]) && id.compare (2, std::string::npos, "_gain") == 0;
+}
+
 json pluginInfo (te::Plugin& p, bool withParams)
 {
     json j { { "plugin_id", Project::idOf (p.state) }, { "name", toStd (p.getName()) }, { "type", toStd (p.getPluginType()) }, { "enabled", p.isEnabled() } };
@@ -125,8 +130,22 @@ json pluginInfo (te::Plugin& p, bool withParams)
     {
         json params = json::array();
 
+        // b*_gain is stored over -150..30 (-150 = -inf, ReaEQ compat); the native EQ only takes +-30
+        const auto compat = p.getAutomatableParameterByID ("reaper_compat");
+        const bool nativeGain = compat != nullptr && compat->getCurrentExplicitValue() < 0.5f;
+
         for (auto* ap : p.getAutomatableParameters())
-            params.push_back (paramJson (*ap));
+        {
+            auto pj = paramJson (*ap);
+
+            if (nativeGain && isEqBandGain (toStd (ap->paramID)))
+            {
+                pj["min"] = -30.0;
+                pj["max"] = 30.0;
+            }
+
+            params.push_back (std::move (pj));
+        }
 
         j["params"] = params;
     }
@@ -661,18 +680,33 @@ void registerFxExtraCommands (CommandRegistry& r)
             {
                 std::map<std::string, float> before, after;
 
-                for (auto it = params["params"].begin(); it != params["params"].end(); ++it)
+                // a key is a parameter id or its name (exact first, then case-insensitive)
+                auto resolveParam = [plugin] (const std::string& key) -> te::AutomatableParameter*
                 {
-                    te::AutomatableParameter* found = nullptr;
+                    te::AutomatableParameter* hit = nullptr;
 
                     for (auto* ap : plugin->getAutomatableParameters())
-                        if (toStd (ap->paramID) == it.key() || toStd (ap->getParameterName()).compare (it.key()) == 0)
-                            found = ap;
+                        if (toStd (ap->paramID) == key || toStd (ap->getParameterName()).compare (key) == 0)
+                            hit = ap;
 
-                    if (found == nullptr)
+                    if (hit == nullptr)
                         for (auto* ap : plugin->getAutomatableParameters())
-                            if (toJuce (it.key()).equalsIgnoreCase (ap->getParameterName()))
-                                found = ap;
+                            if (toJuce (key).equalsIgnoreCase (ap->getParameterName()))
+                                hit = ap;
+
+                    return hit;
+                };
+
+                // reaper_compat set by this very call, found by the same id / name resolution as the loop below
+                std::optional<float> pendingCompat;
+
+                for (auto it = params["params"].begin(); it != params["params"].end(); ++it)
+                    if (auto* ap = resolveParam (it.key()); ap != nullptr && toStd (ap->paramID) == "reaper_compat" && it.value().is_number())
+                        pendingCompat = it.value().get<float>();
+
+                for (auto it = params["params"].begin(); it != params["params"].end(); ++it)
+                {
+                    te::AutomatableParameter* found = resolveParam (it.key());
 
                     if (found == nullptr)
                         return makeError (errc::notFound, "plugin has no parameter " + it.key(), json { { "path", "/params/" + it.key() } });
@@ -692,9 +726,33 @@ void registerFxExtraCommands (CommandRegistry& r)
                         return makeError (errc::invalidParams, it.key() + " must be within " + std::to_string (range.getStart()) + " .. " + std::to_string (range.getEnd()),
                                           json { { "path", "/params/" + it.key() }, { "min", range.getStart() }, { "max", range.getEnd() } });
 
+                    if (isEqBandGain (toStd (found->paramID)))
+                    {
+                        const auto compat = plugin->getAutomatableParameterByID ("reaper_compat");
+                        const bool compatOn = pendingCompat ? *pendingCompat >= 0.5f
+                                              : compat != nullptr && compat->getCurrentExplicitValue() >= 0.5f;
+
+                        if (compat != nullptr && ! compatOn && (value < -30.0f || value > 30.0f))
+                            return makeError (errc::invalidParams, it.key() + " must be within -30 .. 30 dB (-150 is only valid with reaper_compat on)",
+                                              json { { "path", "/params/" + it.key() }, { "min", -30.0 }, { "max", 30.0 } });
+                    }
+
                     before[toStd (found->paramID)] = found->getCurrentExplicitValue();
                     after[toStd (found->paramID)] = value;
                 }
+
+                // leaving reaper_compat must not strand a band gain outside the native -30 .. 30 dB
+                if (pendingCompat && *pendingCompat < 0.5f)
+                    for (auto* ap : plugin->getAutomatableParameters())
+                        if (isEqBandGain (toStd (ap->paramID)) && plugin->getAutomatableParameterByID ("reaper_compat") != nullptr)
+                        {
+                            const auto id = toStd (ap->paramID);
+                            const float gain = after.count (id) ? after[id] : ap->getCurrentExplicitValue();
+
+                            if (gain < -30.0f || gain > 30.0f)
+                                return makeError (errc::invalidParams, "reaper_compat cannot be switched off while " + id + " is outside -30 .. 30 dB; set the gain first",
+                                                  json { { "path", "/params/reaper_compat" }, { "param", id }, { "value", gain } });
+                        }
 
                 // one undo step for the whole call; nothing changes if any value was rejected above
                 if (! after.empty())

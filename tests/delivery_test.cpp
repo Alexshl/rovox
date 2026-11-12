@@ -6,6 +6,7 @@
 #include "Delivery.h"
 #include "DeliveryService.h"
 #include "Hmac.h"
+#include "JobCallback.h"
 #include "JobManager.h"
 #include "Render.h"
 #include "MockServer.h"
@@ -17,6 +18,7 @@
 
 #include <atomic>
 #include <fstream>
+#include <map>
 #include <thread>
 
 #include <unistd.h>
@@ -575,4 +577,177 @@ ROVOX_TEST (delivery, secrets_never_reach_results_the_journal_the_log_or_events)
         CHECK (! contains (seen, secret));
 
     CHECK (contains (seen, "telegram.me"));
+}
+
+//==============================================================================
+// Completion callbacks: SSRF defences and shutdown behaviour
+namespace
+{
+struct States
+{
+    void set (const std::string& id, const json& state)
+    {
+        std::lock_guard<std::mutex> lock (mutex);
+        byJob[id] = state;
+    }
+
+    json get (const std::string& id)
+    {
+        std::lock_guard<std::mutex> lock (mutex);
+        auto it = byJob.find (id);
+        return it == byJob.end() ? json::object() : it->second;
+    }
+
+    bool waitFor (const std::string& id, const std::string& state, int seconds)
+    {
+        for (int i = 0; i < seconds * 100; ++i)
+        {
+            if (get (id).value ("state", "") == state)
+                return true;
+
+            std::this_thread::sleep_for (std::chrono::milliseconds (10));
+        }
+
+        return false;
+    }
+
+    std::mutex mutex;
+    std::map<std::string, json> byJob;
+};
+
+JobInfo finishedJob (const std::string& id)
+{
+    JobInfo j;
+    j.id = id;
+    j.kind = "render";
+    j.state = JobState::succeeded;
+    return j;
+}
+}
+
+ROVOX_TEST (delivery, callback_private_address_ranges)
+{
+    for (auto* ip : { "198.18.0.1", "198.19.255.255", "100.64.0.1", "100.127.255.255", "10.0.0.1", "0.0.0.0", "::", "::1",
+                      "::127.0.0.1", "::10.1.2.3", "::8.8.8.8", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254",
+                      "64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::c0a8:101", "64:ff9b:1::1",
+                      "2002:7f00:1::1", "2002:0a00:0001::", "2002:c0a8:0101::1", "fe80::1", "fd00::1", "ff02::1", "not-an-ip" })
+        CHECK (isPrivateAddress (ip));
+
+    for (auto* ip : { "93.184.216.34", "198.17.255.255", "198.20.0.0", "100.63.255.255", "100.128.0.1", "::ffff:8.8.8.8",
+                      "64:ff9b::808:808", "2002:0808:0808::1", "2606:4700:4700::1111" })
+        CHECK (! isPrivateAddress (ip));
+}
+
+ROVOX_TEST (delivery, callback_host_resolving_to_a_private_address_is_rejected)
+{
+    ::setenv ("ROVOX_TEST_CB_SECRET2", "secret-value-2", 1);
+    CallbackSettings settings;
+    settings.allowHosts = { "localhost" };
+    settings.secrets["hook"] = SecretRef { "ROVOX_TEST_CB_SECRET2", "" };
+    const json cb { { "url", "http://localhost:8080/x" }, { "secret_ref", "hook" } };
+
+    auto refused = validateCallback (cb, settings);
+    REQUIRE (! refused.ok());
+    CHECK (refused.error().code == errc::invalidParams);
+
+    settings.allowPrivate = true;
+    auto allowed = validateCallback (cb, settings);
+    REQUIRE (allowed.ok());
+    CHECK (isPrivateAddress (allowed.value().resolvedIp));
+
+    // one private answer among several is enough to refuse
+    settings.allowPrivate = false;
+    settings.allowHosts = { "mixed.test" };
+    auto mixed = validateCallback ({ { "url", "http://mixed.test/x" }, { "secret_ref", "hook" } }, settings,
+                                   [] (const std::string&, int) { return std::vector<std::string> { "93.184.216.34", "10.0.0.5" }; });
+    CHECK (! mixed.ok());
+}
+
+ROVOX_TEST (delivery, callback_connects_to_the_address_that_was_checked)
+{
+    ::setenv ("ROVOX_TEST_CB_SECRET2", "secret-value-2", 1);
+    Mock mock;
+    CallbackSettings settings;
+    settings.allowHosts = { "pinned.test" };
+    settings.allowPrivate = true;
+    settings.secrets["hook"] = SecretRef { "ROVOX_TEST_CB_SECRET2", "" };
+
+    // first lookup: the mock's loopback address; any later lookup would answer somewhere else
+    std::atomic<int> lookups { 0 };
+    auto resolver = [&lookups] (const std::string&, int) { return lookups++ == 0 ? std::vector<std::string> { "127.0.0.1" } : std::vector<std::string> { "203.0.113.9" }; };
+    auto target = validateCallback ({ { "url", mock.url().replace (7, 9, "pinned.test") + "/hook" }, { "secret_ref", "hook" } }, settings, resolver);
+    REQUIRE (target.ok());
+    CHECK (target.value().resolvedIp == "127.0.0.1");
+    CHECK (lookups == 1);
+
+    States states;
+    JobCallbackDispatcher d ([&states] (const std::string& id, const json& st) { states.set (id, st); }, settings.secrets);
+    d.enqueue (finishedJob ("job_pin"), target.value());
+    REQUIRE (states.waitFor ("job_pin", "delivered", 10));
+    REQUIRE (mock.count() == 1);
+    CHECK (mock.at (0).path == "/hook");
+    CHECK (header (mock.at (0), "Host") == "pinned.test:" + std::to_string (mock.port));
+    CHECK (lookups == 1);
+}
+
+ROVOX_TEST (delivery, callback_pending_retry_becomes_callback_failed_on_shutdown)
+{
+    ::setenv ("ROVOX_TEST_CB_SECRET2", "secret-value-2", 1);
+    Mock mock;
+    mock.defaultReply = { 500, "{}" };
+    States states;
+    std::map<std::string, SecretRef> secrets { { "hook", SecretRef { "ROVOX_TEST_CB_SECRET2", "" } } };
+    JobCallbackDispatcher d ([&states] (const std::string& id, const json& st) { states.set (id, st); }, secrets);
+    d.setDelayScale (1000);
+    d.enqueue (finishedJob ("job_retry"), { mock.url() + "/hook", "hook", "127.0.0.1" });
+    REQUIRE (states.waitFor ("job_retry", "pending", 10));
+
+    d.shutdown();
+    const auto st = states.get ("job_retry");
+    CHECK (st["state"] == "callback_failed");
+    CHECK (st["last_error"] == "shutdown");
+    CHECK (st["attempts"] == 1);
+
+    // enqueue after the stop is finalised at once
+    d.enqueue (finishedJob ("job_late"), { mock.url() + "/hook", "hook", "127.0.0.1" });
+    CHECK (states.get ("job_late")["state"] == "callback_failed");
+}
+
+ROVOX_TEST (delivery, callback_shutdown_does_not_wait_for_a_hung_receiver)
+{
+    ::setenv ("ROVOX_TEST_CB_SECRET2", "secret-value-2", 1);
+    std::atomic<bool> release { false }, arrived { false };
+    httplib::Server svr;
+    svr.Post (".*", [&] (const httplib::Request&, httplib::Response& res)
+    {
+        arrived = true;
+
+        for (int i = 0; i < 300 && ! release; ++i)
+            std::this_thread::sleep_for (std::chrono::milliseconds (100));
+
+        res.status = 200;
+    });
+    const int port = svr.bind_to_any_port ("127.0.0.1");
+    std::thread server ([&] { svr.listen_after_bind(); });
+
+    States states;
+    {
+        std::map<std::string, SecretRef> secrets { { "hook", SecretRef { "ROVOX_TEST_CB_SECRET2", "" } } };
+        JobCallbackDispatcher d ([&states] (const std::string& id, const json& st) { states.set (id, st); }, secrets);
+        d.enqueue (finishedJob ("job_hung"), { "http://127.0.0.1:" + std::to_string (port) + "/hook", "hook", "127.0.0.1" });
+
+        for (int i = 0; i < 500 && ! arrived; ++i)
+            std::this_thread::sleep_for (std::chrono::milliseconds (10));
+
+        REQUIRE (arrived);
+        const auto t0 = std::chrono::steady_clock::now();
+        d.shutdown();
+        CHECK (std::chrono::steady_clock::now() - t0 < std::chrono::seconds (2));
+    }
+
+    CHECK (states.get ("job_hung")["state"] == "callback_failed");
+    CHECK (states.get ("job_hung")["last_error"] == "shutdown");
+    release = true;
+    svr.stop();
+    server.join();
 }

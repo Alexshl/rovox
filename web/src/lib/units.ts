@@ -69,3 +69,12 @@ export function formatPan(pan: number | undefined): string {
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }
+
+/** Ukrainian plural form: 1 доріжка, 2 доріжки, 5 доріжок (one / few / many). */
+export function pluralUk(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
