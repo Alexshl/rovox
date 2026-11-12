@@ -45,7 +45,7 @@ bool endsWith (const std::string& s, const std::string& suffix)
     return s.size() >= suffix.size() && s.compare (s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-std::string quoted (const std::string& hex)     { return "\"" + hex + "\""; }
+std::string quotedTag (const std::string& hex)     { return "\"" + hex + "\""; }
 
 std::string unquote (std::string tag)
 {
@@ -151,7 +151,7 @@ Result<std::string> etagOf (const fs::path& file, const struct stat& st)
         hex = *h;
     }
 
-    return quoted (hex);
+    return quotedTag (hex);
 }
 
 void checkSegments (const std::string& s, const char* what, std::string& why, bool rejectEmpty)

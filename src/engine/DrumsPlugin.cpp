@@ -358,11 +358,15 @@ private:
                 std::swap (events_[j - 1], events_[j]);
     }
 
+public:
+    /** Why this instance failed its render (the kit was not ready in time); empty when it did not. */
     std::string renderFailure()
     {
         std::lock_guard<std::mutex> lock (mutex_);
         return renderFailure_;
     }
+
+private:
 
     /** Offline renders wait here until the kit is decoded (or has failed): the first block must already sound. */
     enum class RenderWait { pending, settled, timedOut, cancelled };
