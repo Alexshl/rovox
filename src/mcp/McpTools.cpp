@@ -8,6 +8,7 @@
 
 #include "JsonSchema.h"
 #include "McpExtras.h"
+#include "Quota.h"
 #include "Review.h"
 #include "Sha1.h"
 
@@ -388,7 +389,7 @@ void McpServer::buildTools()
 
     auto jobContext = [] (ToolCall& c, const std::string& projectId)
     {
-        return JobContextInfo { c.session.tenant, projectId, c.session.origin() };
+        return JobContextInfo { c.session.tenant, projectId, c.session.origin(), c.session.principal.keyId, c.session.principal.quotaProfile };
     };
 
     auto renderSchema = [] (bool preflight)
@@ -646,6 +647,40 @@ void McpServer::buildTools()
             }
 
             return ToolOutput::success ({ { "jobs", list } });
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "usage.report";
+        t.title = "Usage report";
+        t.description = "Admin: what the metered jobs (render, preview, analysis) cost, summed from the usage journal. from / to are an ISO date (YYYY-MM-DD) or time (default: from the start of the "
+                        "current month); a date-only `to` includes that day. group_by: tenant (default), key, kind or day. Each group has jobs, cpu_s, audio_s and bytes; `total` sums all groups.";
+        t.inputSchema = schema ({ { "from", str() }, { "to", str() }, { "tenant", str() }, { "group_by", { { "type", "string" }, { "enum", { "tenant", "key", "kind", "day" } } } } });
+        t.annotations = { { "readOnlyHint", true } };
+        t.handler = [] (ToolCall& c) -> ToolOutput
+        {
+            auto r = quotas().report (c.args);
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error());
+
+            return ToolOutput::success (r.value());
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "usage.summary";
+        t.title = "Usage and limits";
+        t.description = "Your tenant's quota limits, what it has used so far (CPU seconds today, audio minutes this month, running jobs, storage) and when the daily window resets (resets_at, UTC).";
+        t.inputSchema = schema (json::object());
+        t.annotations = { { "readOnlyHint", true } };
+        t.handler = [] (ToolCall& c) -> ToolOutput
+        {
+            return ToolOutput::success (quotas().summary (c.session.tenant, c.session.principal.quotaProfile));
         };
         add (std::move (t));
     }

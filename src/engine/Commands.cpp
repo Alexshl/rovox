@@ -8,6 +8,7 @@
 #include "PanStage.h"
 #include "PluginHost.h"
 #include "ProjectManager.h"
+#include "Quota.h"
 #include "JsfxPlugin.h"
 #include "StockPlugins.h"
 
@@ -99,6 +100,32 @@ json trackJson (Project& project, te::Track& t)
 void setMuteUndoable (te::Track& t, bool on)    { t.state.setProperty (te::IDs::mute, on, &t.edit.getUndoManager()); }
 void setSoloUndoable (te::Track& t, bool on)    { t.state.setProperty (te::IDs::solo, on, &t.edit.getUndoManager()); }
 
+/** The quota service learns the data directory from the first command that needs it (the transports configure it too, when they are wired). */
+void ensureQuotas (ProjectManager& pm)
+{
+    if (! quotas().configured())
+        quotas().configure (pm.host().dataDir(), {}, &pm.hub());
+}
+
+/** Project count of the tenant against its `projects` quota; counts the project directories below the tenant's projects root. */
+Result<void> checkProjectQuota (ProjectManager& pm, const CommandContext& ctx)
+{
+    ensureQuotas (pm);
+    const auto limit = quotas().profile (ctx.tenant, ctx.principal.quotaProfile).projects;
+
+    if (! limit)
+        return {};
+
+    int count = 0;
+    std::error_code ec;
+
+    for (fs::directory_iterator it (pm.projectsRoot (ctx.tenant), ec), end; ! ec && it != end; it.increment (ec))
+        if (it->is_directory (ec))
+            ++count;
+
+    return quotas().checkProjects (ctx.tenant, ctx.principal.quotaProfile, count);
+}
+
 Error trackNotFound (const std::string& id)     { return makeError (errc::notFound, "no track " + id, json { { "track_id", id } }); }
 
 te::AudioTrack* audioTrack (Project& p, const std::string& id)
@@ -114,6 +141,9 @@ void registerProjectCommands (CommandRegistry& r)
         obj ({ { "project_id", str() } }), false,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {
+            if (auto q = checkProjectQuota (pm, ctx); ! q.ok())
+                return q.error();
+
             CreateOptions o;
             o.name = p.value ("name", "Untitled");
             o.tenant = ctx.tenant;
@@ -155,7 +185,14 @@ void registerProjectCommands (CommandRegistry& r)
     r.add (makeGlobalCommand ("project.open", obj ({ { "target", strMin (1) } }, { "target" }), obj ({ { "project_id", str() } }), false,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {
-            auto id = pm.open (p["target"].get<std::string>(), { .tenant = ctx.tenant });
+            const auto target = p["target"].get<std::string>();
+
+            // opening a project the tenant already has is not a new project: only an import of an unknown one counts
+            if (pm.find (target, ctx.tenant) == nullptr && ! fs::exists (pm.projectsRoot (ctx.tenant) / target) && ! pm.findDirByName (ctx.tenant, target).has_value())
+                if (auto q = checkProjectQuota (pm, ctx); ! q.ok())
+                    return q.error();
+
+            auto id = pm.open (target, { .tenant = ctx.tenant });
 
             if (! id.ok())
                 return id.error();
@@ -240,8 +277,12 @@ void registerProjectCommands (CommandRegistry& r)
         }));
 
     r.add (makeProjectCommand ("project.save", obj ({}), obj ({ { "revision", integer() } }), false,
-        [] (Project& p, const json&, const CommandContext&) -> Result<json>
+        [] (Project& p, const json&, const CommandContext& ctx) -> Result<json>
         {
+            // a tenant whose storage is full cannot write more; the cached size is refreshed at most every 60 s
+            if (auto q = quotas().checkStorage (ctx.tenant, 0, ctx.principal.quotaProfile); ! q.ok())
+                return q.error();
+
             auto s = p.save();
 
             if (! s.ok())

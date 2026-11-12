@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <spawn.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -33,6 +34,16 @@ std::string SubprocessResult::describe() const
     }
 
     return "exited with code " + std::to_string (exitCode);
+}
+
+namespace
+{
+thread_local double childCpuThisThread = 0.0;
+}
+
+double childCpuSecondsThisThread()
+{
+    return childCpuThisThread;
 }
 
 SubprocessResult runSubprocess (const SubprocessOptions& o)
@@ -112,6 +123,7 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
     bool outOpen = true, errOpen = true;
     std::string lineBuf;
     int status = 0;
+    rusage usage {};
     bool reaped = false, killed = false;
     auto killedAt = start;
     constexpr size_t maxStdoutBytes = 16u * 1024 * 1024, maxLineBytes = 1024 * 1024;
@@ -226,7 +238,7 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
     // the pipes closed, but a child may have closed them and kept running: keep honouring the timeout and cancellation
     while (! reaped)
     {
-        const pid_t w = ::waitpid (pid, &status, WNOHANG);
+        const pid_t w = ::wait4 (pid, &status, WNOHANG, &usage);
 
         if (w == pid)
         {
@@ -262,6 +274,10 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
 
     if (reaped)
     {
+        r.cpuUserS = (double) usage.ru_utime.tv_sec + (double) usage.ru_utime.tv_usec * 1.0e-6;
+        r.cpuSystemS = (double) usage.ru_stime.tv_sec + (double) usage.ru_stime.tv_usec * 1.0e-6;
+        childCpuThisThread += r.cpuUserS + r.cpuSystemS;
+
         if (WIFSIGNALED (status))       r.signal = WTERMSIG (status);
         else if (WIFEXITED (status))    r.exitCode = WEXITSTATUS (status);
     }

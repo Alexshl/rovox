@@ -13,6 +13,7 @@
 #include "McpHttp.h"
 #include "McpStdio.h"
 #include "PluginCatalog.h"
+#include "Quota.h"
 #include "RenderJobs.h"
 #include "Scopes.h"
 #include "TestFramework.h"
@@ -2512,4 +2513,128 @@ ROVOX_TEST (mcp, the_local_principal_sees_every_tool)
     CHECK (listed.size() == h.server.tools().size());
     CHECK (listed.count ("render.start") == 1);
     CHECK (listed.count ("plugin.rescan") == 1);
+}
+
+//==============================================================================
+// E11-05: quotas and usage accounting on the render path
+namespace
+{
+std::shared_ptr<mcp::Session> tenantSession (Harness& h, const std::string& tenant, ScopeSet scopes)
+{
+    Principal p = Principal::local();
+    p.tenant = tenant;
+    p.scopes = scopes;
+    p.authMode = "token";
+    p.keyId = "k_" + tenant;
+    auto s = h.server.createSession (p);
+    h.rpc ("initialize", { { "protocolVersion", "2025-06-18" }, { "capabilities", json::object() }, { "clientInfo", { { "name", "quota" } } } }, 1, s.get());
+    mcp::RequestContext rc;
+    h.server.handle (*s, { { "jsonrpc", "2.0" }, { "method", "notifications/initialized" } }, rc);
+    return s;
+}
+
+/** A project of `tenant` with one sine track of `seconds`. */
+std::string tenantSineProject (Harness& h, mcp::Session* s, const std::string& tenant, double seconds)
+{
+    auto created = h.tool ("project.new", { { "name", "quota" } }, s);
+    REQUIRE (created["ok"] == true);
+    const auto id = created["data"]["project_id"].get<std::string>();
+    const auto dir = h.env.pm.host().dataDir() / "tenants" / tenant / "in";
+    fs::create_directories (dir);
+    test::writeWav (dir / "a.wav", { test::sine (330.0, -20.0, seconds, 44100.0) }, 44100.0, 16);
+    auto plan = h.tool ("import.plan", { { "project_id", id }, { "paths", { (dir / "a.wav").string() } } }, s);
+    REQUIRE (plan["ok"] == true);
+    auto applied = h.tool ("import.apply", { { "project_id", id }, { "plan_id", plan["data"]["result"]["plan_id"] } }, s);
+    REQUIRE (applied["ok"] == true);
+    return id;
+}
+} // namespace
+
+ROVOX_TEST (mcp, render_of_a_tenant_whose_cpu_quota_is_exhausted_is_refused_and_creates_no_job)
+{
+    const auto file = test::makeTempDir ("quota-render-cfg") / "rovox.toml";
+    {
+        std::ofstream out (file);
+        out << "[quota_profiles.tiny]\ncpu_seconds_per_day = 2\n\n[tenants.qt-broke]\nquota_profile = \"tiny\"\n";
+    }
+
+    mcp::McpConfig cfg;
+    cfg.configFile = file;
+    Harness h ({}, cfg);
+    auto s = tenantSession (h, "qt-broke", ScopeSet::all());
+    const auto id = tenantSineProject (h, s.get(), "qt-broke", 3.0);
+
+    quotas().tracker().addUsage ("qt-broke", 5.0, 5.0, systemNowS());       // today's 2 s are gone
+
+    auto refused = h.tool ("render.start", { { "project_id", id }, { "name", "mix" } }, s.get());
+    CHECK (refused["ok"] == false);
+    CHECK (refused["error"]["code"] == errc::quotaExceeded);
+    CHECK (refused["error"]["details"]["quota"] == "cpu_seconds_per_day");
+    CHECK (refused["error"]["details"].contains ("resets_at"));
+    CHECK (h.jobs.list ({ .tenant = "qt-broke" }).empty());
+
+    auto preview = h.tool ("render.preview", { { "project_id", id }, { "range", { { "start", { { "s", 0.0 } } }, { "end", { { "s", 2.0 } } } } } }, s.get());
+    CHECK (preview["error"]["code"] == errc::quotaExceeded);
+    CHECK (h.jobs.list ({ .tenant = "qt-broke" }).empty());
+
+    // a tenant without a profile of its own is judged by the built-in default and is not affected
+    auto other = tenantSession (h, "qt-fine", ScopeSet::all());
+    const auto otherId = tenantSineProject (h, other.get(), "qt-fine", 2.0);
+    auto ok = h.tool ("render.start", { { "project_id", otherId }, { "name", "mix" }, { "wait_s", 60 } }, other.get());
+    CHECK (ok["ok"] == true);
+}
+
+ROVOX_TEST (mcp, a_render_result_carries_usage_and_the_journal_and_usage_tools_agree)
+{
+    Harness h;
+    auto s = tenantSession (h, "qt-usage", ScopeSet::of ({ Scope::catalogRead, Scope::projectsRead, Scope::projectsWrite, Scope::render }));
+    const auto id = tenantSineProject (h, s.get(), "qt-usage", 4.0);
+
+    auto r = h.tool ("render.start", { { "project_id", id }, { "name", "mix" }, { "wait_s", 60 }, { "tail_s", 0 } }, s.get());
+    REQUIRE (r["ok"] == true);
+    REQUIRE (r["data"]["state"] == "succeeded");
+    const json usage = r["data"]["result"]["usage"];
+    REQUIRE (usage.is_object());
+    const double cpuS = usage["cpu_s"].get<double>(), audioS = usage["audio_s"].get<double>();
+    CHECK (cpuS >= 0.0);
+    CHECK_NEAR (audioS, 4.0, 0.2);
+
+    // the journal has the record of this job
+    const auto jobId = r["data"]["job_id"].get<std::string>();
+    bool found = false;
+
+    for (auto& f : fs::directory_iterator (h.env.pm.host().dataDir() / "usage"))
+    {
+        std::ifstream in (f.path());
+        std::string line;
+
+        while (std::getline (in, line))
+            if (line.find ("\"job_id\":\"" + jobId + "\"") != std::string::npos)
+            {
+                found = true;
+                const auto rec = json::parse (line);
+                CHECK (rec["tenant"] == "qt-usage");
+                CHECK (rec["kind"] == "render");
+                CHECK (rec["key_id"] == "k_qt-usage");
+                CHECK (rec["cpu_s"].get<double>() == cpuS);
+                CHECK (rec["audio_s"].get<double>() == audioS);
+                CHECK (rec["bytes"].get<std::int64_t>() > 0);
+            }
+    }
+
+    CHECK (found);
+
+    // usage.summary: the tenant's own numbers (projects:read); usage.report is admin only
+    auto summary = h.tool ("usage.summary", json::object(), s.get());
+    REQUIRE (summary["ok"] == true);
+    CHECK_NEAR (summary["data"]["used"]["cpu_seconds_today"].get<double>(), cpuS, 0.01);
+    CHECK (summary["data"]["limits"]["cpu_seconds_per_day"].get<double>() == 3600.0);
+    CHECK (summary["data"].contains ("resets_at"));
+    CHECK (h.tool ("usage.report", json::object(), s.get())["error"]["code"] == errc::forbiddenScope);
+
+    auto report = h.tool ("usage.report", { { "tenant", "qt-usage" }, { "group_by", "kind" } });
+    REQUIRE (report["ok"] == true);
+    CHECK_NEAR (report["data"]["total"]["cpu_s"].get<double>(), cpuS, std::max (0.002, cpuS * 0.01));
+    CHECK_NEAR (report["data"]["total"]["audio_s"].get<double>(), audioS, audioS * 0.01);
+    CHECK (report["data"]["groups"][0]["key"] == "render");
 }

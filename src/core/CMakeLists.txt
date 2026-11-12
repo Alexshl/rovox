@@ -5,6 +5,8 @@ add_library(rovox_core STATIC
     ActivityLog.cpp
     Auth.cpp
     KeyStore.cpp
+    Quota.cpp
+    Usage.cpp
     Cgroup.cpp
     Delivery.cpp
     JobCallback.cpp
