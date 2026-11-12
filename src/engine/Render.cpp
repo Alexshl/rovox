@@ -12,11 +12,14 @@
 #include "Version.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 
@@ -46,6 +49,15 @@ json PreflightReport::toJson() const
         (f.severity == "fail" ? failures : warnings).push_back (f.toJson());
 
     return { { "passed", passed() }, { "warnings", warnings }, { "failures", failures } };
+}
+
+void setLimiterChunkFramesForTest (int frames);      // test hook: the chunk size of the limiter passes
+
+static std::atomic<int> limiterChunkFrames { 65536 };
+
+void setLimiterChunkFramesForTest (int frames)
+{
+    limiterChunkFrames = frames > 0 ? frames : 65536;
 }
 
 //==============================================================================
@@ -142,6 +154,8 @@ struct PluginProbe
 PluginProbe probePluginInstance (juce::AudioPluginInstance& inst, double sampleRate, int note)
 {
     constexpr int blockSize = 512;
+    juce::MemoryBlock savedState;
+    inst.getStateInformation (savedState);       // the probe plays the instrument in wall-clock time: its state is restored afterwards
     inst.setRateAndBufferSizeDetails (sampleRate, blockSize);
     inst.prepareToPlay (sampleRate, blockSize);
     const int channels = std::max ({ 2, inst.getTotalNumInputChannels(), inst.getTotalNumOutputChannels() });
@@ -184,6 +198,11 @@ PluginProbe probePluginInstance (juce::AudioPluginInstance& inst, double sampleR
     }
 
     inst.releaseResources();
+    inst.reset();
+
+    if (savedState.getSize() > 0)
+        inst.setStateInformation (savedState.getData(), (int) savedState.getSize());
+
     return out;
 }
 
@@ -197,6 +216,8 @@ void primePlugins (te::Edit& edit, double sampleRate, int blocks)
             if (auto* inst = ext->getAudioPluginInstance())
             {
                 constexpr int blockSize = 512;
+                juce::MemoryBlock savedState;
+                inst->getStateInformation (savedState);
                 inst->prepareToPlay (sampleRate, blockSize);
                 juce::AudioBuffer<float> buf (std::max ({ 2, inst->getTotalNumInputChannels(), inst->getTotalNumOutputChannels() }), blockSize);
                 juce::MidiBuffer midi;
@@ -208,6 +229,10 @@ void primePlugins (te::Edit& edit, double sampleRate, int blocks)
                 }
 
                 inst->releaseResources();
+                inst->reset();
+
+                if (savedState.getSize() > 0)
+                    inst->setStateInformation (savedState.getData(), (int) savedState.getSize());
             }
 }
 
@@ -599,6 +624,204 @@ std::string extensionOf (const std::string& container)
     return container == "flac" ? "flac" : (container == "mp3" ? "mp3" : "wav");
 }
 
+/** limitTruePeak() as a stream: the same arithmetic in the same order (so the output is bit-identical to the single-buffer limiter),
+    with the state carried across chunk borders. Output sample j is released once the input up to j + lookahead + 8 has arrived. */
+class ChunkedLimiter
+{
+public:
+    ChunkedLimiter (int channels, size_t totalFrames, double sampleRate, double preGainDb, const LimiterSettings& settings)
+        : out ((size_t) channels),
+          frames_ (totalFrames),
+          look_ (std::max<size_t> (1, (size_t) std::llround (settings.lookaheadMs * 0.001 * sampleRate))),
+          preGain_ (std::pow (10.0, preGainDb / 20.0)),
+          ceiling_ (std::pow (10.0, settings.ceilingDbtp / 20.0)),
+          relCoef_ (std::exp (-1.0 / (std::max (1.0, settings.releaseMs * 0.001 * sampleRate)))),
+          oneDb_ (std::pow (10.0, -1.0 / 20.0)),
+          in_ ((size_t) channels)
+    {
+        makeInterpolator();
+    }
+
+    /** Appends input; the limited audio that is ready accumulates in `out`. */
+    void feed (const float* const* planar, int n)
+    {
+        for (size_t c = 0; c < in_.size(); ++c)
+            in_[c].insert (in_[c].end(), planar[c], planar[c] + n);
+
+        recv_ += (size_t) n;
+        run();
+    }
+
+    void finish()       { run(); }
+
+    LimiterResult result() const
+    {
+        LimiterResult r;
+
+        if (frames_ == 0)
+            return r;
+
+        r.maxGainReductionDb = minGain_ < 1.0 ? -20.0 * std::log10 (minGain_) : 0.0;
+        r.limitedOverOneDbPercent = 100.0 * (double) over_ / (double) frames_;
+        return r;
+    }
+
+    std::vector<std::vector<float>> out;
+
+private:
+    static constexpr int oversample = 4, tapsBefore = 7, tapsTotal = 16;
+
+    // identical to the interpolator of Limiter.cpp
+    void makeInterpolator()
+    {
+        const double pi = 3.14159265358979323846;
+
+        for (int p = 1; p < oversample; ++p)
+        {
+            const double t = (double) p / oversample;
+            double sum = 0.0;
+
+            for (int k = 0; k < tapsTotal; ++k)
+            {
+                const double d = (double) (k - tapsBefore) - t;
+                const double sinc = std::abs (d) < 1.0e-12 ? 1.0 : std::sin (pi * d) / (pi * d);
+                const double w = 0.42 + 0.5 * std::cos (pi * d / 8.5) + 0.08 * std::cos (2.0 * pi * d / 8.5);
+                h_[(size_t) p - 1][(size_t) k] = sinc * w;
+                sum += sinc * w;
+            }
+
+            for (auto& c : h_[(size_t) p - 1])
+                c /= sum;
+        }
+    }
+
+    float peakAt (size_t n) const
+    {
+        float peak = 0.0f;
+
+        for (const auto& ch : in_)
+        {
+            float best = std::abs (ch[n - base_]);
+
+            if (n + 1 < frames_)
+            {
+                for (int p = 0; p < oversample - 1; ++p)
+                {
+                    double acc = 0.0;
+
+                    for (int k = 0; k < tapsTotal; ++k)
+                    {
+                        const long idx = (long) n + k - tapsBefore;
+
+                        if (idx >= 0 && idx < (long) frames_)
+                            acc += h_[(size_t) p][(size_t) k] * ch[(size_t) idx - base_];
+                    }
+
+                    const float a = (float) std::abs (acc);
+
+                    if (a > best)
+                        best = a;
+                }
+            }
+
+            peak = std::max (peak, best);
+        }
+
+        return peak;
+    }
+
+    void run()
+    {
+        const size_t total = frames_ + look_;
+
+        for (; next_ < total; ++next_)
+        {
+            const size_t k = next_;
+            double need = 1.0;
+
+            if (k < frames_)
+            {
+                if (recv_ < frames_ && k + 8 >= recv_)
+                    break;                                  // the interpolation still needs x[k + 8]
+
+                const float pk = peakAt (k);
+                const double p = (double) pk * preGain_;
+                need = std::min (need, p > ceiling_ ? ceiling_ / p : 1.0);
+
+                if (k > 0)
+                {
+                    const double q = (double) prevPeak_ * preGain_;
+                    need = std::min (need, q > ceiling_ ? ceiling_ / q : 1.0);
+                }
+
+                prevPeak_ = pk;
+            }
+
+            while (! window_.empty() && window_.back().second >= need)
+                window_.pop_back();
+
+            window_.emplace_back (k, need);
+
+            while (window_.front().first + look_ < k)
+                window_.pop_front();
+
+            const double m = window_.front().second;
+            s_ = m < s_ ? m : relCoef_ * s_ + (1.0 - relCoef_) * m;
+            running_ += s_;
+            hist_.push_back (s_);
+
+            if (k > look_)
+            {
+                running_ -= hist_.front();
+                hist_.pop_front();
+            }
+
+            if (k >= look_)
+            {
+                const size_t have = std::min (k, look_) + 1;
+                const double e = (running_ + (double) (look_ + 1 - have)) / (double) (look_ + 1);
+                const size_t j = k - look_;
+                const float g = (float) (preGain_ * e);
+
+                for (size_t c = 0; c < in_.size(); ++c)
+                {
+                    float v = in_[c][j - base_];
+                    v *= g;
+                    out[c].push_back (v);
+                }
+
+                minGain_ = std::min (minGain_, e);
+
+                if (e < oneDb_)
+                    ++over_;
+
+                produced_ = j + 1;
+            }
+        }
+
+        // drop the input that is no longer needed (the next peak reads from next_ - 7, the next output is produced_)
+        const size_t keep = std::min (produced_, next_ >= (size_t) tapsBefore ? next_ - (size_t) tapsBefore : 0);
+
+        if (keep > base_ + 16384)
+        {
+            for (auto& c : in_)
+                c.erase (c.begin(), c.begin() + (std::ptrdiff_t) (keep - base_));
+
+            base_ = keep;
+        }
+    }
+
+    size_t frames_, look_;
+    double preGain_, ceiling_, relCoef_, oneDb_;
+    std::array<std::array<double, tapsTotal>, oversample - 1> h_ {};
+    std::vector<std::vector<float>> in_;
+    size_t base_ = 0, recv_ = 0, next_ = 0, produced_ = 0, over_ = 0;
+    float prevPeak_ = 0.0f;
+    std::deque<std::pair<size_t, double>> window_;
+    std::deque<double> hist_;
+    double s_ = 1.0, running_ = 0.0, minGain_ = 1.0;
+};
+
 Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const RenderRequest& req, const OneOutput& out, te::TimeRange range, double sr, TempFiles& temps)
 {
     OutputResult res;
@@ -661,38 +884,93 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
     double gainDb = 0.0;
     bool limitedByPeak = false;
 
-    // master limiter: the whole mix is held in memory (channel layout of the output), gain + limiter iterate until the target is met
+    // master limiter: the mix is streamed from the float render on disk (channel layout of the output) in chunks, memory stays bounded.
+    // gain + limiter iterate until the target is met; the winning gain/ceiling pair is run once more into the encoder
     const bool useLimiter = req.loudness.mode != "check" && req.loudness.limiter.value_or (req.loudness.mode == "normalize");
-    std::vector<std::vector<float>> limited;
     LimiterResult limiterResult;
     int limiterPasses = 0;
+    double limiterCeilingDb = req.loudness.truePeakCeilingDb;
+    const int srcCh = (int) reader.value()->channels();
+    const int chunkFrames = std::max (1, limiterChunkFrames.load());
 
-    if (useLimiter)
+    // calls fn (planar, n) for every chunk of the mix in the output channel layout; fn returns an error to stop
+    auto streamMixed = [&] (auto&& fn) -> std::optional<Error>
     {
-        const int srcCh = (int) reader.value()->channels();
-        std::vector<std::vector<float>> mixedAll ((size_t) spec.channels);
-
-        for (auto& c : mixedAll)
-            c.reserve ((size_t) frameLimit);
+        std::vector<std::vector<float>> buf ((size_t) spec.channels);
+        std::vector<const float*> ptrs ((size_t) spec.channels);
 
         for (std::int64_t pos = 0; pos < frameLimit;)
         {
             if (cancelRequested())
                 return makeError (errc::cancelled, "the render was cancelled");
 
-            const int n = (int) std::min<std::int64_t> (65536, frameLimit - pos);
+            const int n = (int) std::min<std::int64_t> (chunkFrames, frameLimit - pos);
             const auto* planar = reader.value()->read (pos, n);
 
             if (planar == nullptr)
                 return makeError (errc::io, "cannot read the rendered file back");
 
             for (int c = 0; c < spec.channels; ++c)
+            {
+                auto& dst = buf[(size_t) c];
+                dst.resize ((size_t) n);
+
                 for (int i = 0; i < n; ++i)
-                    mixedAll[(size_t) c].push_back (spec.channels == 1 && srcCh > 1 ? 0.5f * (planar[0][i] + planar[1][i]) : planar[std::min (c, srcCh - 1)][i]);
+                    dst[(size_t) i] = spec.channels == 1 && srcCh > 1 ? 0.5f * (planar[0][i] + planar[1][i]) : planar[std::min (c, srcCh - 1)][i];
+
+                ptrs[(size_t) c] = dst.data();
+            }
+
+            if (auto e = fn (ptrs.data(), n))
+                return e;
 
             pos += n;
         }
 
+        return std::nullopt;
+    };
+
+    // one limiter run over the whole mix; consume (planar, n) gets the limited audio block by block
+    auto runLimiter = [&] (double preGainDb, double ceilingDb, LimiterResult& lr, auto&& consume) -> std::optional<Error>
+    {
+        LimiterSettings ls;
+        ls.ceilingDbtp = ceilingDb;
+        ChunkedLimiter lim (spec.channels, (size_t) frameLimit, sr, preGainDb, ls);
+
+        auto drain = [&] () -> std::optional<Error>
+        {
+            const size_t m = lim.out.front().size();
+
+            if (m == 0)
+                return std::nullopt;
+
+            std::vector<const float*> ptrs;
+
+            for (auto& c : lim.out)
+                ptrs.push_back (c.data());
+
+            auto e = consume (ptrs.data(), (int) m);
+
+            for (auto& c : lim.out)
+                c.clear();
+
+            return e;
+        };
+
+        if (auto e = streamMixed ([&] (const float* const* p, int n) { lim.feed (p, n); return drain(); }))
+            return e;
+
+        lim.finish();
+
+        if (auto e = drain())
+            return e;
+
+        lr = lim.result();
+        return std::nullopt;
+    };
+
+    if (useLimiter)
+    {
         const bool normalizing = req.loudness.mode == "normalize" && statsBefore.integratedLufs > -70.0;
         const double target = req.loudness.targetLufs;
         const double ceiling = req.loudness.truePeakCeilingDb;
@@ -700,31 +978,38 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
         bool havePrev = false;
 
         if (normalizing)
-            gainDb = target - analyse (mixedAll, sr).integratedLufs;
+        {
+            StatsAccumulator mixStats (spec.channels, sr);
+
+            if (auto e = streamMixed ([&] (const float* const* p, int n) -> std::optional<Error> { mixStats.add (p, n); return std::nullopt; }))
+                return *e;
+
+            gainDb = target - mixStats.finish().integratedLufs;
+        }
 
         for (int pass = 0; pass < (normalizing ? 4 : 1); ++pass)
         {
             if (cancelRequested())
                 return makeError (errc::cancelled, "the render was cancelled");
 
-            auto trial = mixedAll;
-            LimiterSettings ls;
-            ls.ceilingDbtp = ceiling;
+            double ceilingTry = ceiling, usedCeiling = ceiling;
             LimiterResult lr;
             AudioStats st;
 
             for (int attempt = 0; attempt < 4; ++attempt)
             {
-                if (attempt > 0)
-                    trial = mixedAll;
+                StatsAccumulator acc (spec.channels, sr);
+                usedCeiling = ceilingTry;
 
-                lr = limitTruePeak (trial, sr, gainDb, ls);
-                st = analyse (trial, sr);
+                if (auto e = runLimiter (gainDb, ceilingTry, lr, [&] (const float* const* p, int n) -> std::optional<Error> { acc.add (p, n); return std::nullopt; }))
+                    return *e;
+
+                st = acc.finish();
 
                 if (st.truePeakDbtp <= ceiling + 0.01)
                     break;
 
-                ls.ceilingDbtp -= st.truePeakDbtp - ceiling + 0.02;     // the detector missed an inter-sample peak: tighten and redo
+                ceilingTry -= st.truePeakDbtp - ceiling + 0.02;     // the detector missed an inter-sample peak: tighten and redo
             }
 
             ++limiterPasses;
@@ -733,7 +1018,7 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
             if (err < bestErr)
             {
                 bestErr = err;
-                limited = std::move (trial);
+                limiterCeilingDb = usedCeiling;
                 limiterResult = lr;
                 lastGain = gainDb;
             }
@@ -779,49 +1064,67 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
         return sink.error();
 
     StatsAccumulator after (spec.channels, sr);
-    std::vector<std::vector<float>> mixed ((size_t) spec.channels);
-    const int srcChannels = (int) reader.value()->channels();
+    std::int64_t written = 0;
 
-    for (std::int64_t pos = 0; pos < frameLimit;)
+    auto encodeBlock = [&] (const float* const* ptrs, int n) -> std::optional<Error>
     {
-        if (cancelRequested())
-            return makeError (errc::cancelled, "the render was cancelled");
-
-        const int n = (int) std::min<std::int64_t> (65536, frameLimit - pos);
-        const auto* planar = reader.value()->read (pos, n);
-
-        if (planar == nullptr)
-            return makeError (errc::io, "cannot read the rendered file back");
-
-        for (int c = 0; c < spec.channels && ! useLimiter; ++c)
-        {
-            auto& dst = mixed[(size_t) c];
-            dst.resize ((size_t) n);
-
-            for (int i = 0; i < n; ++i)
-            {
-                // mono target from a stereo render: average; stereo target from a mono render: duplicate
-                const float v = spec.channels == 1 && srcChannels > 1 ? 0.5f * (planar[0][i] + planar[1][i])
-                                                                      : planar[std::min (c, srcChannels - 1)][i];
-                dst[(size_t) i] = v * gain;
-            }
-        }
-
-        std::vector<const float*> ptrs;
-
-        for (int c = 0; c < spec.channels; ++c)
-            ptrs.push_back (useLimiter ? limited[(size_t) c].data() + pos : mixed[(size_t) c].data());
-
-        after.add (ptrs.data(), n);
+        after.add (ptrs, n);
 
         if (req.hooks.audioTap)
-            req.hooks.audioTap (out.index, ptrs.data(), spec.channels, n);
+            req.hooks.audioTap (out.index, ptrs, spec.channels, n);
 
-        if (! sink.value()->write (ptrs.data(), n))
+        if (! sink.value()->write (ptrs, n))
             return makeError (errc::io, "cannot write " + partPath.string());
 
-        pos += n;
-        progressAt (0.85 + 0.15 * (double) pos / (double) std::max<std::int64_t> (1, frameLimit), "encoding");
+        written += n;
+        progressAt (0.85 + 0.15 * (double) written / (double) std::max<std::int64_t> (1, frameLimit), "encoding");
+        return std::nullopt;
+    };
+
+    if (useLimiter)
+    {
+        LimiterResult finalRun;
+
+        if (auto e = runLimiter (gainDb, limiterCeilingDb, finalRun, encodeBlock))
+            return *e;
+    }
+    else
+    {
+        std::vector<std::vector<float>> mixed ((size_t) spec.channels);
+        std::vector<const float*> ptrs ((size_t) spec.channels);
+
+        for (std::int64_t pos = 0; pos < frameLimit;)
+        {
+            if (cancelRequested())
+                return makeError (errc::cancelled, "the render was cancelled");
+
+            const int n = (int) std::min<std::int64_t> (65536, frameLimit - pos);
+            const auto* planar = reader.value()->read (pos, n);
+
+            if (planar == nullptr)
+                return makeError (errc::io, "cannot read the rendered file back");
+
+            for (int c = 0; c < spec.channels; ++c)
+            {
+                auto& dst = mixed[(size_t) c];
+                dst.resize ((size_t) n);
+
+                for (int i = 0; i < n; ++i)
+                {
+                    // mono target from a stereo render: average; stereo target from a mono render: duplicate
+                    const float v = spec.channels == 1 && srcCh > 1 ? 0.5f * (planar[0][i] + planar[1][i])
+                                                                    : planar[std::min (c, srcCh - 1)][i];
+                    dst[(size_t) i] = v * gain;
+                }
+
+                ptrs[(size_t) c] = dst.data();
+            }
+
+            if (auto e = encodeBlock (ptrs.data(), n))
+                return *e;
+
+            pos += n;
+        }
     }
 
     if (! sink.value()->close())

@@ -4,6 +4,7 @@
 #include "StockFx.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <complex>
 
@@ -1877,48 +1878,47 @@ double ReaFir::curveGainDb (const std::vector<ReaFirPoint>& pts, double hz)
     return pts.back().gainDb;
 }
 
-void ReaFir::prepare (double sampleRate)
+namespace
 {
-    sampleRate_ = sampleRate;
-    setParams (params_);
+std::atomic<int> firDesignCounter { 0 };
 }
 
-void ReaFir::reset()
-{
-    for (auto& h : history_)
-        std::fill (h.begin(), h.end(), 0.0);
+int ReaFir::designCountForTest()            { return firDesignCounter.load(); }
 
-    pos_ = 0;
+int ReaFir::latencyFor (const ReaFirParams& p)
+{
+    return curveIsFlat (p.points) ? 0 : std::clamp (p.fftSize, 64, 65536) / 4;
 }
 
-void ReaFir::setParams (const ReaFirParams& p)
+std::shared_ptr<const ReaFirDesign> ReaFir::design (const ReaFirParams& p, double sampleRate)
 {
-    params_ = p;
-    std::sort (params_.points.begin(), params_.points.end(), [] (const ReaFirPoint& a, const ReaFirPoint& b) { return a.freqHz < b.freqHz; });
-    firActive_ = ! curveIsFlat (params_.points);
-    taps_.clear();
-    half_ = 0;
+    ++firDesignCounter;
+    auto d = std::make_shared<ReaFirDesign>();
+    d->params = p;
+    std::sort (d->params.points.begin(), d->params.points.end(), [] (const ReaFirPoint& a, const ReaFirPoint& b) { return a.freqHz < b.freqHz; });
+    d->firActive = ! curveIsFlat (d->params.points);
 
-    if (! firActive_)
+    if (! d->firActive)
     {
-        gain_ = params_.outputGain * (params_.points.empty() ? 1.0 : std::pow (10.0, params_.points.front().gainDb / 20.0));
-        return;
+        d->gain = d->params.outputGain * (d->params.points.empty() ? 1.0 : std::pow (10.0, d->params.points.front().gainDb / 20.0));
+        return d;
     }
 
-    gain_ = 1.0;
-    const int n = std::clamp (params_.fftSize, 64, 65536);
-    half_ = n / 4;
+    d->gain = 1.0;
+    const int n = std::clamp (d->params.fftSize, 64, 65536);
+    const int half = n / 4;
+    d->half = half;
     std::vector<double> mag ((size_t) n / 2 + 1), cosTable ((size_t) n);
 
     for (size_t k = 0; k < mag.size(); ++k)
-        mag[k] = params_.outputGain * std::pow (10.0, curveGainDb (params_.points, (double) k * sampleRate_ / n) / 20.0);
+        mag[k] = d->params.outputGain * std::pow (10.0, curveGainDb (d->params.points, (double) k * sampleRate / n) / 20.0);
 
     for (size_t k = 0; k < cosTable.size(); ++k)
         cosTable[k] = std::cos (2.0 * pi * (double) k / n);
 
-    taps_.assign ((size_t) (2 * half_ + 1), 0.0);
+    d->taps.assign ((size_t) (2 * half + 1), 0.0);
 
-    for (int i = 0; i <= half_; ++i)
+    for (int i = 0; i <= half; ++i)
     {
         double acc = mag[0];
 
@@ -1926,36 +1926,91 @@ void ReaFir::setParams (const ReaFirParams& p)
             acc += 2.0 * mag[(size_t) k] * cosTable[(size_t) (((long long) k * i) % n)];
 
         acc += mag[(size_t) n / 2] * ((i & 1) ? -1.0 : 1.0);
-        const double w = 0.5 * (1.0 + std::cos (pi * i / (half_ + 1)));
-        taps_[(size_t) (half_ + i)] = taps_[(size_t) (half_ - i)] = acc / n * w;
+        const double w = 0.5 * (1.0 + std::cos (pi * i / (half + 1)));
+        d->taps[(size_t) (half + i)] = d->taps[(size_t) (half - i)] = acc / n * w;
     }
 
-    for (auto& h : history_)
-        h.assign (taps_.size() * 2, 0.0);
+    for (auto& h : d->history)
+        h.assign (d->taps.size() * 2, 0.0);
 
-    pos_ = 0;
+    return d;
+}
+
+void ReaFir::install (std::shared_ptr<const ReaFirDesign> d)
+{
+    if (d == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> lock (keepMutex_);
+    keep_.push_back (d);
+
+    // the audio thread only holds a raw pointer, picked up once per block: the last few designs stay alive, older ones are freed here
+    while (keep_.size() > 4)
+        keep_.erase (keep_.begin());
+
+    active_.store (d.get(), std::memory_order_release);
+}
+
+void ReaFir::prepare (double sampleRate)
+{
+    sampleRate_ = sampleRate;
+    install (design (params_, sampleRate_));
+}
+
+void ReaFir::reset()
+{
+    if (auto* d = active_.load (std::memory_order_acquire))
+    {
+        for (auto& h : d->history)
+            std::fill (h.begin(), h.end(), 0.0);
+
+        d->pos = 0;
+    }
+}
+
+void ReaFir::setParams (const ReaFirParams& p)
+{
+    params_ = p;
+    install (design (p, sampleRate_));
+}
+
+int ReaFir::latencySamples() const
+{
+    const auto* d = active_.load (std::memory_order_acquire);
+    return d != nullptr && d->firActive ? d->half : 0;
+}
+
+bool ReaFir::isFlat() const
+{
+    const auto* d = active_.load (std::memory_order_acquire);
+    return d == nullptr || ! d->firActive;
 }
 
 void ReaFir::process (float* const* io, int numChannels, int numSamples)
 {
-    const int nch = std::min(numChannels, 2);
+    const auto* d = active_.load (std::memory_order_acquire);
 
-    if (! firActive_)
+    if (d == nullptr)
+        return;
+
+    const int nch = std::min (numChannels, 2);
+
+    if (! d->firActive)
     {
-        if (gain_ != 1.0)
+        if (d->gain != 1.0)
             for (int c = 0; c < nch; ++c)
                 for (int i = 0; i < numSamples; ++i)
-                    io[c][i] = toFloat (io[c][i] * gain_);
+                    io[c][i] = toFloat (io[c][i] * d->gain);
 
         return;
     }
 
-    const size_t len = taps_.size();
+    const size_t len = d->taps.size();
 
     for (int c = 0; c < nch; ++c)
     {
-        auto& h = history_[(size_t) c];
-        size_t pos = pos_;
+        auto& h = d->history[(size_t) c];
+        size_t pos = d->pos;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -1964,14 +2019,14 @@ void ReaFir::process (float* const* io, int numChannels, int numSamples)
             double acc = 0.0;
 
             for (size_t j = 0; j < len; ++j)
-                acc += taps_[j] * x[j];
+                acc += d->taps[j] * x[j];
 
             io[c][i] = toFloat (acc);
             pos = pos + 1 >= len ? 0 : pos + 1;
         }
     }
 
-    pos_ = (pos_ + (size_t) numSamples) % len;
+    d->pos = (d->pos + (size_t) numSamples) % len;
 }
 
 } // namespace rovox::fx

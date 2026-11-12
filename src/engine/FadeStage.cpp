@@ -111,11 +111,20 @@ public:
         if (fc.destBuffer == nullptr || fc.bufferNumSamples <= 0)
             return;
 
-        std::shared_ptr<const Regions> regions;
+        // a raw pointer, marked in use: the message thread keeps a replaced list alive until the audio thread has let go of it,
+        // so the audio thread never owns (and never frees) a list
+        const Regions* regions = nullptr;
         {
             const juce::SpinLock::ScopedLockType lock (lock_);
-            regions = regions_;
+            regions = regions_.get();
+            inUse_ = regions;
         }
+
+        struct Release
+        {
+            RovoxItemFades& o;
+            ~Release()      { const juce::SpinLock::ScopedLockType lock (o.lock_); o.inUse_ = nullptr; }
+        } release { *this };
 
         if (regions == nullptr || regions->empty())
             return;
@@ -202,7 +211,7 @@ private:
 
     void rebuild()
     {
-        auto next = std::make_shared<Regions>();
+        auto next = std::make_unique<Regions>();
 
         if (auto* track = dynamic_cast<te::ClipTrack*> (getOwnerTrack()))
             for (auto* clip : track->getClips())
@@ -221,8 +230,30 @@ private:
                     next->push_back (r);
             }
 
-        const juce::SpinLock::ScopedLockType lock (lock_);
-        regions_ = std::move (next);
+        // publish; the old list is freed here (message thread) unless the audio thread is still reading it, then on a later call
+        std::vector<std::unique_ptr<const Regions>> dead;
+        dead.reserve (retired_.size() + 2);
+        {
+            const juce::SpinLock::ScopedLockType lock (lock_);
+
+            if (regions_ != nullptr)
+                retired_.push_back (std::move (regions_));
+
+            regions_ = std::move (next);
+
+            for (auto it = retired_.begin(); it != retired_.end();)
+            {
+                if (it->get() != inUse_)
+                {
+                    dead.push_back (std::move (*it));
+                    it = retired_.erase (it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        }
     }
 
     static bool concerns (const juce::Identifier& id)
@@ -252,7 +283,9 @@ private:
     juce::ValueTree owner_;
     Watcher watcher_;
     juce::SpinLock lock_;
-    std::shared_ptr<const Regions> regions_;
+    std::unique_ptr<const Regions> regions_;
+    std::vector<std::unique_ptr<const Regions>> retired_;       // replaced lists the audio thread may still be reading (under lock_)
+    const Regions* inUse_ = nullptr;                            // the list the audio thread is reading right now (under lock_)
 };
 
 /** The stage at the head of the track's chain; creates it when missing. */

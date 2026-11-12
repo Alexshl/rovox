@@ -750,3 +750,97 @@ ROVOX_TEST (render, a_nan_in_the_sink_writes_a_finite_file_and_is_counted)
         CHECK (back[0][10] == 0.0f);
     }
 }
+
+//==============================================================================
+// Bounded-memory limiter, determinism of the preflight, MP3 Info tag
+namespace rovox
+{
+void setLimiterChunkFramesForTest (int frames);
+}
+
+ROVOX_TEST (render, limiter_in_small_chunks_equals_the_single_pass_result_sample_for_sample)
+{
+    test::Env env;
+    const auto id = env.newProject ("render");
+    const auto dir = test::makeTempDir ("peaky-chunks");
+    test::writeWav (dir / "peaky.wav", { peakySignal (20.0, 44100.0, 0.0), peakySignal (20.0, 44100.0, 0.7) }, 44100.0, 24);
+    auto plan = env.ok (id, "import.plan", { { "paths", { (dir / "peaky.wav").string() } } });
+    env.ok (id, "import.apply", { { "plan_id", plan["plan_id"] } });
+
+    std::vector<std::vector<std::vector<float>>> results;
+
+    for (int chunk : { 0, 4099, 777 })      // 0 = the default size
+    {
+        setLimiterChunkFramesForTest (chunk);
+        auto req = plainRequest();
+        req.name = "chunks_" + std::to_string (chunk);
+        req.format.bitDepth = 32;
+        req.loudness.mode = "normalize";
+        req.loudness.targetLufs = -14.0;
+        req.loudness.toleranceLu = 0.3;
+        auto r = renderProject (env.project (id), req);
+        setLimiterChunkFramesForTest (0);
+        REQUIRE (r.ok());
+        std::vector<std::vector<float>> data;
+        double sr = 0;
+        REQUIRE (test::readWav (r.value()["file"]["abs_path"].get<std::string>(), data, sr));
+        results.push_back (std::move (data));
+    }
+
+    REQUIRE (results[0].size() == 2);
+    CHECK (results[0][0].size() == 20 * 44100);
+
+    for (size_t k = 1; k < results.size(); ++k)
+        for (size_t c = 0; c < 2; ++c)
+            CHECK (results[k][c] == results[0][c]);
+}
+
+ROVOX_TEST (render, two_renders_of_a_stock_instrument_project_are_bit_identical)
+{
+    const auto root = test::makeTempDir ("render-kit-det");
+    writeTinyKit (root / "drskit", "CC0");
+    KitPathScope scope (root);
+
+    test::Env env;
+    const auto id = env.newProject ("kit");
+    const auto track = env.ok (id, "track.create", { { "name", "Drums" } })["track_id"].get<std::string>();
+    REQUIRE (env.run (id, "fx.add", { { "track_id", track }, { "builtin", "rovox:drums" } }).ok);
+    REQUIRE (env.run (id, "item.create_midi", { { "track_id", track }, { "notes", { { { "pitch", 36 }, { "start_qn", 0.0 }, { "length_qn", 0.25 }, { "velocity", 110 } },
+                                                                                       { { "pitch", 36 }, { "start_qn", 1.0 }, { "length_qn", 0.25 }, { "velocity", 90 } } } } }).ok);
+
+    std::vector<std::vector<std::vector<float>>> results;
+
+    for (int i = 0; i < 2; ++i)
+    {
+        auto req = plainRequest();
+        req.name = "det_" + std::to_string (i);
+        req.format.bitDepth = 32;
+        auto r = renderProject (env.project (id), req);
+        REQUIRE (r.ok());
+        std::vector<std::vector<float>> data;
+        double sr = 0;
+        REQUIRE (test::readWav (r.value()["file"]["abs_path"].get<std::string>(), data, sr));
+        results.push_back (std::move (data));
+    }
+
+    REQUIRE (results[0].size() == 2);
+    CHECK (results[0] == results[1]);
+}
+
+ROVOX_TEST (render, mp3_carries_the_info_tag_frame_at_the_start)
+{
+    test::Env env;
+    const auto id = sineProject (env, -12.0, 2.0);
+    auto req = plainRequest();
+    req.name = "tagged";
+    req.format.container = "mp3";
+    auto r = renderProject (env.project (id), req);
+    REQUIRE (r.ok());
+
+    std::ifstream in (r.value()["file"]["abs_path"].get<std::string>(), std::ios::binary);
+    std::string head (2048, '\0');
+    in.read (head.data(), (std::streamsize) head.size());
+    head.resize ((size_t) in.gcount());
+    CHECK (head.find ("Info") != std::string::npos || head.find ("Xing") != std::string::npos);
+    CHECK (head.find ("LAME") != std::string::npos);
+}
