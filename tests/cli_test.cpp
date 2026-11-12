@@ -357,6 +357,10 @@ ROVOX_TEST (cli, mcp_speaks_json_rpc_on_stdout_and_exits_at_end_of_input)
     {
         auto j = json::parse (line, nullptr, false);
         REQUIRE (! j.is_discarded());          // nothing but JSON-RPC on stdout
+
+        if (! j.contains ("id"))
+            continue;                                // notifications (resources/list_changed) are valid JSON-RPC but no response
+
         ++responses;
 
         if (j["id"] == 1001)

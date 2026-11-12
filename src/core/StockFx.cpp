@@ -786,6 +786,10 @@ void ReaDelay::process (float* const* io, int numChannels, int numSamples)
         double x[2] = { io[0][i], nch > 1 ? (double) io[1][i] : 0.0 };
         double sum[2] = { 0.0, 0.0 };
 
+        for (auto& v : x)
+            if (! std::isfinite (v))
+                v = 0.0;                                    // a NaN/Inf from upstream is replaced, never fed into the loop or passed on
+
         for (size_t t = 0; t < (size_t) ReaDelayParams::maxTaps; ++t)
         {
             const auto& tap = params_.taps[t];

@@ -349,7 +349,8 @@ ROVOX_TEST (upload, command_layer_over_http_with_a_running_message_loop)
     CHECK (conflictStatus == 409);
     CHECK (listCount == 1);
     CHECK (revision >= 1);
-    CHECK (f.env.run (projectId, "history.list").data["undo"][0]["origin"]["kind"] == "ui");
+    // REST is an agent over HTTP: the route decides the origin, the body's claim of being the UI is ignored
+    CHECK (f.env.run (projectId, "history.list").data["undo"][0]["origin"]["kind"] == "mcp");
 }
 
 //==============================================================================

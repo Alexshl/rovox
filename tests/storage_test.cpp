@@ -802,8 +802,7 @@ ROVOX_TEST (storage, s3_client_never_leaves_a_truncated_download_in_place)
         res.set_content_provider (100, "application/octet-stream", [] (size_t, size_t, httplib::DataSink& sink)
         {
             sink.write ("0123456789", 10);
-            sink.done();
-            return true;
+            return false;                                   // the provider fails: the connection drops short of the announced length
         });
     });
     const int port = svr.bind_to_any_port ("127.0.0.1");
