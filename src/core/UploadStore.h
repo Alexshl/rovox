@@ -62,6 +62,8 @@ public:
         bool write (const char* data, size_t size);
         std::uint64_t written() const       { return written_; }
         std::uint64_t startOffset() const   { return start_; }
+        /** True once a write was refused because it would pass Upload-Length (the PATCH answers 413). */
+        bool overflowed() const             { return overflow_; }
         /** Cuts the file back to where this PATCH started. */
         void rollback();
 
@@ -70,7 +72,8 @@ public:
         UploadStore* store_ = nullptr;
         std::string id_;
         int fd_ = -1;
-        std::uint64_t start_ = 0, written_ = 0;
+        std::uint64_t start_ = 0, written_ = 0, length_ = 0;
+        bool overflow_ = false;
     };
 
     /** BUSY if another PATCH on this upload is running (or too many are), PRECONDITION_FAILED if the offset does not match. */

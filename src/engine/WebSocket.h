@@ -54,6 +54,8 @@ public:
     void run (const std::function<void (const std::string&)>& onText);
 
     size_t maxQueuedBytes = 32 * 1024;
+    /** Largest text message, summed over its continuation frames; a longer one is answered with close code 1009. */
+    size_t maxMessageBytes = 1u << 20;
     std::atomic<std::int64_t> droppedFrames { 0 };
 
 private:

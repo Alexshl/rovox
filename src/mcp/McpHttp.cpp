@@ -3,35 +3,19 @@
 
 #include "McpHttp.h"
 
+#include "RequestGuard.h"
+
 #include <httplib.h>
+
+#include <atomic>
+#include <mutex>
+#include <set>
 
 namespace rovox::mcp
 {
 
 namespace
 {
-std::string hostOf (std::string s)
-{
-    if (const auto scheme = s.find ("://"); scheme != std::string::npos)
-        s = s.substr (scheme + 3);
-
-    if (const auto slash = s.find ('/'); slash != std::string::npos)
-        s = s.substr (0, slash);
-
-    if (! s.empty() && s[0] == '[')
-        return s.substr (0, s.find (']') + 1);
-
-    if (const auto colon = s.find (':'); colon != std::string::npos)
-        s = s.substr (0, colon);
-
-    return s;
-}
-
-bool isLoopbackName (const std::string& host)
-{
-    return host == "localhost" || host == "127.0.0.1" || host == "[::1]";
-}
-
 std::string dumpSafe (const json& j)    { return j.dump (-1, ' ', false, json::error_handler_t::replace); }
 
 void replyJson (httplib::Response& res, int status, const json& body)
@@ -75,23 +59,27 @@ bool wantsProgress (const json& body)
 
 bool originAllowed (const std::string& origin, const std::vector<std::string>& allowed)
 {
-    if (isLoopbackName (hostOf (origin)))
-        return true;
-
-    for (auto& a : allowed)
-        if (a == origin)
-            return true;
-
-    return false;
+    return guard::originInList (origin, allowed);
 }
 
 bool hostAllowed (const std::string& hostHeader)
 {
-    return hostHeader.empty() || isLoopbackName (hostOf (hostHeader));
+    return guard::hostAllowed (true, hostHeader);
 }
 
 void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions options)
 {
+    // sessions and SSE streams each cost a pool worker or memory: bounded, then 503 / 429
+    struct Limits
+    {
+        std::mutex mutex;
+        std::set<std::string> sessionIds;
+        std::atomic<int> streams { 0 };
+    };
+
+    auto limits = std::make_shared<Limits>();
+    const auto maxSessions = options.maxSessions, maxStreams = options.maxStreams;
+
     auto guard = [options] (const httplib::Request& req, httplib::Response& res) -> bool
     {
         // DNS rebinding: a browser page on another origin must not be able to talk to a local server
@@ -118,7 +106,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
         return true;
     };
 
-    svr.Post ("/mcp", [&server, guard] (const httplib::Request& req, httplib::Response& res)
+    svr.Post ("/mcp", [&server, guard, limits, maxSessions, maxStreams] (const httplib::Request& req, httplib::Response& res)
     {
         if (! guard (req, res))
             return;
@@ -136,7 +124,19 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
         if (isInit)
         {
-            session = server.createSession();
+            {
+                std::lock_guard<std::mutex> lock (limits->mutex);
+
+                for (auto it = limits->sessionIds.begin(); it != limits->sessionIds.end();)       // forget sessions that expired or were closed
+                    it = server.findSession (*it) ? std::next (it) : limits->sessionIds.erase (it);
+
+                if (limits->sessionIds.size() >= maxSessions)
+                    return replyJson (res, 503, rpcError (nullptr, -32000, "too many MCP sessions"));
+
+                session = server.createSession();
+                limits->sessionIds.insert (session->id);
+            }
+
             res.set_header ("Mcp-Session-Id", session->id);
         }
         else
@@ -165,6 +165,12 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
         if (wantsProgress (body) && ! isInit)
         {
+            if (limits->streams.fetch_add (1) >= (int) maxStreams)
+            {
+                --limits->streams;
+                return replyJson (res, 429, rpcError (body.value ("id", json (nullptr)), -32000, "too many concurrent event streams"));
+            }
+
             auto channel = std::make_shared<Channel>();
             rc.emit = [channel] (const json& n) { channel->push (n, false); };
             channel->worker = std::thread ([channel, &server, session, body, rc]() mutable
@@ -207,8 +213,10 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
                 (void) server;
                 return true;
             },
-            [channel] (bool)
+            [channel, limits] (bool)
             {
+                --limits->streams;
+
                 if (channel->worker.joinable())
                     channel->worker.join();
             });
@@ -226,7 +234,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
         replyJson (res, 200, *response);
     });
 
-    svr.Get ("/mcp", [&server, guard] (const httplib::Request& req, httplib::Response& res)
+    svr.Get ("/mcp", [&server, guard, limits, maxStreams] (const httplib::Request& req, httplib::Response& res)
     {
         if (! guard (req, res))
             return;
@@ -238,6 +246,12 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
         if (! session)
             return replyJson (res, 404, rpcError (nullptr, -32001, "unknown or expired session; initialize again"));
+
+        if (limits->streams.fetch_add (1) >= (int) maxStreams)
+        {
+            --limits->streams;
+            return replyJson (res, 429, rpcError (nullptr, -32000, "too many concurrent event streams"));
+        }
 
         session->touch();
         const int generation = ++session->streamGeneration;
@@ -278,7 +292,8 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
             }
 
             return true;
-        });
+        },
+        [limits] (bool) { --limits->streams; });
     });
 
     svr.Delete ("/mcp", [&server, guard] (const httplib::Request& req, httplib::Response& res)

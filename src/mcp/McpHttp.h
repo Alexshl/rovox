@@ -17,6 +17,8 @@ struct McpHttpOptions
 {
     std::vector<std::string> allowedOrigins;    // full origins such as https://example.com, besides loopback
     bool loopbackBind = true;                   // then the Host header must be a loopback name too (rebinding defence)
+    size_t maxSessions = 256;                   // initialize beyond this answers 503
+    size_t maxStreams = 32;                     // concurrent SSE streams (each holds a pool worker); beyond this 429
 };
 
 void installMcpRoutes (httplib::Server&, McpServer&, McpHttpOptions);

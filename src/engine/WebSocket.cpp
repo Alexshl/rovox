@@ -292,8 +292,13 @@ void WsConnection::run (const std::function<void (const std::string&)>& onText)
         if ((h[1] & 0x80) == 0 || ! readExact (mask, 4))
             break;                      // clients must mask (RFC 6455 5.1)
 
-        if (len > (1u << 20))
+        if (len > maxMessageBytes || message.size() + len > maxMessageBytes)
+        {
+            const std::uint8_t status[2] = { 0x03, 0xF1 };      // 1009 message too big
+            const auto frame = encodeWsFrame (0x8, status, sizeof status);
+            sendAll (fd_, frame->data(), frame->size());
             break;
+        }
 
         std::vector<std::uint8_t> payload ((size_t) len);
 

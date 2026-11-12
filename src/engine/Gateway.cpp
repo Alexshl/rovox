@@ -3,6 +3,7 @@
 
 #include "Gateway.h"
 
+#include "RequestGuard.h"
 #include "Transport.h"
 #include "Version.h"
 
@@ -15,25 +16,6 @@ namespace rovox
 
 namespace
 {
-std::string hostOfOrigin (std::string o)
-{
-    if (const auto scheme = o.find ("://"); scheme != std::string::npos)
-        o = o.substr (scheme + 3);
-
-    if (const auto slash = o.find ('/'); slash != std::string::npos)
-        o = o.substr (0, slash);
-
-    if (! o.empty() && o[0] == '[')
-        return o.substr (0, o.find (']') + 1);
-
-    return o.substr (0, o.find (':'));
-}
-
-bool isLoopbackName (const std::string& h)
-{
-    return h == "localhost" || h == "127.0.0.1" || h == "[::1]" || h == "::1";
-}
-
 std::string cookieValue (const std::string& cookies, const std::string& name)
 {
     size_t pos = 0;
@@ -111,23 +93,12 @@ bool Gateway::tokenMatches (const std::string& expected, const std::string& auth
     if (expected.empty())
         return true;
 
-    if (authorization == "Bearer " + expected)
-        return true;
-
-    return constantTimeEquals (cookieValue (cookie, "rovox_token"), expected) || constantTimeEquals (queryValue (query, "token"), expected);
+    return constantTimeEquals (authorization, "Bearer " + expected) || constantTimeEquals (cookieValue (cookie, "rovox_token"), expected) || constantTimeEquals (queryValue (query, "token"), expected);
 }
 
-bool Gateway::originAllowed (const std::string& origin, const std::string& host, const std::vector<std::string>& allowed)
+bool Gateway::originAllowed (const std::string& origin, const std::string& host, const std::vector<std::string>& allowed, bool loopbackBind)
 {
-    if (origin.empty())
-        return true;                    // not a browser
-
-    const auto originHost = hostOfOrigin (origin);
-
-    if (isLoopbackName (originHost) || (! host.empty() && originHost == hostOfOrigin (host)))
-        return true;
-
-    return std::find (allowed.begin(), allowed.end(), origin) != allowed.end();
+    return guard::requestAllowed (loopbackBind, origin, host, allowed);
 }
 
 //==============================================================================
@@ -196,7 +167,7 @@ void Gateway::handleUpgrade (int fd, WsRequest req)
     if (! tokenMatches (options_.token, header ("authorization"), header ("cookie"), req.query))
         return wsSendHttp (fd, 401, "Unauthorized", "missing or wrong token"), void (::close (fd));
 
-    if (! originAllowed (header ("origin"), header ("host"), options_.allowedOrigins))
+    if (! originAllowed (header ("origin"), header ("host"), options_.allowedOrigins, options_.loopbackBind))
         return wsSendHttp (fd, 403, "Forbidden", "Origin not allowed"), void (::close (fd));
 
     if (clientCount() >= (int) options_.maxClients)
