@@ -133,6 +133,7 @@ private:
     std::condition_variable cv_;                    // job finished / changed
     std::map<std::string, std::shared_ptr<Entry>> jobs_;
     std::map<std::string, std::string> byRequest_;  // "tenant|project|client_request_id" -> job id
+    std::vector<std::string> evictedForReport_, evictedForPersist_;     // under mutex_: evicted ids whose revision bookkeeping is pruned by report() / persist()
     std::map<std::string, std::unique_ptr<Pool>> pools_;
     bool stopping_ = false;
 

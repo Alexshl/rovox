@@ -165,6 +165,12 @@ public:
             blockSize_ = std::max (1, info.blockSizeSamples);
         }
 
+        renderWait_ = RenderWait::pending;
+        {
+            std::lock_guard<std::mutex> lock (mutex_);
+            renderFailure_.clear();
+        }
+
         scratchL_.assign ((size_t) blockSize_, 0.0f);
         scratchR_.assign ((size_t) blockSize_, 0.0f);
         events_.reserve (1024);
@@ -196,8 +202,33 @@ public:
         for (int c = 0; c < fc.destBuffer->getNumChannels(); ++c)
             fc.destBuffer->clear (c, fc.bufferStartSample, fc.bufferNumSamples);
 
-        if (fc.isRendering && ! failed_ && ! sameRate (loadedRate_.load(), requestedRateA_.load()))
-            waitUntilSettled (std::chrono::seconds (30));
+        if (fc.isRendering && ! failed_)
+        {
+            // wait for the kit once per render instance (initialise() re-arms it) and remember the outcome: a kit that is still not
+            // settled after the bounded wait fails the render explicitly instead of rendering silence or stale samples
+            if (renderWait_ == RenderWait::pending && ! sameRate (loadedRate_.load(), requestedRateA_.load()))
+                renderWait_ = waitUntilSettled (std::chrono::seconds (30));
+            else if (renderWait_ == RenderWait::pending)
+                renderWait_ = RenderWait::settled;
+
+            if (renderWait_ == RenderWait::timedOut)
+            {
+                {
+                    std::lock_guard<std::mutex> lock (mutex_);
+
+                    if (renderFailure_.empty())
+                        renderFailure_ = "Rovox Drums: the drum kit '" + kitId_ + "' was not ready after 30 s (" + message_ + "); the render would be silent or use stale samples";
+                }
+
+                if (auto* job = juce::ThreadPoolJob::getCurrentThreadPoolJob())
+                    job->signalJobShouldExit();
+
+                return;
+            }
+
+            if (renderWait_ == RenderWait::cancelled)
+                return;
+        }
 
         std::unique_lock<std::mutex> lock (samplerMutex_, std::try_to_lock);
 
@@ -327,8 +358,16 @@ private:
                 std::swap (events_[j - 1], events_[j]);
     }
 
+    std::string renderFailure()
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        return renderFailure_;
+    }
+
     /** Offline renders wait here until the kit is decoded (or has failed): the first block must already sound. */
-    void waitUntilSettled (std::chrono::seconds limit)
+    enum class RenderWait { pending, settled, timedOut, cancelled };
+
+    RenderWait waitUntilSettled (std::chrono::seconds limit)
     {
         std::unique_lock<std::mutex> lock (mutex_);
         const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -338,13 +377,15 @@ private:
         while (! settled() && std::chrono::steady_clock::now() < deadline)
         {
             if (juce::Thread::currentThreadShouldExit())
-                return;
+                return RenderWait::cancelled;
 
             if (auto* job = juce::ThreadPoolJob::getCurrentThreadPoolJob(); job != nullptr && job->shouldExit())
-                return;
+                return RenderWait::cancelled;
 
             cv_.wait_for (lock, std::chrono::milliseconds (100), settled);
         }
+
+        return settled() ? RenderWait::settled : RenderWait::timedOut;
     }
 
     void startWorker()
@@ -505,6 +546,8 @@ private:
     double requestedRate_ = 44100.0, loadedRateD_ = 0.0;      // decoded for 44.1 kHz at once, again if the engine runs at another rate
     std::atomic<double> requestedRateA_ { 0.0 }, loadedRate_ { 0.0 };       // for the audio thread
     std::atomic<bool> failed_ { false };
+    RenderWait renderWait_ = RenderWait::pending;       // audio / render thread only
+    std::string renderFailure_;                         // under mutex_: why this instance failed its render
     std::string kitId_;
     int blockSize_ = 512;
     std::thread worker_;
@@ -528,6 +571,14 @@ json drumsPluginExtras (te::Plugin& p, double waitS)
         return d->extras (waitS);
 
     return nullptr;
+}
+
+std::string drumsRenderFailure (te::Plugin& p)
+{
+    if (auto* d = dynamic_cast<RovoxDrums*> (&p))
+        return d->renderFailure();
+
+    return {};
 }
 
 json drumsKitIdentity (te::Plugin& p, double waitS)

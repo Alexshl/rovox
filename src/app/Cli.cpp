@@ -19,6 +19,7 @@
 #include "PluginScan.h"
 #include "ProjectManager.h"
 #include "RemoteStorage.h"
+#include "RequestGuard.h"
 #include "Render.h"
 #include "RenderJobs.h"
 #include "Sha1.h"
@@ -689,6 +690,19 @@ void restrictToAllowedPaths (EngineConfig& cfg, const Options& o)
         for (auto& p : split (env, ':'))
             cfg.allowedRoots.emplace_back (p);
 }
+
+/** --allow-host plus $ROVOX_ALLOWED_HOSTS (comma separated). */
+std::vector<std::string> allowedHosts (const Options& o)
+{
+    auto hosts = o.allowHosts;
+
+    if (const char* env = std::getenv ("ROVOX_ALLOWED_HOSTS"))
+        for (auto& h : split (env, ','))
+            if (! h.empty())
+                hosts.push_back (h);
+
+    return hosts;
+}
 } // namespace
 
 int runServe (const Options& o)
@@ -737,7 +751,7 @@ int runServe (const Options& o)
     so.port = o.port;
     so.token = ! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : "");
 
-    const bool loopback = o.bind == "127.0.0.1" || o.bind == "localhost" || o.bind == "::1";
+    const bool loopback = guard::isLoopbackBind (o.bind);
     bool generated = false;
 
     if (! loopback && so.token.empty() && (o.generateToken || std::getenv ("ROVOX_GENERATE_TOKEN") != nullptr))
@@ -751,6 +765,7 @@ int runServe (const Options& o)
 
     so.webDir = resolveWebDir (o);
     so.allowedOrigins = o.allowOrigins;
+    so.allowedHosts = allowedHosts (o);
 
     if (! o.sourceUrl.empty())
         so.sourceUrl = o.sourceUrl;
@@ -761,6 +776,8 @@ int runServe (const Options& o)
     GatewayOptions gatewayOptions;
     gatewayOptions.token = so.token;
     gatewayOptions.allowedOrigins = o.allowOrigins;
+    gatewayOptions.allowedHosts = so.allowedHosts;
+    gatewayOptions.loopbackBind = loopback;
     gatewayOptions.sourceUrl = so.sourceUrl;
     Gateway gateway (host, pm, bus, hub, executor, gatewayOptions);
     server.setGateway (&gateway);
@@ -769,7 +786,7 @@ int runServe (const Options& o)
     mcpCfg.uploadBatchStatus = [&server] (const std::string& id) { return server.uploads().batchStatus (id); };
     mcpCfg.uploadFinish = [&server] (const std::string& id) { return server.uploads().finish (id); };
     McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
-    server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .allowedOrigins = o.allowOrigins, .loopbackBind = loopback }); });
+    server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .allowedOrigins = o.allowOrigins, .allowedHosts = so.allowedHosts, .loopbackBind = loopback }); });
 
     if (auto started = server.start(); ! started.ok())
         return fail (started.error().message);

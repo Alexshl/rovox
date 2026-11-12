@@ -578,6 +578,13 @@ Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange r
         return makeError (errc::busy, "render made no progress for " + std::to_string ((int) stallTimeoutS) + " s and was cancelled");
     }
 
+    for (auto* plugin : te::getAllPlugins (edit, false))
+        if (const auto why = drumsRenderFailure (*plugin); ! why.empty())
+        {
+            outFile.deleteFile();
+            return makeError (errc::internal, "render failed: " + why);
+        }
+
     if (task.errorMessage.isNotEmpty())
     {
         outFile.deleteFile();

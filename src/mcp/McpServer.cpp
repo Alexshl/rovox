@@ -173,6 +173,13 @@ McpServer::McpServer (ProjectManager& p, CommandBus& b, EventHub& h, JobManager&
     : projects_ (p), bus_ (b), hub_ (h), jobs_ (j), jobService_ (js), config_ (std::move (c))
 {
     {
+        std::random_device rd;
+        char buf[17];
+        std::snprintf (buf, sizeof buf, "%08x%08x", (unsigned) rd(), (unsigned) rd());
+        eventEpoch_ = buf;
+    }
+
+    {
         fs::path configFile = config_.configFile;
 
         if (configFile.empty())
@@ -749,7 +756,8 @@ Result<json> McpServer::diffSince (const std::string& project, std::uint64_t sin
     return json { { "from_revision", since }, { "to_revision", *current }, { "changes", changes }, { "note", "before/after values are not recorded; entities lists what changed, project.get returns the current values" } };
 }
 
-json McpServer::pollEvents (const std::string& tenant, const std::string& project, std::uint64_t since, size_t limit, std::chrono::milliseconds wait, const std::atomic<bool>* cancelled)
+json McpServer::pollEvents (const std::string& tenant, const std::string& project, std::uint64_t since, size_t limit, std::chrono::milliseconds wait, const std::atomic<bool>* cancelled,
+                            const std::string& clientEpoch)
 {
     const auto deadline = std::chrono::steady_clock::now() + wait;
     std::unique_lock<std::mutex> lock (eventMutex_);
@@ -773,10 +781,14 @@ json McpServer::pollEvents (const std::string& tenant, const std::string& projec
             last = eid;
         }
 
-        const bool resync = ! events_.empty() && since > 0 && events_.front().value ("event_id", (std::uint64_t) 0) > since + 1;
+        // an event the caller could see (its tenant, its project filter) with an id above `since` was evicted; or `since` is newer than anything
+        // this server ever published (a restart: ids begin again), or the client saw another epoch
+        const auto dropped = droppedEventId_.find (project.empty() ? tenant : tenant + '\x1f' + project);
+        const bool resync = (since > 0 && dropped != droppedEventId_.end() && dropped->second > since) || since > lastEventId_
+                            || (! clientEpoch.empty() && clientEpoch != eventEpoch_);
 
         if (! out.empty() || std::chrono::steady_clock::now() >= deadline || stopping_ || (cancelled != nullptr && cancelled->load()))
-            return { { "events", out }, { "next_event_id", last }, { "resync_required", resync } };
+            return { { "events", out }, { "next_event_id", last }, { "resync_required", resync }, { "event_epoch", eventEpoch_ } };
 
         eventCv_.wait_until (lock, std::min (deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds (100)));
     }
@@ -795,9 +807,17 @@ void McpServer::onHubEvent (const Event& e)
         json body = e.body;
         body["project_id"] = e.projectId.empty() ? body.value ("project_id", "") : e.projectId;
         events_.push_back (body);
+        lastEventId_ = std::max (lastEventId_, e.id);
 
         while (events_.size() > maxEvents)
+        {
+            const auto& old = events_.front();
+            const auto oldId = old.value ("event_id", (std::uint64_t) 0);
+            const auto oldTenant = old.value ("tenant_id", std::string());
+            droppedEventId_[oldTenant] = oldId;
+            droppedEventId_[oldTenant + '\x1f' + old.value ("project_id", std::string())] = oldId;
             events_.pop_front();
+        }
 
         if (type == "project.changed")
         {

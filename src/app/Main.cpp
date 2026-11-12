@@ -48,7 +48,8 @@ int main (int argc, char** argv)
     serve->add_option ("--allow-path", o.allowPaths, "Directory the API and MCP may read besides the data dir, e.g. a mounted /in (repeatable; default $ROVOX_ALLOWED_PATHS, ':' separated)");
     serve->add_flag ("--generate-token", o.generateToken, "With --bind beyond loopback and no token: generate one and print it (the container image does this by default)");
     serve->add_option ("--config", o.config, "Config file (reserved)");
-    serve->add_option ("--allow-origin", o.allowOrigins, "Browser Origin accepted by /mcp besides localhost (repeatable)");
+    serve->add_option ("--allow-origin", o.allowOrigins, "Browser Origin accepted by /api, /ws and /mcp besides localhost and the server's own host (repeatable); its host is also an accepted Host");
+    serve->add_option ("--allow-host", o.allowHosts, "Host header accepted on a loopback bind besides localhost, e.g. daw.example.com behind a reverse proxy (repeatable; default $ROVOX_ALLOWED_HOSTS, ',' separated)");
     serve->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();
     serve->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
     serve->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (AGPL section 13; default $ROVOX_SOURCE_URL)");

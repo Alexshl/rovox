@@ -717,6 +717,19 @@ struct WsClient
         ::send (fd, f.data(), f.size(), 0);
     }
 
+    /** The header of a masked text frame that claims `length` bytes (the server refuses it before reading any payload). */
+    void sendFrameHeaderOnly (uint64_t length)
+    {
+        std::vector<uint8_t> f { 0x81, 0x80 | 127 };
+
+        for (int shift = 56; shift >= 0; shift -= 8)
+            f.push_back ((uint8_t) (length >> shift));
+
+        const uint8_t mask[4] = { 1, 2, 3, 4 };
+        f.insert (f.end(), mask, mask + 4);
+        ::send (fd, f.data(), f.size(), 0);
+    }
+
     bool readExact (void* data, size_t n, int timeoutMs)
     {
         auto* p = (uint8_t*) data;
@@ -983,6 +996,10 @@ ROVOX_TEST (web, websocket_auth_origin_snapshot_events_and_audio)
     REQUIRE (ws.waitFor ("event", agentEvent));
     CHECK (agentEvent["origin"]["kind"] == "mcp");
     CHECK (agentEvent["origin"]["label"] == "http");
+    CHECK (agentEvent["origin"]["session"] != "ws_1");                  // the body's origin is ignored: neither kind, session nor label
+    CHECK (agentEvent["origin"]["session"] != session);
+    CHECK (agentEvent["origin"]["session"].get<std::string>().rfind ("http:", 0) == 0);
+    CHECK (agentEvent["origin"]["label"] != "Claude");
 
     // audio: play, receive Opus packets, 0x03 positions and 0x02 meters
     ws.sendText (R"({"t":"audio","on":true})");
@@ -1008,6 +1025,28 @@ ROVOX_TEST (web, websocket_auth_origin_snapshot_events_and_audio)
     CHECK (meters >= 25);
 
     ws.sendText (json { { "t", "cmd" }, { "id", "c_3" }, { "name", "transport.set" }, { "project_id", projectId }, { "params", { { "state", "stopped" } } } }.dump());
+
+    // a frame above the message limit is answered with close code 1009 (message too big)
+    {
+        WsClient big;
+        REQUIRE (big.open (port, { "Origin: http://localhost:" + std::to_string (port), "Authorization: Bearer tok123" }) == 101);
+        big.sendFrameHeaderOnly (2u << 20);
+        int opcode = -1;
+        std::vector<uint8_t> payload;
+        bool closed = false;
+
+        for (int i = 0; i < 20 && big.readFrame (opcode, payload, 3000); ++i)
+            if (opcode == 8)
+            {
+                closed = true;
+                break;
+            }
+
+        REQUIRE (closed);
+        REQUIRE (payload.size() >= 2);
+        CHECK (((payload[0] << 8) | payload[1]) == 1009);
+    }
+
     kill (server.pid, SIGTERM);
     CHECK (waitExit (server, 10) == 0);
 }

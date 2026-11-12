@@ -102,7 +102,7 @@ HttpServer::HttpServer (EngineHost& host, ProjectManager& pm, CommandBus& bus, E
     {
         const auto header = [&req] (const char* name) { auto it = req.headers.find (name); return it == req.headers.end() ? std::string() : it->second; };
 
-        if (! guard::requestAllowed (guard::isLoopbackBind (options_.bind), header ("origin"), header ("host"), options_.allowedOrigins))
+        if (! guard::requestAllowed (guard::isLoopbackBind (options_.bind), header ("origin"), header ("host"), options_.allowedOrigins, options_.allowedHosts))
         {
             wsSendHttp (fd, 403, "Forbidden", "Origin or Host not allowed");
             ::close (fd);
@@ -197,6 +197,7 @@ void HttpServer::installRoutes()
         const auto deny = [&res] (int status, const char* code, const char* message)
         {
             reply (res, status, { { "ok", false }, { "error", { { "code", code }, { "message", message } } } });
+            res.set_header ("Connection", "close");         // a body we did not read must not be parsed as the next request on a kept-alive connection
             return httplib::Server::HandlerResponse::Handled;
         };
 
@@ -206,8 +207,9 @@ void HttpServer::installRoutes()
         const bool uploadPath = req.path.rfind ("/api/uploads", 0) == 0;
         const bool apiPath = req.path.rfind ("/api/", 0) == 0;
 
-        // bodies are bounded before anything reads them (login is public); only uploads stream without a cap
-        if (! uploadPath)
+        // bodies are bounded before anything reads them (login is public); only the streamed tus PATCH goes without a cap
+        // (the tus POST / DELETE bodies keep the normal one)
+        if (! (uploadPath && req.method == "PATCH"))
         {
             const auto length = req.get_header_value ("Content-Length");
             const bool chunked = req.get_header_value ("Transfer-Encoding").find ("chunked") != std::string::npos;
@@ -218,12 +220,16 @@ void HttpServer::installRoutes()
 
             if (chunked || declared > options_.maxBodyBytes)
                 return deny (413, "PAYLOAD_TOO_LARGE", "request body is too large");
+
+            // without a length the server could read the body until EOF: refuse before reading
+            if (length.empty() && (req.method == "POST" || req.method == "PUT" || req.method == "PATCH"))
+                return deny (411, "LENGTH_REQUIRED", "Content-Length is required");
         }
 
         if (apiPath)
         {
             // CSRF and DNS rebinding: always, also without a token. Non-browser clients send no Origin.
-            if (! guard::requestAllowed (guard::isLoopbackBind (options_.bind), req.get_header_value ("Origin"), req.get_header_value ("Host"), options_.allowedOrigins))
+            if (! guard::requestAllowed (guard::isLoopbackBind (options_.bind), req.get_header_value ("Origin"), req.get_header_value ("Host"), options_.allowedOrigins, options_.allowedHosts))
                 return deny (403, "FORBIDDEN_ORIGIN", "Origin or Host not allowed");
 
             // a "simple" cross-origin POST (text/plain, form) must not reach the JSON handlers
@@ -408,11 +414,23 @@ void HttpServer::installRoutes()
     };
 
     // the origin comes from the route (REST = an agent over HTTP), never from the body: a client must not pass its edits off as the UI's
-    auto contextFrom = [] (const json& body, const std::string& project)
+    // the session (the undo-coalescing key) comes from the credential plus an optional short X-Rovox-Client name, so two REST clients do not share a gesture
+    auto contextFrom = [this] (const httplib::Request& req, const json& body, const std::string& project)
     {
         CommandContext ctx;
         ctx.projectId = project;
-        ctx.origin = { Origin::Kind::mcp, "http", "http" };
+        std::string session = "http:anon";
+
+        if (! options_.token.empty())
+            session = "http:" + sha256Hex (options_.token).substr (0, 8);
+
+        auto client = req.get_header_value ("X-Rovox-Client");
+        const bool valid = ! client.empty() && client.size() <= 32 && std::all_of (client.begin(), client.end(), [] (unsigned char c) { return std::isalnum (c) || c == '-' || c == '_' || c == '.'; });
+
+        if (valid)
+            session += ":" + client;
+
+        ctx.origin = { Origin::Kind::mcp, session, "http" };
 
         if (body.contains ("if_revision") && body["if_revision"].is_number_unsigned())
             ctx.ifRevision = body["if_revision"].get<std::uint64_t>();
@@ -451,7 +469,7 @@ void HttpServer::installRoutes()
         if (body.is_discarded() || ! body.is_object() || ! body.contains ("name") || ! body["name"].is_string())
             return reply (res, 400, { { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "body must be {\"name\": ..., \"params\": {...}}" } } } });
 
-        runCommand (body["name"].get<std::string>(), body.value ("params", json::object()), contextFrom (body, req.matches[1]), res);
+        runCommand (body["name"].get<std::string>(), body.value ("params", json::object()), contextFrom (req, body, req.matches[1]), res);
     });
 
     for (const char* dirName : { "renders", "previews" })

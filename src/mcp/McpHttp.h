@@ -16,7 +16,8 @@ namespace rovox::mcp
 struct McpHttpOptions
 {
     std::vector<std::string> allowedOrigins;    // full origins such as https://example.com, besides loopback
-    bool loopbackBind = true;                   // then the Host header must be a loopback name too (rebinding defence)
+    std::vector<std::string> allowedHosts;      // extra Host values accepted on a loopback bind (reverse proxy)
+    bool loopbackBind = true;                   // the same Origin / Host rule as REST and WebSocket (rebinding defence; same-host Origin only off loopback)
     size_t maxSessions = 256;                   // initialize beyond this answers 503
     size_t maxStreams = 32;                     // concurrent SSE streams (each holds a pool worker); beyond this 429
 };
@@ -25,6 +26,6 @@ void installMcpRoutes (httplib::Server&, McpServer&, McpHttpOptions);
 
 /** Exposed for tests. */
 bool originAllowed (const std::string& origin, const std::vector<std::string>& allowed);
-bool hostAllowed (const std::string& hostHeader);
+bool hostAllowed (const std::string& hostHeader, const std::vector<std::string>& allowedHosts = {});
 
 } // namespace rovox::mcp

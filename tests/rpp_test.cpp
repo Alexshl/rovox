@@ -319,6 +319,39 @@ ROVOX_TEST (rpp, no_copy_media_references_files_in_place_and_broken_files_change
     CHECK (! env.run (id, "import.rpp", { { "path", "/nonexistent.RPP" } }).ok);
 }
 
+ROVOX_TEST (rpp, media_outside_the_allowed_roots_is_reported_and_not_copied)
+{
+    test::Env env;
+    const auto allowed = test::makeTempDir ("rppallowed");
+    const auto outside = test::makeTempDir ("rppoutside");
+    test::writeWav (outside / "secret.wav", { test::sine (330, -14, 2.0, 44100) }, 44100, 24);
+    const auto rpp = allowed / "song.RPP";
+    std::ofstream (rpp) << "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  TEMPO 120 4 4 0\n  <TRACK {AAAAAAAA-0000-0000-0000-0000000000B1}\n    NAME \"Out\"\n"
+                           "    <ITEM\n      POSITION 0\n      LENGTH 2\n      <SOURCE WAVE\n        FILE \"" + (outside / "secret.wav").string() + "\"\n      >\n    >\n  >\n>\n";
+    const auto id = env.newProject ("forbidden");
+
+    // the path policy of `serve`: the .RPP itself is readable, the media it points at is not
+    struct Policy
+    {
+        explicit Policy (std::vector<fs::path> roots) { test::host().setPathPolicy (true, std::move (roots)); }
+        ~Policy() { test::host().setPathPolicy (false, {}); }
+    } policy ({ allowed });
+
+    auto r = env.run (id, "import.rpp", { { "path", rpp.string() } });
+    REQUIRE (r.ok);
+
+    bool refused = false;
+
+    for (auto& w : r.data["warnings"])
+        refused = refused || w["code"] == "MEDIA_PATH_FORBIDDEN";
+
+    CHECK (refused);
+    REQUIRE (r.data["missing_media"].size() == 1);
+    CHECK (r.data["missing_media"][0]["reason"] == "path not allowed");
+    CHECK (env.project (id).manifest().media.empty());
+    CHECK (fs::is_empty (env.project (id).mediaDir()));        // nothing was copied
+}
+
 //==============================================================================
 namespace
 {

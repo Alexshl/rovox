@@ -66,7 +66,11 @@ public:
     std::uint64_t publish (const std::string& tenant, const std::string& projectId, json body);
 
     /** Synchronous tap: called on the publishing thread, in publish order, before publish() returns. It must be cheap and
-        must not block (the MCP layer only appends to bounded in-memory rings). Returns an id for removeObserver(). */
+        must not block (the MCP layer only appends to bounded in-memory rings). Returns an id for removeObserver().
+
+        Locking contract: observers run while publishMutex_ is held (it is recursive, so a same-thread publish() would not deadlock but
+        would reorder events). An observer must not publish() or addObserver()/removeObserver() while it holds a lock of its own, and
+        must take only leaf locks (no lock that a publisher may hold while publishing). Lock order: JobManager reportMutex_ -> publishMutex_. */
     using Observer = std::function<void (const Event&)>;
     int addObserver (Observer);
     void removeObserver (int id);

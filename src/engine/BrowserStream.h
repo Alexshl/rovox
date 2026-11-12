@@ -50,11 +50,14 @@ public:
     void setPositionSource (te::Edit*);
     void forget (te::Edit*);
 
-    /** True when the clock thread woke up so late (more than a few periods) that it must restart its schedule from now
-        instead of firing the missed ticks back to back. */
-    static bool clockNeedsResync (std::chrono::nanoseconds late, std::chrono::nanoseconds period) noexcept
+    /** The clock resyncs (and bumps the epoch, which makes the client flush its jitter buffer) only for a stall longer than
+        this: it is tied to the client's jitter target. Shorter lateness is caught up silently by firing the missed ticks back to back. */
+    static constexpr std::chrono::milliseconds resyncThreshold { 250 };
+
+    /** True when the clock thread woke up so late that it must restart its schedule from now. */
+    static bool clockNeedsResync (std::chrono::nanoseconds late, std::chrono::nanoseconds /*period*/) noexcept
     {
-        return late > period * 4;
+        return late > resyncThreshold;
     }
 
     void addPlayingProjects (int delta)     { playingProjects_ += delta; }

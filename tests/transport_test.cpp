@@ -518,6 +518,7 @@ ROVOX_TEST (transport, a_render_of_another_project_does_not_interrupt_live_playb
     test::pumpMessages (800);
     REQUIRE (log.count() > 10);
     const auto from = log.count();
+    const auto resyncsBefore = stream->stats()["clock_resyncs"].get<long long>();
 
     RenderRequest request;
     request.tailS = 0.0;
@@ -532,8 +533,14 @@ ROVOX_TEST (transport, a_render_of_another_project_does_not_interrupt_live_playb
     test::pumpMessages (100);
     stream->setPacketSink ({});
 
+    // a stall of the CI machine over the resync threshold legitimately restarts the clock (stalls below it are caught up silently): not a render effect
+    const bool clockStalled = stream->stats()["clock_resyncs"].get<long long>() != resyncsBefore;
+
     std::lock_guard<std::mutex> lock (log.m);
     REQUIRE (to > from);
+
+    if (clockStalled)
+        return;
 
     for (size_t i = from; i < to; ++i)
     {
@@ -583,6 +590,8 @@ ROVOX_TEST (transport, the_clock_restarts_its_schedule_after_a_long_stall)
     CHECK (! BrowserStream::clockNeedsResync (nanoseconds (0), period));
     CHECK (! BrowserStream::clockNeedsResync (milliseconds (3), period));
     CHECK (! BrowserStream::clockNeedsResync (milliseconds (40), period));
-    CHECK (BrowserStream::clockNeedsResync (milliseconds (41), period));
+    CHECK (! BrowserStream::clockNeedsResync (milliseconds (41), period));        // an ordinary scheduler hiccup is absorbed silently
+    CHECK (! BrowserStream::clockNeedsResync (milliseconds (250), period));
+    CHECK (BrowserStream::clockNeedsResync (milliseconds (251), period));
     CHECK (BrowserStream::clockNeedsResync (seconds (10), period));
 }

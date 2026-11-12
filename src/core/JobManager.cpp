@@ -556,6 +556,18 @@ void JobManager::report (const JobInfo& i)
         return;
 
     std::lock_guard<std::recursive_mutex> lock (reportMutex_);
+
+    {
+        std::vector<std::string> evicted;
+        {
+            std::lock_guard<std::mutex> jobsLock (mutex_);
+            evicted.swap (evictedForReport_);
+        }
+
+        for (auto& id : evicted)
+            reportedRevision_.erase (id);
+    }
+
     auto& seen = reportedRevision_[i.id];
 
     // a stale snapshot (e.g. "queued" announced after the worker already finished the job) is never delivered
@@ -572,6 +584,17 @@ void JobManager::persist (const JobInfo& i)
         return;
 
     std::lock_guard<std::mutex> lock (persistMutex_);
+
+    {
+        std::vector<std::string> evicted;
+        {
+            std::lock_guard<std::mutex> jobsLock (mutex_);          // persistMutex_ -> mutex_ only; mutex_ holders never take persistMutex_
+            evicted.swap (evictedForPersist_);
+        }
+
+        for (auto& id : evicted)
+            persistedRevision_.erase (id);
+    }
 
     // an older snapshot must never replace a newer one that another thread wrote first
     if (auto it = persistedRevision_.find (i.id); it != persistedRevision_.end() && it->second >= i.revision && i.revision != 0)
@@ -612,6 +635,8 @@ void JobManager::evictOldFinished()
         if (! e->info.clientRequestId.empty())
             byRequest_.erase (e->info.tenant + "|" + e->info.projectId + "|" + e->info.clientRequestId);
 
+        evictedForReport_.push_back (finished[i]);
+        evictedForPersist_.push_back (finished[i]);
         jobs_.erase (finished[i]);
     }
 }

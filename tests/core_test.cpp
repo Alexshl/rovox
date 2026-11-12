@@ -8,6 +8,7 @@
 #include "Cgroup.h"
 #include "EventHub.h"
 #include "Ids.h"
+#include "RequestGuard.h"
 #include "Spectrum.h"
 #include "TestFramework.h"
 
@@ -353,4 +354,35 @@ ROVOX_TEST (core, job_lookup_refuses_ids_that_are_paths_and_a_bad_record_does_no
     spec.pool = "analysis";
     const auto id = jobs.submit (spec, [] (JobContext&) -> Result<json> { return json { { "ok", true } }; }).id;
     REQUIRE (jobs.get (id, std::chrono::seconds (10)).has_value());
+}
+
+ROVOX_TEST (core, request_guard_allowed_hosts_loopback_ranges_and_same_host_rule)
+{
+    using namespace guard;
+
+    // the whole 127.0.0.0/8 and ::1 are loopback, whatever the case
+    CHECK (isLoopbackName ("LOCALHOST"));
+    CHECK (isLoopbackName ("127.0.0.2"));
+    CHECK (isLoopbackName ("[::1]"));
+    CHECK (isLoopbackBind ("127.1.2.3"));
+    CHECK (! isLoopbackName ("127.0.0.1.evil.example"));
+    CHECK (! isLoopbackName ("127.example"));
+    CHECK (! isLoopbackBind ("0.0.0.0"));
+
+    // a reverse proxy forwarding Host: daw.example.com to a loopback bind
+    CHECK (! hostAllowed (true, "daw.example.com"));
+    CHECK (hostAllowed (true, "daw.example.com", { "daw.example.com" }));
+    CHECK (hostAllowed (true, "DAW.example.com:8443", { "daw.example.com" }));                  // no port in the entry = any port
+    CHECK (hostAllowed (true, "daw.example.com:8443", { "daw.example.com:8443" }));
+    CHECK (! hostAllowed (true, "daw.example.com:9", { "daw.example.com:8443" }));
+    CHECK (hostAllowed (true, "daw.example.com", {}, { "https://daw.example.com" }));           // the host of an allowed origin is an allowed Host
+    CHECK (! hostAllowed (true, "evil.example", { "daw.example.com" }, { "https://daw.example.com" }));
+    CHECK (hostAllowed (false, "anything.example"));
+
+    // requestAllowed: the Origin of the proxied page passes once the Host does
+    CHECK (requestAllowed (true, "https://daw.example.com", "daw.example.com", { "https://daw.example.com" }));
+    CHECK (! requestAllowed (true, "https://daw.example.com", "daw.example.com", {}));
+    CHECK (requestAllowed (true, "https://daw.example.com", "daw.example.com", {}, { "daw.example.com" }) == false);   // Origin not listed and loopback bind: not the page itself
+    CHECK (requestAllowed (false, "http://server:4810", "server:4810", {}));                     // the same-host rule off loopback, as for REST/WS
+    CHECK (! requestAllowed (false, "http://evil.example", "server:4810", {}));
 }
