@@ -5,6 +5,7 @@
 
 #include <opus/opus.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -30,7 +31,8 @@ struct Block
 struct ClockStats
 {
     std::atomic<std::int64_t> maxLateUs { 0 }, lateUsTotal { 0 }, ticks { 0 }, lateOver2ms { 0 }, lateOver5ms { 0 };
-    std::atomic<std::int64_t> callbackUsTotal { 0 }, callbackUsMax { 0 };
+    std::atomic<std::int64_t> callbackUsTotal { 0 }, callbackUsMax { 0 }, resyncs { 0 };
+    std::function<void()> onResync;             // set before the device exists; called on the clock thread
 };
 
 double nowMs()
@@ -111,7 +113,19 @@ private:
         {
             next += period;
             std::this_thread::sleep_until (next);
-            const auto late = std::chrono::duration_cast<std::chrono::microseconds> (clock::now() - next).count();
+            const auto lateNs = clock::now() - next;
+            const auto late = std::chrono::duration_cast<std::chrono::microseconds> (lateNs).count();
+
+            if (BrowserStream::clockNeedsResync (lateNs, period))
+            {
+                // the thread was stalled: restart the schedule instead of delivering the missed blocks in a burst
+                next = clock::now();
+                ++stats.resyncs;
+
+                if (stats.onResync)
+                    stats.onResync();
+            }
+
             stats.ticks++;
             stats.lateUsTotal += late;
 
@@ -305,6 +319,13 @@ struct BrowserStream::Impl
                     continue;
 
                 filled = 0;
+
+                const auto gap = framePos > lastPacketEndPos ? framePos - lastPacketEndPos : lastPacketEndPos - framePos;
+                const bool discontinuity = ! haveLast || gap > 600 || frameEpoch != lastEpochSent;
+
+                if (discontinuity)
+                    opus_encoder_ctl (encoder, OPUS_RESET_STATE);       // nothing of the previous audio leaks into the first packet
+
                 const auto e0 = nowMs();
                 const int nbytes = opus_encode_float (encoder, pcm.data(), kFrame, opusBuf.data(), (opus_int32) opusBuf.size());
                 encodeMsTotal = encodeMsTotal + (nowMs() - e0);
@@ -313,8 +334,6 @@ struct BrowserStream::Impl
                 if (nbytes < 0)
                     continue;
 
-                const auto gap = framePos > lastPacketEndPos ? framePos - lastPacketEndPos : lastPacketEndPos - framePos;
-                const bool discontinuity = ! haveLast || gap > 600 || frameEpoch != lastEpochSent;
                 lastEpochSent = frameEpoch;
                 haveLast = true;
                 lastPacketEndPos = framePos + (std::uint64_t) kFrame;
@@ -354,6 +373,7 @@ struct BrowserStream::Impl
     std::atomic<bool> quit { false };
     std::mutex sourceMutex, sinkMutex;
     te::Edit* source = nullptr;
+    std::vector<te::Edit*> playing;         // Edits that were given as a source and not forgotten yet, oldest first
     PacketFn sink;
     std::atomic<std::int64_t> framesEncoded { 0 }, bytesSent { 0 }, ringOverflows { 0 };
     std::atomic<double> encodeMsTotal { 0 };
@@ -361,6 +381,7 @@ struct BrowserStream::Impl
 
 BrowserStream::BrowserStream (te::Engine& engine, int bitrateBps) : impl_ (std::make_unique<Impl> (*this, engine, bitrateBps))
 {
+    impl_->clock.onResync = [this] { bumpEpoch(); };        // the encoder drops its partial frame and flags a discontinuity
     auto& dm = engine.getDeviceManager();
     dm.deviceManager.addAudioDeviceType (std::make_unique<StreamDeviceType> ([this] (const float* l, const float* r, int n) { impl_->onBlock (l, r, n); }, impl_->clock));
     dm.deviceManager.setCurrentAudioDeviceType ("BrowserStream", true);
@@ -390,6 +411,12 @@ void BrowserStream::setPacketSink (PacketFn fn)
 void BrowserStream::setPositionSource (te::Edit* e)
 {
     std::lock_guard<std::mutex> lock (impl_->sourceMutex);
+    auto& list = impl_->playing;
+    list.erase (std::remove (list.begin(), list.end(), e), list.end());
+
+    if (e != nullptr)
+        list.push_back (e);
+
     impl_->source = e;
 }
 
@@ -397,8 +424,11 @@ void BrowserStream::forget (te::Edit* e)
 {
     std::lock_guard<std::mutex> lock (impl_->sourceMutex);
 
+    auto& list = impl_->playing;
+    list.erase (std::remove (list.begin(), list.end(), e), list.end());
+
     if (impl_->source == e)
-        impl_->source = nullptr;
+        impl_->source = list.empty() ? nullptr : list.back();
 }
 
 json BrowserStream::stats() const
@@ -415,6 +445,7 @@ json BrowserStream::stats() const
              { "audio_callback_us_avg", (double) impl_->clock.callbackUsTotal / (double) ticks },
              { "audio_callback_us_max", impl_->clock.callbackUsMax.load() },
              { "ring_overflows", impl_->ringOverflows.load() },
+             { "clock_resyncs", impl_->clock.resyncs.load() },
              { "playing_projects", playingProjects_.load() },
              { "epoch", (int) epoch_.load() } };
 }

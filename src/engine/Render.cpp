@@ -454,7 +454,8 @@ Result<void> renderRawWav (te::Edit& edit, const fs::path& dest, te::TimeRange r
         range = range.withEnd (range.getEnd() + te::TimeDuration::fromSeconds (1.0 / sampleRate));
 
     const te::Edit::ScopedRenderStatus srs (edit, true);
-    te::TransportControl::stopAllTransports (edit.engine, false, true);
+    // No stopAllTransports(): it would stop the live playback of every project of every tenant, from a job thread. The edit here is a
+    // forRendering snapshot (or the render child's own copy) that never allocates a playback context, so there is nothing to stop.
 
     auto outFile = toFile (dest);
     outFile.deleteFile();
@@ -826,6 +827,7 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
         return makeError (errc::io, "cannot finish " + partPath.string());
 
     const auto statsAfter = after.finish();
+    const auto nonFinite = sink.value()->nonFiniteSamples();
 
     // post-checks on the float data
     auto add = [&] (const std::string& check, const std::string& message, json details = nullptr)
@@ -847,6 +849,18 @@ Result<OutputResult> produce (te::Edit& edit, const RenderContext& ctx, const Re
     if (statsAfter.integratedLufs < -70.0 || statsAfter.samplePeakDbfs < -60.0)
         add ("silent_output", "the rendered audio is silent (integrated " + fmt (statsAfter.integratedLufs) + " LUFS, peak "
                                   + fmt (statsAfter.samplePeakDbfs) + " dBFS)");
+
+    if (nonFinite > 0)
+    {
+        // always reported (a warning unless the request makes it a failure): the file is clean, the mix was not
+        Finding f;
+        f.check = "non_finite";
+        f.severity = req.failOn.count ("non_finite") ? "fail" : "warn";
+        f.name = out.trackName;
+        f.message = std::to_string (nonFinite) + " samples were NaN or Inf in the render and were written as silence";
+        f.details = json { { "non_finite_samples", nonFinite } };
+        res.postFindings.push_back (std::move (f));
+    }
 
     if (statsAfter.clippedSamples > req.clipTolerance)
         add ("clipping", std::to_string (statsAfter.clippedSamples) + " samples at or above 0 dBFS", json { { "clipped_samples", statsAfter.clippedSamples } });

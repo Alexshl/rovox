@@ -21,11 +21,11 @@ ProjectTransport::~ProjectTransport()
         project_.edit().getTransport().stop (false, false);
 
         if (auto* s = project_.host().stream())
-        {
             s->addPlayingProjects (-1);
-            s->forget (&project_.edit());
-        }
     }
+
+    if (auto* s = project_.host().stream())
+        s->forget (&project_.edit());
 }
 
 double ProjectTransport::positionSeconds()
@@ -158,6 +158,7 @@ void ProjectTransport::stopPlayback()
     if (auto* s = project_.host().stream())
     {
         s->addPlayingProjects (-1);
+        s->forget (&project_.edit());           // the position source moves to a project that still plays
         s->bumpEpoch();
     }
 }

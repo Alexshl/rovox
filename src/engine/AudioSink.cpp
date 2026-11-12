@@ -14,13 +14,64 @@ namespace rovox
 
 namespace
 {
+/** NaN / Inf never reach an encoder (llround of NaN is undefined): a block that has any is copied with 0 in their place;
+    a clean block is passed through untouched. */
+class Scrubber
+{
+public:
+    explicit Scrubber (int channels) : copy_ ((size_t) channels), ptrs_ ((size_t) channels) {}
+
+    const float* const* apply (const float* const* planar, int n)
+    {
+        bool dirty = false;
+
+        for (size_t c = 0; c < copy_.size() && ! dirty; ++c)
+            for (int i = 0; i < n; ++i)
+                if (! std::isfinite (planar[c][i]))
+                {
+                    dirty = true;
+                    break;
+                }
+
+        if (! dirty)
+            return planar;
+
+        for (size_t c = 0; c < copy_.size(); ++c)
+        {
+            copy_[c].assign (planar[c], planar[c] + n);
+
+            for (auto& v : copy_[c])
+                if (! std::isfinite (v))
+                {
+                    v = 0.0f;
+                    ++count_;
+                }
+
+            ptrs_[c] = copy_[c].data();
+        }
+
+        return ptrs_.data();
+    }
+
+    std::int64_t count() const noexcept     { return count_; }
+
+private:
+    std::vector<std::vector<float>> copy_;
+    std::vector<const float*> ptrs_;
+    std::int64_t count_ = 0;
+};
+
 class JuceSink : public AudioSink
 {
 public:
-    JuceSink (std::unique_ptr<juce::AudioFormatWriter> w, int bits, int channels) : writer_ (std::move (w)), bits_ (bits), ints_ ((size_t) channels), ptrs_ ((size_t) channels) {}
+    JuceSink (std::unique_ptr<juce::AudioFormatWriter> w, int bits, int channels) : writer_ (std::move (w)), bits_ (bits), ints_ ((size_t) channels), ptrs_ ((size_t) channels), scrub_ (channels) {}
 
-    bool write (const float* const* planar, int n) override
+    std::int64_t nonFiniteSamples() const noexcept override     { return scrub_.count(); }
+
+    bool write (const float* const* input, int n) override
     {
+        const auto* const* planar = scrub_.apply (input, n);
+
         if (bits_ == 32)
             return writer_->writeFromFloatArrays (planar, (int) ints_.size(), n);
 
@@ -71,13 +122,14 @@ private:
     int bits_;
     std::vector<std::vector<int>> ints_;
     std::vector<const int*> ptrs_;
+    Scrubber scrub_;
     std::uint64_t state_ = 0x9e3779b97f4a7c15ULL;   // fixed seed: a render is reproducible
 };
 
 class Mp3Sink : public AudioSink
 {
 public:
-    Mp3Sink (lame_t l, FILE* f, int channels) : lame_ (l), file_ (f), channels_ (channels) {}
+    Mp3Sink (lame_t l, FILE* f, int channels) : lame_ (l), file_ (f), channels_ (channels), scrub_ (channels) {}
 
     ~Mp3Sink() override
     {
@@ -88,8 +140,11 @@ public:
             lame_close (lame_);
     }
 
-    bool write (const float* const* planar, int n) override
+    std::int64_t nonFiniteSamples() const noexcept override     { return scrub_.count(); }
+
+    bool write (const float* const* input, int n) override
     {
+        const auto* const* planar = scrub_.apply (input, n);
         buffer_.resize ((size_t) (1.25 * n + 7200));
         const float* right = channels_ > 1 ? planar[1] : planar[0];
         const int bytes = lame_encode_buffer_ieee_float (lame_, planar[0], right, n, buffer_.data(), (int) buffer_.size());
@@ -110,6 +165,7 @@ private:
     lame_t lame_;
     FILE* file_;
     int channels_;
+    Scrubber scrub_;
     std::vector<unsigned char> buffer_;
 };
 
