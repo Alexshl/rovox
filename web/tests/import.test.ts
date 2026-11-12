@@ -184,6 +184,7 @@ function setup(handlers: Record<string, Handler>, deps: { server?: FakeServer; s
     activeId: 'p_1',
     active: { name: 'Пісня 3' },
     cmd: vi.fn(run),
+    mcp: { call: vi.fn((name: string, params: Record<string, any>) => run(name, params)) },
     edit: vi.fn(run),
     toast: vi.fn(),
     listProjects: vi.fn(async () => undefined),

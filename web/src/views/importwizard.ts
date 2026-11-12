@@ -12,7 +12,10 @@ import type { App } from '../store/session';
 import { type Modal, openModal } from './dialog';
 
 /** What the wizard needs of the app (a fake in tests). */
-export type ImportHost = Pick<App, 'cmd' | 'edit' | 'active' | 'activeId' | 'toast' | 'listProjects' | 'setActive' | 'undo'>;
+export type ImportHost = Pick<App, 'cmd' | 'edit' | 'active' | 'activeId' | 'toast' | 'listProjects' | 'setActive' | 'undo'> & {
+  /** `upload.finish` is an MCP tool (it is not on the WebSocket command bus), so the wizard reaches it the way the render dialog reaches its tools. */
+  mcp: Pick<App['mcp'], 'call'>;
+};
 
 export interface ImportDeps {
   fetchImpl?: typeof fetch;
@@ -810,7 +813,7 @@ class Wizard {
     this.advancing = true;
     const busy = h('div', { class: 'full', text: t('import.planning'), attrs: { role: 'status' } });
     this.setView('plan', t('import.plan.title'), t('import.step', { n: 3 }), [busy], [this.button(t('dialog.cancel'), () => this.close())]);
-    const fin = await this.app.cmd<FinishResult>('upload.finish', { batch_id: u.batchId }, { projectId: undefined });
+    const fin = (await this.app.mcp.call('upload.finish', { batch_id: u.batchId })) as { ok: boolean; data?: FinishResult; error?: { code: string; message: string } };
     if (this.closed) return;
     if (!fin.ok || !fin.data) {
       this.advancing = false;

@@ -259,7 +259,7 @@ describe('failures', () => {
     await up.start();
     await up.whenSettled();
     expect(offlineSeen).toBe(true);
-    expect(sleep.mock.calls.map((c) => c[0])).toEqual([500, 1000]);
+    expect((sleep.mock.calls as unknown as number[][]).map((c) => c[0])).toEqual([500, 1000]);
     expect(up.files[0]!.state).toBe('done');
     expect(up.offline).toBe(false);
   });
