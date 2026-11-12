@@ -68,7 +68,7 @@ json JobInfo::toJson() const
     return j;
 }
 
-std::optional<JobInfo> JobInfo::fromJson (const json& j)
+static std::optional<JobInfo> parseJobInfo (const json& j)
 {
     if (! j.is_object() || ! j.contains ("job_id") || ! j.contains ("state"))
         return std::nullopt;
@@ -98,6 +98,18 @@ std::optional<JobInfo> JobInfo::fromJson (const json& j)
         i.error = Error { j["error"].value ("code", errc::internal), j["error"].value ("message", ""), j["error"].value ("details", json (nullptr)) };
 
     return i;
+}
+
+std::optional<JobInfo> JobInfo::fromJson (const json& j)
+{
+    try
+    {
+        return parseJobInfo (j);
+    }
+    catch (const std::exception&)       // a record of the wrong shape (type_error): treated as unreadable, never a crash
+    {
+        return std::nullopt;
+    }
 }
 
 struct JobManager::Entry
@@ -220,6 +232,7 @@ void JobManager::shutdown()
                     e->info.callback = { { "state", "callback_failed" }, { "attempts", 0 }, { "last_error", "shutdown" } };
 
                 e->onFinished = nullptr;
+                ++e->info.revision;
                 dropped.push_back (e);
             }
 
@@ -290,6 +303,7 @@ JobManager::Submitted JobManager::submit (JobSpec spec, JobFn fn)
         }
 
         snapshot = entry->info;
+        snapshot.revision = ++entry->info.revision;
         evictOldFinished();
     }
 
@@ -326,6 +340,7 @@ bool JobManager::cancel (const std::string& id)
             finishedFn = std::move (e->onFinished);
             queuedCancel = true;
             snapshot = e->info;
+            snapshot.revision = ++e->info.revision;
         }
     }
 
@@ -355,13 +370,14 @@ std::optional<JobInfo> JobManager::get (const std::string& id, std::chrono::mill
         {
             lock.unlock();
 
-            if (! dir_.empty())
+            if (! dir_.empty() && isValidId (id, "job"))       // the id becomes part of a path: nothing but a real job id gets through
             {
                 std::ifstream in (dir_ / (id + ".json"));
                 auto j = json::parse (in, nullptr, false);
 
                 if (! j.is_discarded())
-                    return JobInfo::fromJson (j);
+                    if (auto info = JobInfo::fromJson (j); info && info->id == id)
+                        return info;
             }
 
             return std::nullopt;
@@ -417,6 +433,7 @@ void JobManager::worker (Pool& pool)
             e->info.started = isoNow();
             e->info.stage = "starting";
             started = e->info;
+            started.revision = ++e->info.revision;
         }
 
         cv_.notify_all();
@@ -469,6 +486,7 @@ void JobManager::worker (Pool& pool)
             e->fn = nullptr;            // drop captured snapshots now
             finishedFn = std::move (e->onFinished);
             done = i;
+            done.revision = ++i.revision;
         }
 
         cv_.notify_all();
@@ -493,6 +511,7 @@ void JobManager::setCallbackState (const std::string& id, const json& state)
 
         it->second->info.callback = state;
         snapshot = it->second->info;
+        snapshot.revision = ++it->second->info.revision;
     }
 
     cv_.notify_all();
@@ -521,6 +540,7 @@ void JobManager::setProgress (const std::string& id, double fraction, const std:
             e.lastReported = e.info.progress;
             announce = true;
             snapshot = e.info;
+            snapshot.revision = ++e.info.revision;
         }
     }
 
@@ -532,8 +552,18 @@ void JobManager::setProgress (const std::string& id, double fraction, const std:
 
 void JobManager::report (const JobInfo& i)
 {
-    if (onChange_)
-        onChange_ (i);
+    if (! onChange_)
+        return;
+
+    std::lock_guard<std::recursive_mutex> lock (reportMutex_);
+    auto& seen = reportedRevision_[i.id];
+
+    // a stale snapshot (e.g. "queued" announced after the worker already finished the job) is never delivered
+    if (i.revision != 0 && (i.revision < seen.first || (seen.second && ! isFinished (i.state))))
+        return;
+
+    seen = { std::max (seen.first, i.revision), seen.second || isFinished (i.state) };
+    onChange_ (i);
 }
 
 void JobManager::persist (const JobInfo& i)
@@ -541,13 +571,24 @@ void JobManager::persist (const JobInfo& i)
     if (dir_.empty())
         return;
 
+    std::lock_guard<std::mutex> lock (persistMutex_);
+
+    // an older snapshot must never replace a newer one that another thread wrote first
+    if (auto it = persistedRevision_.find (i.id); it != persistedRevision_.end() && it->second >= i.revision && i.revision != 0)
+        return;
+
     std::error_code ec;
-    const auto tmp = dir_ / (i.id + ".json.tmp");
+    const auto tmp = dir_ / (i.id + "." + std::to_string (tmpCounter_++) + ".json.tmp");
     {
         std::ofstream out (tmp, std::ios::binary | std::ios::trunc);
         out << i.toJson().dump() << "\n";
     }
     fs::rename (tmp, dir_ / (i.id + ".json"), ec);
+
+    if (ec)
+        fs::remove (tmp, ec);
+    else
+        persistedRevision_[i.id] = std::max (persistedRevision_[i.id], i.revision);
 }
 
 void JobManager::evictOldFinished()

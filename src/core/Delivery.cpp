@@ -65,35 +65,20 @@ std::string scrubSecrets (std::string text, const std::vector<std::string>& secr
     return text;
 }
 
-Url parseUrl (const std::string& url)
+std::string truncateUtf8 (const std::string& text, size_t maxCodepoints)
 {
-    Url u;
-    const auto schemeEnd = url.find ("://");
+    size_t codepoints = 0;
 
-    if (schemeEnd == std::string::npos)
-        return u;
-
-    u.scheme = url.substr (0, schemeEnd);
-
-    if (u.scheme != "http" && u.scheme != "https")
-        return u;
-
-    const auto hostStart = schemeEnd + 3;
-    const auto pathStart = url.find ('/', hostStart);
-    auto hostPort = url.substr (hostStart, pathStart == std::string::npos ? std::string::npos : pathStart - hostStart);
-    u.path = pathStart == std::string::npos ? "" : url.substr (pathStart);
-    u.origin = u.scheme + "://" + hostPort;
-    u.port = u.scheme == "https" ? 443 : 80;
-
-    if (const auto colon = hostPort.rfind (':'); colon != std::string::npos && hostPort.find (']') == std::string::npos)
+    for (size_t i = 0; i < text.size(); ++i)
     {
-        u.port = std::atoi (hostPort.c_str() + colon + 1);
-        hostPort = hostPort.substr (0, colon);
+        if ((static_cast<unsigned char> (text[i]) & 0xC0) == 0x80)      // continuation byte: part of the previous character
+            continue;
+
+        if (++codepoints > maxCodepoints)
+            return text.substr (0, i);
     }
 
-    u.host = hostPort;
-    u.valid = ! u.host.empty();
-    return u;
+    return text;
 }
 
 namespace
@@ -241,7 +226,7 @@ public:
         };
 
         if (! req.caption.empty())
-            items.push_back ({ "caption", req.caption.substr (0, 1024), "", "" });
+            items.push_back ({ "caption", truncateUtf8 (req.caption, 1024), "", "" });
 
         if (method == "sendAudio" && ! req.title.empty())
             items.push_back ({ "title", req.title, "", "" });
@@ -313,13 +298,32 @@ public:
             return makeError (errc::io, "cannot read the file to deliver");
 
         const json options = req.options.is_object() ? req.options : json::object();
-        std::string key = options.value ("key", c_.prefix + req.file.filename().string());
+        // the object always lives under the configured prefix: a per-call key only picks the name below it
+        const std::string name = options.value ("key", req.file.filename().string());
+
+        if (name.empty() || name.front() == '/' || name.back() == '/' || name.find ('\\') != std::string::npos || name.find ('\0') != std::string::npos)
+            return makeError (errc::invalidParams, "the S3 key must be a relative path without empty segments", json { { "key", name } });
+
+        for (size_t start = 0; start <= name.size();)
+        {
+            const auto slash = name.find ('/', start);
+            const auto segment = name.substr (start, slash == std::string::npos ? std::string::npos : slash - start);
+
+            if (segment.empty() || segment == "." || segment == "..")
+                return makeError (errc::invalidParams, "the S3 key must not contain empty, '.' or '..' segments", json { { "key", name } });
+
+            if (slash == std::string::npos)
+                break;
+
+            start = slash + 1;
+        }
+
+        std::string key = c_.prefix + name;
 
         while (! key.empty() && key.front() == '/')
             key.erase (0, 1);
 
-        const std::string hostHeader = endpoint.host + ((endpoint.scheme == "https" && endpoint.port == 443) || (endpoint.scheme == "http" && endpoint.port == 80) ? "" : ":" + std::to_string (endpoint.port));
-        const std::string connectHost = c_.pathStyle ? hostHeader : c_.bucket + "." + hostHeader;
+        const std::string connectHost = c_.pathStyle ? endpoint.hostHeader : c_.bucket + "." + endpoint.hostHeader;
         const std::string path = endpoint.path + (c_.pathStyle ? "/" + c_.bucket : "") + "/" + key;
 
         sigv4::Credentials cred { access, secret, c_.sessionToken.resolve(), c_.region, "s3" };
@@ -388,8 +392,8 @@ private:
 class WebhookAdapter : public DeliveryAdapter
 {
 public:
-    WebhookAdapter (std::string id, std::string url, SecretRef secret, std::string mode)
-        : DeliveryAdapter (std::move (id), "Webhook (" + mode + " POST)"), url_ (std::move (url)), secret_ (std::move (secret)), mode_ (std::move (mode))
+    WebhookAdapter (std::string id, std::string url, SecretRef secret, std::string mode, std::uintmax_t maxBytes)
+        : DeliveryAdapter (std::move (id), "Webhook (" + mode + " POST)"), url_ (std::move (url)), secret_ (std::move (secret)), mode_ (std::move (mode)), maxBytes_ (maxBytes)
     {}
 
     std::string kind() const override   { return "webhook"; }
@@ -411,6 +415,11 @@ public:
 
         if (ec)
             return makeError (errc::notFound, "no file to deliver: " + req.file.filename().string());
+
+        if (size > maxBytes_)
+            return makeError ("FILE_TOO_LARGE", "the file is " + std::to_string (size / (1024 * 1024)) + " MB; this webhook accepts at most " + std::to_string (maxBytes_ / (1024 * 1024))
+                                                    + " MB (max_bytes in [delivery.webhook.*])",
+                              json { { "size", size }, { "limit", maxBytes_ } });
 
         const auto hash = sha256File (req.file);
 
@@ -447,18 +456,56 @@ public:
         }
         else
         {
-            // the multipart body is assembled by the HTTP library, so the signature covers the timestamp and the file hash
+            // the signature covers the timestamp and the file hash
             if (! secret.empty())
                 headers.emplace ("X-Rovox-Signature", "sha256=" + hmacSha256Hex (secret, timestamp + "." + *hash));
 
-            httplib::MultipartFormDataItems items {
-                { "event", "delivery", "", "" },
-                { "caption", req.caption, "", "" },
-                { "title", req.title, "", "" },
-                { "sha256", *hash, "", "" },
-                { "file", readFile (req.file), name, mimeFor (req.file) },
+            // the multipart body is written by hand and streamed: the file is never held in memory
+            const std::string boundary = "rovox-" + hash->substr (0, 24) + "-" + timestamp;
+            std::string head;
+
+            auto field = [&] (const char* fieldName, const std::string& value)
+            {
+                head += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + fieldName + "\"\r\n\r\n" + value + "\r\n";
             };
-            res = client.Post (url.path.empty() ? "/" : url.path, headers, items);
+
+            std::string safeName;
+
+            for (char ch : name)
+                safeName += ch == '"' ? std::string ("%22") : (ch == '\r' || ch == '\n') ? std::string ("_") : std::string (1, ch);
+
+            field ("event", "delivery");
+            field ("caption", req.caption);
+            field ("title", req.title);
+            field ("sha256", *hash);
+            head += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + safeName + "\"\r\nContent-Type: " + mimeFor (req.file) + "\r\n\r\n";
+            const std::string tail = "\r\n--" + boundary + "--\r\n";
+            std::ifstream in (req.file, std::ios::binary);
+
+            res = client.Post (url.path.empty() ? "/" : url.path, headers, (size_t) (head.size() + size + tail.size()),
+                               [&] (size_t offset, size_t length, httplib::DataSink& sink)
+                               {
+                                   if (offset < head.size())
+                                       return sink.write (head.data() + offset, std::min (length, head.size() - offset));
+
+                                   if (offset < head.size() + size)
+                                   {
+                                       const auto want = (size_t) std::min<std::uintmax_t> (length, head.size() + size - offset);
+                                       std::string buf (want, '\0');
+                                       in.clear();
+                                       in.seekg ((std::streamoff) (offset - head.size()));
+                                       in.read (buf.data(), (std::streamsize) want);
+
+                                       if (in.gcount() <= 0)
+                                           return false;
+
+                                       return sink.write (buf.data(), (size_t) in.gcount());
+                                   }
+
+                                   const auto at = offset - head.size() - (size_t) size;
+                                   return sink.write (tail.data() + at, std::min (length, tail.size() - at));
+                               },
+                               "multipart/form-data; boundary=" + boundary);
         }
 
         if (! res || res->status / 100 != 2)
@@ -471,6 +518,7 @@ private:
     std::string url_;
     SecretRef secret_;
     std::string mode_;
+    std::uintmax_t maxBytes_;
 };
 
 //==============================================================================
@@ -505,9 +553,9 @@ std::unique_ptr<DeliveryAdapter> makeS3Adapter (std::string id, S3Config c)
     return std::make_unique<S3Adapter> (std::move (id), std::move (c));
 }
 
-std::unique_ptr<DeliveryAdapter> makeWebhookAdapter (std::string id, std::string url, SecretRef hmacSecret, std::string mode)
+std::unique_ptr<DeliveryAdapter> makeWebhookAdapter (std::string id, std::string url, SecretRef hmacSecret, std::string mode, std::uintmax_t maxBytes)
 {
-    return std::make_unique<WebhookAdapter> (std::move (id), std::move (url), std::move (hmacSecret), std::move (mode));
+    return std::make_unique<WebhookAdapter> (std::move (id), std::move (url), std::move (hmacSecret), std::move (mode), maxBytes);
 }
 
 //==============================================================================
@@ -615,7 +663,8 @@ DeliveryRegistry DeliveryRegistry::load (const fs::path& tomlFile, const fs::pat
                             const auto url = (*t)["url"].value_or (std::string());
 
                             if (url.empty())    reg.warnings_.push_back (id + ": 'url' is missing");
-                            else                reg.add (makeWebhookAdapter (id, url, secretOf (*t, "hmac_secret"), (*t)["mode"].value_or (std::string ("multipart"))));
+                            else                reg.add (makeWebhookAdapter (id, url, secretOf (*t, "hmac_secret"), (*t)["mode"].value_or (std::string ("multipart")),
+                                                      (std::uintmax_t) std::max<std::int64_t> (1, (*t)["max_bytes"].value_or ((std::int64_t) webhookDefaultMaxBytes))));
                         }
                         else
                         {

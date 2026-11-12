@@ -5,6 +5,7 @@
 
 #include "Hmac.h"
 #include "JobManager.h"
+#include "Url.h"
 
 #include <httplib.h>
 
@@ -383,7 +384,25 @@ void JobCallbackDispatcher::loop()
         }
 
         ++task.attempts;
-        auto result = deliver (task);
+        Result<void> result;
+
+        try
+        {
+            result = deliverOverride_ ? deliverOverride_ (task.jobId, task.url) : deliver (task);
+        }
+        catch (const std::exception& e)      // never let an exception end the process: it is a failed attempt
+        {
+            result = makeError (errc::internal, std::string ("the callback delivery threw: ") + e.what());
+        }
+        catch (...)
+        {
+            result = makeError (errc::internal, "the callback delivery threw");
+        }
+
+        {
+            std::lock_guard<std::mutex> lock (mutex_);
+            activeClient_ = nullptr;        // a throw may have skipped the reset; the client on the stack is gone
+        }
 
         if (result.ok())
         {

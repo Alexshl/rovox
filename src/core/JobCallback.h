@@ -74,6 +74,13 @@ public:
 
     void shutdown();
 
+    /** Replaces the HTTP delivery (tests: makes an attempt succeed, fail or throw). Set before enqueue. */
+    void setDeliverOverride (std::function<Result<void> (const std::string& jobId, const std::string& url)> fn)
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        deliverOverride_ = std::move (fn);
+    }
+
     static std::string signature (const std::string& secret, const std::string& timestamp, const std::string& body);
 
 private:
@@ -96,6 +103,7 @@ private:
     double scale_ = 1.0;
     bool stopping_ = false;
     std::atomic<bool> loopDone_ { false };
+    std::function<Result<void> (const std::string&, const std::string&)> deliverOverride_;
     httplib::Client* activeClient_ = nullptr;           // the attempt in flight, under mutex_
     std::thread thread_;
 };

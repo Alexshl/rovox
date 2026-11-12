@@ -3,12 +3,22 @@
 
 #include "Cgroup.h"
 #include "Ids.h"
+#include "JobManager.h"
 #include "Spectrum.h"
+#include "Subprocess.h"
 #include "TestFramework.h"
+#include "TestSupport.h"
+#include "Url.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <map>
+#include <mutex>
 #include <set>
+#include <thread>
 #include <vector>
 
 using namespace rovox;
@@ -113,4 +123,195 @@ ROVOX_TEST (core, spectrum_of_pink_noise_follows_band_width_in_octaves)
     CHECK_NEAR (bands.low - bands.lowMid, pinkOffsetDb (60, 250), 1.0);
     CHECK_NEAR (bands.highMid - bands.lowMid, pinkOffsetDb (2000, 6000), 1.0);
     CHECK_NEAR (bands.high - bands.lowMid, pinkOffsetDb (6000, 20000), 1.0);
+}
+
+//==============================================================================
+// E10-20: subprocess pipes, process groups, output caps
+namespace
+{
+double secondsSince (std::chrono::steady_clock::time_point t0)
+{
+    return std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+}
+} // namespace
+
+ROVOX_TEST (core, subprocess_timeout_of_one_run_does_not_wait_for_a_concurrent_one)
+{
+    SubprocessResult slow;
+    double slowSeconds = 0;
+
+    std::thread a ([&]
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        SubprocessOptions o;
+        o.argv = { "/bin/sh", "-c", "sleep 30" };
+        o.timeoutS = 0.3;
+        slow = runSubprocess (o);
+        slowSeconds = secondsSince (t0);
+    });
+
+    std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    SubprocessResult other;
+    std::thread b ([&]
+    {
+        SubprocessOptions o;
+        o.argv = { "/bin/sh", "-c", "sleep 3; echo done" };
+        other = runSubprocess (o);
+    });
+
+    a.join();
+    CHECK (slow.timedOut);
+    CHECK (slowSeconds < 2.0);                  // not held up until the other child (3 s) closed the pipes it must not have inherited
+    b.join();
+    CHECK (other.succeeded());
+    CHECK (other.stdoutText == "done\n");
+}
+
+ROVOX_TEST (core, subprocess_kill_takes_the_grandchildren_and_does_not_wait_for_their_pipes)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    SubprocessOptions o;
+    o.argv = { "/bin/sh", "-c", "sleep 30 & echo started; sleep 30" };      // the background sleep holds stdout open
+    o.timeoutS = 0.3;
+    const auto r = runSubprocess (o);
+    CHECK (r.timedOut);
+    CHECK (secondsSince (t0) < 3.0);
+    CHECK (r.stdoutText.find ("started") != std::string::npos);
+}
+
+ROVOX_TEST (core, subprocess_output_is_capped)
+{
+    SubprocessOptions o;
+    o.argv = { "/bin/sh", "-c", "head -c 20000000 /dev/zero | tr '\\0' a" };
+    const auto r = runSubprocess (o);
+    CHECK (r.succeeded());
+    CHECK (r.stdoutText.size() < 17u * 1024 * 1024 + 64);
+    CHECK (r.stdoutText.find ("[output truncated]") != std::string::npos);
+
+    size_t longest = 0, lines = 0;
+    SubprocessOptions l;
+    l.argv = { "/bin/sh", "-c", "head -c 3000000 /dev/zero | tr '\\0' a" };       // one endless line
+    l.onStdoutLine = [&] (const std::string& line) { longest = std::max (longest, line.size()); ++lines; };
+    const auto lr = runSubprocess (l);
+    CHECK (lr.succeeded());
+    CHECK (longest <= 1024u * 1024 + 64);
+    CHECK (lines >= 2);
+}
+
+//==============================================================================
+// E10-25: the shared URL parser
+ROVOX_TEST (core, url_parser_handles_ipv6_ports_and_defaults)
+{
+    auto u = parseUrl ("https://[2001:db8::1]:8443/x?y=1");
+    REQUIRE (u.valid);
+    CHECK (u.host == "2001:db8::1");
+    CHECK (u.port == 8443);
+    CHECK (u.path == "/x?y=1");
+    CHECK (u.origin == "https://[2001:db8::1]:8443");
+    CHECK (u.hostHeader == "[2001:db8::1]:8443");
+
+    u = parseUrl ("http://[::1]/p");
+    REQUIRE (u.valid);
+    CHECK (u.host == "::1");
+    CHECK (u.port == 80);
+    CHECK (u.origin == "http://[::1]");
+    CHECK (u.hostHeader == "[::1]");
+
+    u = parseUrl ("https://example.com");
+    REQUIRE (u.valid);
+    CHECK (u.port == 443);
+    CHECK (u.path.empty());
+    CHECK (u.hostHeader == "example.com");
+
+    u = parseUrl ("http://example.com:8080/a/b");
+    REQUIRE (u.valid);
+    CHECK (u.host == "example.com" && u.port == 8080 && u.path == "/a/b");
+    CHECK (u.hostHeader == "example.com:8080");
+
+    u = parseUrl ("http://example.com?x=1");
+    REQUIRE (u.valid);
+    CHECK (u.path == "/?x=1");
+
+    for (const char* bad : { "http://example.com:abc/", "http://example.com:0/", "http://example.com:70000/", "http://example.com:/", "http://[::1]:x/",
+                             "http://[::1/", "http://[::1]x/", "http://::1/", "http:///path", "ftp://example.com/", "example.com", "http://user@example.com/" })
+    {
+        const auto r = parseUrl (bad);
+        CHECK (! r.valid);
+        CHECK (! r.error.empty());
+    }
+}
+
+//==============================================================================
+// E10-22: job persistence and lookup
+ROVOX_TEST (core, jobs_persist_the_final_state_and_never_announce_queued_after_it)
+{
+    const auto dir = test::makeTempDir ("jobs");
+    std::mutex m;
+    std::map<std::string, std::vector<JobState>> seen;
+    std::vector<std::string> ids;
+
+    {
+        JobManager jobs (dir, {}, [&] (const JobInfo& i)
+        {
+            std::lock_guard<std::mutex> lock (m);
+            seen[i.id].push_back (i.state);
+        });
+
+        for (int n = 0; n < 300; ++n)
+        {
+            JobSpec spec;
+            spec.kind = "analysis";
+            spec.pool = "analysis";
+            ids.push_back (jobs.submit (spec, [] (JobContext&) -> Result<json> { return json { { "ok", true } }; }).id);
+        }
+
+        for (auto& id : ids)
+            REQUIRE (jobs.get (id, std::chrono::seconds (30)).has_value());
+
+        jobs.shutdown();
+    }
+
+    for (auto& id : ids)
+    {
+        std::ifstream in (dir / (id + ".json"));
+        const auto j = json::parse (in, nullptr, false);
+        REQUIRE (! j.is_discarded());
+        CHECK (j.value ("state", "") == "succeeded");
+
+        bool finished = false;
+
+        for (auto st : seen[id])
+        {
+            CHECK (! (finished && ! isFinished (st)));      // "queued" / "running" after the final state
+            finished = finished || isFinished (st);
+        }
+
+        CHECK (finished);
+    }
+
+    for (auto& f : fs::directory_iterator (dir))
+        CHECK (f.path().extension() == ".json");            // no .tmp left behind
+}
+
+ROVOX_TEST (core, job_lookup_refuses_ids_that_are_paths_and_a_bad_record_does_not_stop_the_start)
+{
+    const auto root = test::makeTempDir ("jobget");
+    const auto dir = root / "jobs";
+    fs::create_directories (dir);
+    std::ofstream (root / "secret.json") << R"({"job_id":"secret","state":"succeeded","tenant_id":"other"})";
+    std::ofstream (dir / "bad.json") << R"({"job_id":5,"state":["queued"]})";
+    std::ofstream (dir / "bad2.json") << R"({"job_id":"job_x","state":"queued","progress":"fast"})";
+
+    JobManager jobs (dir);
+    CHECK (! jobs.get ("../secret").has_value());
+    CHECK (! jobs.get ("..").has_value());
+    CHECK (! jobs.get ("job_../../secret").has_value());
+    CHECK (! jobs.get ("").has_value());
+    CHECK (jobs.list().empty());                            // the unreadable records were skipped
+
+    JobSpec spec;
+    spec.kind = "analysis";
+    spec.pool = "analysis";
+    const auto id = jobs.submit (spec, [] (JobContext&) -> Result<json> { return json { { "ok", true } }; }).id;
+    REQUIRE (jobs.get (id, std::chrono::seconds (10)).has_value());
 }

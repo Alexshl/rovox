@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <algorithm>
 #include <cstring>
 
 #include <fcntl.h>
@@ -43,10 +44,12 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
 
     int outPipe[2], errPipe[2];
 
-    if (::pipe (outPipe) != 0)
+    // O_CLOEXEC: a concurrently spawned child must not inherit these ends (it would hold the pipe open and delay our EOF);
+    // the dup2 file actions below still hand the child its own fds 0/1/2
+    if (::pipe2 (outPipe, O_CLOEXEC) != 0)
         return r;
 
-    if (::pipe (errPipe) != 0)
+    if (::pipe2 (errPipe, O_CLOEXEC) != 0)
     {
         ::close (outPipe[0]);
         ::close (outPipe[1]);
@@ -57,10 +60,12 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
     posix_spawn_file_actions_init (&actions);
     posix_spawn_file_actions_adddup2 (&actions, outPipe[1], 1);
     posix_spawn_file_actions_adddup2 (&actions, errPipe[1], 2);
-    posix_spawn_file_actions_addclose (&actions, outPipe[0]);
-    posix_spawn_file_actions_addclose (&actions, errPipe[0]);
-    posix_spawn_file_actions_addclose (&actions, outPipe[1]);
-    posix_spawn_file_actions_addclose (&actions, errPipe[1]);
+
+    // own process group, so a timeout/cancel kills grandchildren too
+    posix_spawnattr_t attr;
+    posix_spawnattr_init (&attr);
+    posix_spawnattr_setpgroup (&attr, 0);
+    posix_spawnattr_setflags (&attr, POSIX_SPAWN_SETPGROUP);
 
     std::vector<std::string> envStrings;
 
@@ -88,8 +93,9 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
     envp.push_back (nullptr);
 
     pid_t pid = 0;
-    const int rc = ::posix_spawn (&pid, o.argv[0].c_str(), &actions, nullptr, argv.data(), envp.data());
+    const int rc = ::posix_spawn (&pid, o.argv[0].c_str(), &actions, &attr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy (&actions);
+    posix_spawnattr_destroy (&attr);
     ::close (outPipe[1]);
     ::close (errPipe[1]);
 
@@ -106,18 +112,31 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
     bool outOpen = true, errOpen = true;
     std::string lineBuf;
     int status = 0;
-    bool reaped = false;
+    bool reaped = false, killed = false;
+    auto killedAt = start;
+    constexpr size_t maxStdoutBytes = 16u * 1024 * 1024, maxLineBytes = 1024 * 1024;
+    constexpr double killGraceS = 0.5;    // after a kill, a grandchild holding the pipes open is not waited for
+    bool truncated = false;
 
     auto kill9 = [&]
     {
+        ::kill (-pid, SIGKILL);    // the child is its own group leader
         ::kill (pid, SIGKILL);
+        if (! killed)
+        {
+            killed = true;
+            killedAt = std::chrono::steady_clock::now();
+        }
     };
 
     auto feed = [&] (const char* data, size_t n)
     {
         if (! o.onStdoutLine)
         {
-            r.stdoutText.append (data, n);
+            const size_t room = maxStdoutBytes - std::min (r.stdoutText.size(), maxStdoutBytes);
+            r.stdoutText.append (data, std::min (n, room));
+            truncated = truncated || n > room;
+
             return;
         }
 
@@ -128,6 +147,14 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
         {
             o.onStdoutLine (lineBuf.substr (0, nl));
             lineBuf.erase (0, nl + 1);
+        }
+
+        if (lineBuf.size() > maxLineBytes)
+        {
+            lineBuf.resize (maxLineBytes);
+            lineBuf += " [truncated]";
+            o.onStdoutLine (lineBuf);
+            lineBuf.clear();
         }
     };
 
@@ -188,6 +215,9 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
                 kill9();
             }
         }
+
+        if (killed && std::chrono::duration<double> (std::chrono::steady_clock::now() - killedAt).count() > killGraceS)
+            break;
     }
 
     ::close (outPipe[0]);
@@ -223,6 +253,9 @@ SubprocessResult runSubprocess (const SubprocessOptions& o)
 
         ::usleep (20000);
     }
+
+    if (truncated)
+        r.stdoutText += "\n[output truncated]\n";
 
     if (o.onStdoutLine && ! lineBuf.empty())
         o.onStdoutLine (lineBuf);

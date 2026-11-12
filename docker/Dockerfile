@@ -6,7 +6,7 @@
 FROM debian:bookworm-slim AS base
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      libasound2 libatomic1 libfreetype6 libfontconfig1 \
+      ca-certificates libasound2 libatomic1 libfreetype6 libfontconfig1 \
       libebur128-1 libmp3lame0 libcpp-httplib0.11 libopus0 libtomlplusplus3 \
  && rm -rf /var/lib/apt/lists/*
 
