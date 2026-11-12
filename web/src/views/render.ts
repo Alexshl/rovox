@@ -37,7 +37,7 @@ export function openRenderDialog(app: App): void {
   const name = h('input', { attrs: { type: 'text', value: 'mix' } });
   const check = h('input', { attrs: { type: 'checkbox', checked: '' } });
   const bitrate = h('select', {}, ...['320', '256', '192', '128'].map((b) => h('option', { text: `${b} kbps`, attrs: { value: b } })));
-  const output = h('div', { class: 'full' });
+  const output = h('div', { class: 'full', attrs: { 'aria-live': 'polite' } });
   const bar = h('i');
   const progress = h('div', { class: 'progress full', style: { display: 'none' } }, bar);
   const preflightBtn = h('button', { class: 'btn', text: 'Preflight' });

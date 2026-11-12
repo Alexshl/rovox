@@ -79,7 +79,8 @@ export class Shell {
   private readonly transport = h('div', { class: 'transport' });
   private readonly mcp = h('aside', { class: 'mcp-panel', attrs: { 'aria-label': 'MCP-агенти' } });
   private readonly banner = h('div', { class: 'banner', style: { display: 'none' } });
-  private readonly toasts = h('div', { class: 'toasts' });
+  private readonly toasts = h('div', { class: 'toasts', attrs: { role: 'status', 'aria-live': 'polite' } });
+  private readonly toastEls = new Map<number, HTMLElement>();
   private readonly status = h('span', { class: 'status' });
   private clockBig = h('span', { class: 'big' });
   private clockSmall = h('span', { class: 'small' });
@@ -96,6 +97,8 @@ export class Shell {
   private activityTitle = h('div', { class: 'activity-title label' });
   private connEl = h('span', { class: 'conn' });
   private openMenu: HTMLElement | null = null;
+  private readonly menuOpeners = new Map<HTMLElement, (focus: 'first' | 'last' | null) => void>();
+  private tabFocusId: string | undefined;
   private logSignature = '';
   private readonly schedule = rafThrottle(() => this.render());
 
@@ -129,27 +132,67 @@ export class Shell {
   private buildMenubar(): void {
     const app = this.app;
     const menu = (title: string, entries: () => MenuEntry[]) => {
-      const dropdown = h('div', { class: 'dropdown' });
-      const root = h('div', { class: 'menu' }, h('button', { text: title, attrs: { 'aria-haspopup': 'true' } }), dropdown);
-      root.firstElementChild!.addEventListener('click', () => {
-        const wasOpen = root.classList.contains('open');
+      const dropdown = h('div', { class: 'dropdown', attrs: { role: 'menu', 'aria-label': title } });
+      const trigger = h('button', { text: title, attrs: { 'aria-haspopup': 'menu', 'aria-expanded': 'false' } });
+      const root = h('div', { class: 'menu' }, trigger, dropdown);
+      const open = (focus: 'first' | 'last' | null) => {
         this.closeMenus();
-        if (!wasOpen) {
-          clear(dropdown);
-          for (const e of entries()) {
-            if (e.separator) dropdown.append(h('div', { class: 'sep' }));
-            else {
-              const item = h('button', { class: 'item' }, h('span', { text: e.label }), h('span', { class: 'key', text: e.key ?? '' }));
-              item.disabled = !!e.disabled;
-              item.addEventListener('click', () => {
-                this.closeMenus();
-                e.action?.();
-              });
-              dropdown.append(item);
-            }
+        clear(dropdown);
+        for (const e of entries()) {
+          if (e.separator) dropdown.append(h('div', { class: 'sep', attrs: { role: 'separator' } }));
+          else {
+            const item = h('button', { class: 'item', attrs: { role: 'menuitem' } }, h('span', { text: e.label }), h('span', { class: 'key', text: e.key ?? '' }));
+            item.disabled = !!e.disabled;
+            item.addEventListener('click', () => {
+              this.closeMenus(true);
+              e.action?.();
+            });
+            dropdown.append(item);
           }
-          root.classList.add('open');
-          this.openMenu = root;
+        }
+        root.classList.add('open');
+        trigger.setAttribute('aria-expanded', 'true');
+        this.openMenu = root;
+        const items = this.menuItems(root);
+        (focus === 'first' ? items[0] : focus === 'last' ? items[items.length - 1] : undefined)?.focus();
+      };
+      this.menuOpeners.set(root, open);
+      trigger.addEventListener('click', (e) => {
+        if (root.classList.contains('open')) this.closeMenus();
+        else open(e.detail === 0 ? 'first' : null); // Enter / Space on the button (no pointer): focus goes into the menu
+      });
+      trigger.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopPropagation();
+          open(e.key === 'ArrowDown' ? 'first' : 'last');
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+          e.preventDefault();
+          e.stopPropagation();
+          this.switchMenu(root, e.key === 'ArrowRight' ? 1 : -1, root.classList.contains('open'));
+        } else if (e.key === 'Escape' && root.classList.contains('open')) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.closeMenus(true);
+        }
+      });
+      dropdown.addEventListener('keydown', (e) => {
+        const items = this.menuItems(root);
+        const at = items.indexOf(document.activeElement as HTMLButtonElement);
+        let handled = true;
+        if (e.key === 'ArrowDown') items[(at + 1) % items.length]?.focus();
+        else if (e.key === 'ArrowUp') items[(at <= 0 ? items.length : at) - 1]?.focus();
+        else if (e.key === 'Home') items[0]?.focus();
+        else if (e.key === 'End') items[items.length - 1]?.focus();
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') this.switchMenu(root, e.key === 'ArrowRight' ? 1 : -1, true);
+        else if (e.key === 'Escape') this.closeMenus(true);
+        else if (e.key === 'Tab') {
+          this.closeMenus(true); // the default Tab then moves on from the menu button
+          handled = false;
+        } else handled = false;
+        if (handled) {
+          e.preventDefault();
+          e.stopPropagation();
         }
       });
       return root;
@@ -199,9 +242,28 @@ export class Shell {
     );
   }
 
-  private closeMenus(): void {
-    this.menubar.querySelectorAll('.menu.open').forEach((m) => m.classList.remove('open'));
+  /** Closes the open menu; `refocus` returns focus to its button (Escape, after an item was chosen). */
+  private closeMenus(refocus = false): void {
+    const trigger = this.openMenu?.querySelector('button');
+    this.menubar.querySelectorAll('.menu.open').forEach((m) => {
+      m.classList.remove('open');
+      m.firstElementChild?.setAttribute('aria-expanded', 'false');
+    });
     this.openMenu = null;
+    if (refocus) trigger?.focus();
+  }
+
+  private menuItems(root: HTMLElement): HTMLButtonElement[] {
+    return [...root.querySelectorAll<HTMLButtonElement>('.dropdown button.item:not(:disabled)')];
+  }
+
+  /** ArrowLeft / ArrowRight: the neighbouring menu; an open menu stays open (and gets the focus on its first item). */
+  private switchMenu(from: HTMLElement, dir: number, keepOpen: boolean): void {
+    const roots = [...this.menubar.querySelectorAll<HTMLElement>('.menu')];
+    const target = roots[(roots.indexOf(from) + dir + roots.length) % roots.length];
+    if (!target || target === from) return;
+    if (keepOpen) this.menuOpeners.get(target)?.('first');
+    else target.querySelector('button')?.focus();
   }
 
   private buildTransport(): void {
@@ -318,8 +380,10 @@ export class Shell {
   private onKey(e: KeyboardEvent): void {
     const target = e.target as HTMLElement;
     if (target.closest('input, textarea, select') || document.querySelector('.scrim')) return;
+    // a menu button or item takes its own keys; only the Ctrl/Cmd shortcuts stay global there
+    if (!(e.ctrlKey || e.metaKey) && target.closest('.menubar')) return;
     // Space / Enter activate a focused button (tab mute, FX panel) or move a slider: not the global play shortcut then
-    if ((e.key === ' ' || e.key === 'Enter') && target.closest('button, [role=button], input[type=range]')) return;
+    if ((e.key === ' ' || e.key === 'Enter') && target.closest('button, [role=button], [role=slider], input[type=range]')) return;
     const app = this.app;
     const mod = e.ctrlKey || e.metaKey;
 
@@ -400,23 +464,27 @@ export class Shell {
 
   private renderTabs(): void {
     const app = this.app;
+    const focusKey = (document.activeElement as HTMLElement | null)?.closest?.('.tabs [data-tab-focus]')?.getAttribute('data-tab-focus') ?? null;
     const sig = app.order.map((id) => { const q = app.projects.get(id); return q ? `${id}:${q.name}:${app.tabStatus(q)}:${q.dirty}:${q.muted}:${syncState(q) ?? ''}:${q.storage?.last_error ?? ''}:${id === app.activeId}` : id; }).join('|');
     if (sig === this.tabsSignature) return;
     this.tabsSignature = sig;
     clear(this.tabs);
+    // the tab that is in the Tab order: the one last moved to, else the active one, else the first
+    const rovingId = [this.tabFocusId, app.activeId, app.order[0]].find((x) => x !== undefined && app.projects.has(x));
     for (const id of app.order) {
       const p = app.projects.get(id);
       if (!p) continue;
       const st = app.tabStatus(p);
       const label = st === 'idle' ? (p.dirty ? 'edited' : 'idle') : st;
       const muteTitle = p.muted ? 'Увімкнути звук' : 'Вимкнути звук';
+      const tabName = p.name || id;
       // a sibling of the tab, not a child: no interactive element inside role=tab
       const muteButton = h(
         'button',
         {
           class: `mute${p.muted ? ' on' : ''}`,
           title: muteTitle,
-          attrs: { 'aria-label': 'Звук проєкту', 'aria-pressed': String(p.muted) },
+          attrs: { role: 'switch', 'aria-label': `Звук проєкту ${tabName}`, 'aria-checked': String(!p.muted), 'data-tab-focus': `mute:${id}` },
           on: {
             click: (e) => {
               e.stopPropagation();
@@ -430,22 +498,42 @@ export class Shell {
       );
       const tab = h(
         'div',
-        { class: 'tab', attrs: { role: 'tab', 'aria-selected': String(id === app.activeId), tabindex: '0' } },
+        { class: 'tab', attrs: { role: 'tab', 'aria-selected': String(id === app.activeId), tabindex: id === rovingId ? '0' : '-1', 'data-tab-focus': `tab:${id}` } },
         h('span', { class: 'name', text: p.name || id, title: p.name }),
         h('span', { class: 'state', text: label }),
         p.dirty ? h('span', { class: 'dirty', text: '●', title: 'Є незбережені зміни' }) : null,
         syncBadge(p),
       );
       // a sibling of the tab like the mute button: no interactive element inside role=tab
-      const closeButton = h('button', { class: 'close', text: '×', title: 'Закрити проект', attrs: { 'aria-label': 'Закрити проект' }, on: { click: (e) => { e.stopPropagation(); void app.closeProject(id); } } });
+      const closeButton = h('button', { class: 'close', text: '×', title: 'Закрити проект', attrs: { 'aria-label': 'Закрити проект', 'data-tab-focus': `close:${id}` }, on: { click: (e) => { e.stopPropagation(); void app.closeProject(id); } } });
       const item = h('div', { class: `tabitem${id === app.activeId ? ' active' : ''}`, attrs: { role: 'presentation' } }, h('span', { class: `dot ${st}` }), muteButton, tab, closeButton);
-      item.addEventListener('click', () => app.setActive(id));
+      item.addEventListener('click', () => {
+        this.tabFocusId = id;
+        app.setActive(id);
+      });
       tab.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && e.target === tab) app.setActive(id);
+        if (e.target !== tab) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          this.tabFocusId = id;
+          app.setActive(id);
+          return;
+        }
+        // roving tabindex: the arrows move the focus, Enter / Space activates
+        const ids = app.order.filter((x) => app.projects.has(x));
+        const at = ids.indexOf(id);
+        const to = e.key === 'ArrowRight' ? ids[(at + 1) % ids.length] : e.key === 'ArrowLeft' ? ids[(at - 1 + ids.length) % ids.length] : e.key === 'Home' ? ids[0] : e.key === 'End' ? ids[ids.length - 1] : undefined;
+        if (to === undefined) return;
+        e.preventDefault();
+        this.tabFocusId = to;
+        this.tabs.querySelectorAll<HTMLElement>('[role=tab]').forEach((t) => t.setAttribute('tabindex', t.getAttribute('data-tab-focus') === `tab:${to}` ? '0' : '-1'));
+        this.tabs.querySelector<HTMLElement>(`[data-tab-focus="tab:${to}"]`)?.focus();
       });
       this.tabs.append(item);
     }
-    this.tabs.append(h('button', { class: 'add', text: '+', title: 'Новий проект', attrs: { 'aria-label': 'Новий проект' }, on: { click: () => void this.promptNewProject() } }));
+    this.tabs.append(h('button', { class: 'add', text: '+', title: 'Новий проект', attrs: { 'aria-label': 'Новий проект', 'data-tab-focus': 'add' }, on: { click: () => void this.promptNewProject() } }));
+    // the tabs are rebuilt on every change: keep the keyboard focus on the same control
+    if (focusKey) this.tabs.querySelector<HTMLElement>(`[data-tab-focus="${focusKey}"]`)?.focus();
   }
 
   private async promptNewProject(): Promise<void> {
@@ -526,11 +614,16 @@ export class Shell {
         const agent = isAgent(l.origin);
         const row = h(
           'div',
-          { class: 'log-row' },
+          { class: 'log-row', attrs: { role: 'button', tabindex: '0' } },
           h('div', { class: 'meta' }, h('span', { text: formatWallClock(new Date(l.at)) }), h('span', { class: `tool${agent ? ' agent' : ''}`, text: l.tool })),
           h('span', { class: 'text', text: `${agent ? l.origin.label + ': ' : ''}${l.text}` }),
         );
         row.addEventListener('click', () => this.arrange.reveal(l.ids));
+        row.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          this.arrange.reveal(l.ids);
+        });
         this.logBox.append(row);
       }
       if (!p?.log.length) this.logBox.append(h('div', { class: 'agents' }, h('div', { class: 'none', text: 'Дій ще не було.' })));
@@ -546,8 +639,19 @@ export class Shell {
   }
 
   private renderToasts(): void {
-    clear(this.toasts);
-    for (const t of this.app.toasts) this.toasts.append(h('div', { class: `toast ${t.kind}`, text: t.text }));
+    // only new toasts are added (and removed ones dropped): rebuilding the list would make a screen reader read all of them again
+    const live = new Set(this.app.toasts.map((t) => t.id));
+    for (const [id, el] of this.toastEls)
+      if (!live.has(id)) {
+        el.remove();
+        this.toastEls.delete(id);
+      }
+    for (const t of this.app.toasts) {
+      if (this.toastEls.has(t.id)) continue;
+      const el = h('div', { class: `toast ${t.kind}`, text: t.text, attrs: t.kind === 'error' ? { role: 'alert' } : {} });
+      this.toastEls.set(t.id, el);
+      this.toasts.append(el);
+    }
   }
 }
 

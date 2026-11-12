@@ -13,9 +13,15 @@ RUN apt-get update \
 # ---- web: the browser UI (TypeScript, Vite); unit tests run here, the bundle is copied into the runtime image -----------
 FROM node:22-trixie-slim AS web
 WORKDIR /web
+# node-canvas draws the canvas tests (arrange, mixer, perf); the prebuilt binary needs these libraries, a source build needs the rest
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential python3 pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \
+ && rm -rf /var/lib/apt/lists/*
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+# the canvas tests must run here: a missing node-canvas fails them instead of skipping
+ENV ROVOX_REQUIRE_CANVAS=1
 RUN npm test && npm run build
 
 # ---- toolchain: compilers and -dev packages --------------------------------

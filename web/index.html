@@ -4,6 +4,11 @@
 <html lang="uk">
   <head>
     <meta charset="utf-8" />
+    <!-- frame-ancestors is ignored in a meta tag: the server sends the same policy plus frame-ancestors 'none' as a header -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; worker-src 'self' blob:; base-uri 'none'; object-src 'none'"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Rovox</title>
   </head>
