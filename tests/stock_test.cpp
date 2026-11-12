@@ -835,3 +835,41 @@ ROVOX_TEST (stock, an_edit_with_all_six_renders_the_same_twice_and_the_limiter_r
     CHECK (peak > 0.01);
     CHECK (peak < 1.0);
 }
+
+ROVOX_TEST (stock, rea_delay_with_feedback_above_0_db_stays_finite_for_60_seconds)
+{
+    constexpr double fs = 48000.0;
+    fx::ReaDelay d;
+    d.prepare (fs);
+    fx::ReaDelayParams p;
+    p.taps[0].timeMs = 7.0;
+    p.taps[0].feedback = std::pow (10.0, 6.0 / 20.0);       // +6 dB
+    p.wet = 1.0;
+    d.setParams (p);
+
+    constexpr int block = 480;
+    float l[block], r[block];
+    float* io[2] = { l, r };
+    bool finite = true;
+    double peak = 0.0;
+
+    for (int b = 0; b < (int) (60.0 * fs / block); ++b)
+    {
+        for (int i = 0; i < block; ++i)
+            l[i] = r[i] = b < 4 ? 0.5f * (float) std::sin (2.0 * pi * 440.0 * (b * block + i) / fs) : 0.0f;
+
+        if (b == 100)
+            l[0] = std::nanf ("");                           // a NaN from upstream must not live on in the loop
+
+        d.process (io, 2, block);
+
+        for (int i = 0; i < block; ++i)
+        {
+            finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+            peak = std::max (peak, (double) std::max (std::abs (l[i]), std::abs (r[i])));
+        }
+    }
+
+    CHECK (finite);
+    CHECK (peak < 100.0);
+}

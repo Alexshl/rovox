@@ -154,6 +154,12 @@ public:
             io[c] = fc.destBuffer->getWritePointer (c, fc.bufferStartSample);
 
         run (io, n, fc.bufferNumSamples, fc);
+
+        // a runaway filter or a NaN from a parameter must not reach the mix, the meters or the file writer
+        for (int c = 0; c < n; ++c)
+            for (int i = 0; i < fc.bufferNumSamples; ++i)
+                if (! std::isfinite (io[c][i]))
+                    io[c][i] = 0.0f;
     }
 
     /** Values in the unit of the parameter, with the automation of the moment. */

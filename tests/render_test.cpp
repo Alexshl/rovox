@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
+#include "AudioSink.h"
 #include "DrumKitLibrary.h"
 #include "DrumsPlugin.h"
 #include "Limiter.h"
@@ -11,6 +12,7 @@
 #include "TestSupport.h"
 
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <thread>
 
@@ -709,4 +711,42 @@ ROVOX_TEST (render, limiter_unit_quiet_signal_below_ceiling_only_gets_the_gain)
     const auto r = limitTruePeak (y, sr, 6.0);
     CHECK (r.maxGainReductionDb == 0.0);
     CHECK_NEAR (y[0][1000] / x[0][1000], std::pow (10.0, 6.0 / 20.0), 1.0e-4);
+}
+
+ROVOX_TEST (render, a_nan_in_the_sink_writes_a_finite_file_and_is_counted)
+{
+    const auto dir = test::makeTempDir ("nan");
+
+    for (const char* container : { "wav16", "wav32", "flac" })
+    {
+        SinkSpec spec;
+        spec.container = std::string (container) == "flac" ? "flac" : "wav";
+        spec.bitDepth = std::string (container) == "wav16" ? 16 : (std::string (container) == "wav32" ? 32 : 24);
+        spec.sampleRate = 44100.0;
+        spec.channels = 1;
+        const auto file = dir / (std::string (container) + (spec.container == "flac" ? ".flac" : ".wav"));
+        auto sink = createSink (spec, file);
+        REQUIRE (sink.ok());
+
+        std::vector<float> x = test::sine (1000.0, -12.0, 0.1, 44100.0);
+        x[10] = std::nanf ("");
+        x[20] = HUGE_VALF;
+        const float* planar[1] = { x.data() };
+        CHECK (sink.value()->write (planar, (int) x.size()));
+        CHECK (sink.value()->close());
+        CHECK (sink.value()->nonFiniteSamples() == 2);
+
+        auto reader = openFloatReader (file);
+        REQUIRE (reader.ok());
+        const auto n = (int) reader.value()->totalFrames();
+        const auto* back = reader.value()->read (0, n);
+        REQUIRE (back != nullptr);
+        bool finite = true;
+
+        for (int i = 0; i < n; ++i)
+            finite = finite && std::isfinite (back[0][i]);
+
+        CHECK (finite);
+        CHECK (back[0][10] == 0.0f);
+    }
 }

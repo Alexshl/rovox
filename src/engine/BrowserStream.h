@@ -13,6 +13,7 @@
 #include "Tracktion.h"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -43,9 +44,18 @@ public:
     /** Called on the encoder thread for every packet. Must not block. */
     void setPacketSink (PacketFn);
 
-    /** Message thread. The Edit whose playhead stamps `sample_pos`; call forget() before destroying an Edit. */
+    /** Message thread. The Edit whose playhead stamps `sample_pos`; call forget() before destroying an Edit.
+        Every Edit given to setPositionSource() is remembered as playing until forget(): forgetting the current source
+        re-points it to another playing Edit, or to none. */
     void setPositionSource (te::Edit*);
     void forget (te::Edit*);
+
+    /** True when the clock thread woke up so late (more than a few periods) that it must restart its schedule from now
+        instead of firing the missed ticks back to back. */
+    static bool clockNeedsResync (std::chrono::nanoseconds late, std::chrono::nanoseconds period) noexcept
+    {
+        return late > period * 4;
+    }
 
     void addPlayingProjects (int delta)     { playingProjects_ += delta; }
     int playingProjects() const noexcept    { return playingProjects_.load(); }

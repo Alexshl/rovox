@@ -754,6 +754,24 @@ double ReaDelay::tailSeconds (const ReaDelayParams& p)
     return std::min (60.0, longest);
 }
 
+namespace
+{
+/** Keeps a feedback above 0 dB from running away to Inf/NaN: identity up to +-4.0 (the sound of every stable setting is
+    untouched), a smooth knee to +-8.0 full scale above that, and a non-finite value becomes 0. */
+double saturateFeedback (double v) noexcept
+{
+    if (! std::isfinite (v))
+        return 0.0;
+
+    const double a = std::abs (v);
+
+    if (a <= 4.0)
+        return v;
+
+    return std::copysign (4.0 + 4.0 * std::tanh ((a - 4.0) * 0.25), v);
+}
+}
+
 void ReaDelay::process (float* const* io, int numChannels, int numSamples)
 {
     const int nch = std::min (numChannels, 2);
@@ -782,7 +800,7 @@ void ReaDelay::process (float* const* io, int numChannels, int numSamples)
             {
                 auto& l = loop_[t][(size_t) c];
                 double v = l.hp.run (l.lp.run ((double) l.line[readPos]));
-                l.line[writePos_] = toFloat (flush (x[c] + tap.feedback * v));
+                l.line[writePos_] = toFloat (flush (saturateFeedback (x[c] + tap.feedback * v)));
                 p[c] = v;
             }
 

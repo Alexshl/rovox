@@ -468,3 +468,121 @@ ROVOX_TEST (transport, project_mix_mute_and_solo_shape_the_live_mix_only)
     stream->setPacketSink ({});
     opus_decoder_destroy (decoder);
 }
+
+namespace
+{
+struct PacketLog
+{
+    std::mutex m;
+    std::vector<std::uint8_t> flags;                // byte 1 of every packet
+    std::vector<double> rmsDb;                      // decoded level of every packet
+    OpusDecoder* decoder = nullptr;
+
+    PacketLog()
+    {
+        int err = 0;
+        decoder = opus_decoder_create (48000, 2, &err);
+    }
+
+    ~PacketLog()    { opus_decoder_destroy (decoder); }
+
+    void add (const std::vector<std::uint8_t>& p)
+    {
+        std::vector<float> out (960 * 2);
+        const int n = opus_decode_float (decoder, p.data() + BrowserStream::headerBytes, (opus_int32) (p.size() - BrowserStream::headerBytes), out.data(), 960, 0);
+        double sum = 0.0;
+
+        for (int i = 0; i < n * 2; ++i)
+            sum += (double) out[(size_t) i] * out[(size_t) i];
+
+        std::lock_guard<std::mutex> lock (m);
+        flags.push_back (p[1]);
+        rmsDb.push_back (10.0 * std::log10 (std::max (1.0e-12, n > 0 ? sum / (n * 2) : 0.0)));
+    }
+
+    size_t count()  { std::lock_guard<std::mutex> lock (m); return flags.size(); }
+};
+} // namespace
+
+ROVOX_TEST (transport, a_render_of_another_project_does_not_interrupt_live_playback)
+{
+    test::Env env;
+    auto* stream = test::host().stream();
+    REQUIRE (stream != nullptr);
+    const auto a = makeFixture (env);
+    const auto b = makeFixture (env);
+
+    PacketLog log;
+    stream->setPacketSink ([&] (const std::vector<std::uint8_t>& p) { log.add (p); });
+    env.ok (a.project, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
+    test::pumpMessages (800);
+    REQUIRE (log.count() > 10);
+    const auto from = log.count();
+
+    RenderRequest request;
+    request.tailS = 0.0;
+    auto rendered = renderProject (env.project (b.project), request);
+    REQUIRE (rendered.ok());
+    test::pumpMessages (200);
+    const auto to = log.count();
+    CHECK (env.ok (a.project, "transport.get")["state"] == "playing");
+    CHECK (env.project (a.project).edit().getTransport().isPlaying());
+
+    env.ok (a.project, "transport.set", { { "state", "stopped" } });
+    test::pumpMessages (100);
+    stream->setPacketSink ({});
+
+    std::lock_guard<std::mutex> lock (log.m);
+    REQUIRE (to > from);
+
+    for (size_t i = from; i < to; ++i)
+    {
+        CHECK ((log.flags[i] & 1) == 0);            // no discontinuity across the render
+        CHECK (log.rmsDb[i] > -30.0);               // the -12 dBFS tone never drops out
+    }
+}
+
+ROVOX_TEST (transport, a_stopped_and_closed_project_is_not_the_position_source_any_more)
+{
+    test::Env env;
+    auto* stream = test::host().stream();
+    REQUIRE (stream != nullptr);
+    const auto a = makeFixture (env);
+    const auto b = makeFixture (env);
+
+    PacketLog log;
+    stream->setPacketSink ([&] (const std::vector<std::uint8_t>& p) { log.add (p); });
+    env.ok (a.project, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
+    test::pumpMessages (300);
+    env.ok (b.project, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
+    test::pumpMessages (600);
+    env.ok (b.project, "transport.set", { { "state", "stopped" } });
+    REQUIRE (env.pm.close (b.project, SaveMode::discard).ok());
+    test::pumpMessages (300);                       // the epoch changes at the stop; let the stream settle
+    const auto from = log.count();
+    test::pumpMessages (600);
+    const auto to = log.count();
+
+    CHECK (stream->playingProjects() == 1);
+    CHECK (env.ok (a.project, "transport.get")["state"] == "playing");
+    env.ok (a.project, "transport.set", { { "state", "stopped" } });
+    test::pumpMessages (100);
+    stream->setPacketSink ({});
+
+    std::lock_guard<std::mutex> lock (log.m);
+    REQUIRE (to > from + 10);
+
+    for (size_t i = from; i < to; ++i)
+        CHECK ((log.flags[i] & 1) == 0);
+}
+
+ROVOX_TEST (transport, the_clock_restarts_its_schedule_after_a_long_stall)
+{
+    using namespace std::chrono;
+    const nanoseconds period (10'000'000);
+    CHECK (! BrowserStream::clockNeedsResync (nanoseconds (0), period));
+    CHECK (! BrowserStream::clockNeedsResync (milliseconds (3), period));
+    CHECK (! BrowserStream::clockNeedsResync (milliseconds (40), period));
+    CHECK (BrowserStream::clockNeedsResync (milliseconds (41), period));
+    CHECK (BrowserStream::clockNeedsResync (seconds (10), period));
+}

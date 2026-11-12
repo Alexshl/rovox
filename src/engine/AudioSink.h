@@ -26,6 +26,9 @@ public:
     virtual ~AudioSink() = default;
     virtual bool write (const float* const* planar, int numFrames) = 0;
     virtual bool close() = 0;
+
+    /** Samples that were NaN or Inf in write() and went to the file as silence. */
+    virtual std::int64_t nonFiniteSamples() const noexcept  { return 0; }
 };
 
 Result<std::unique_ptr<AudioSink>> createSink (const SinkSpec&, const fs::path& dest);
