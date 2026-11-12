@@ -576,23 +576,29 @@ class Wizard {
   }
 
   private showUpload(name: string): void {
-    this.totalBar = h('i');
-    this.totalEl = h('div', { class: 'progress', attrs: { role: 'progressbar', 'aria-label': t('import.progress'), 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', 'aria-valuetext': '' } }, this.totalBar);
-    this.totalText = h('div', { class: 'total mono', text: t('import.connecting') });
-    this.offlineEl = h('div', { class: 'finding warning', text: t('import.offline'), attrs: { role: 'status' }, style: { display: 'none' } });
+    const totalBar = h('i');
+    const totalEl = h('div', { class: 'progress', attrs: { role: 'progressbar', 'aria-label': t('import.progress'), 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', 'aria-valuetext': '' } }, totalBar);
+    const totalText = h('div', { class: 'total mono', text: t('import.connecting') });
+    const offlineEl = h('div', { class: 'finding warning', text: t('import.offline'), attrs: { role: 'status' }, style: { display: 'none' } });
     const list = h('div', { class: 'project-list upload-list', attrs: { role: 'list' } });
-    this.pauseBtn = this.button(t('import.pauseAll'), () => this.togglePause());
-    this.pauseBtn.classList.add('left');
-    this.nextBtn = this.button(t('import.next'), () => void this.afterUpload(), 'btn primary');
-    this.nextBtn.disabled = true;
+    const pauseBtn = this.button(t('import.pauseAll'), () => this.togglePause());
+    pauseBtn.classList.add('left');
+    const nextBtn = this.button(t('import.next'), () => void this.afterUpload(), 'btn primary');
+    nextBtn.disabled = true;
     this.setView(
       'upload',
       t('import.uploading', { name }),
       t('import.step', { n: 2 }),
-      [h('div', { class: 'full findings' }, this.offlineEl), h('div', { class: 'full' }, this.totalEl), h('div', { class: 'full' }, this.totalText), h('div', { class: 'full' }, list)],
-      [this.pauseBtn, this.button(t('dialog.cancel'), () => void this.cancelUpload()), this.nextBtn],
+      [h('div', { class: 'full findings' }, offlineEl), h('div', { class: 'full' }, totalEl), h('div', { class: 'full' }, totalText), h('div', { class: 'full' }, list)],
+      [pauseBtn, this.button(t('dialog.cancel'), () => void this.cancelUpload()), nextBtn],
     );
-    this.pauseBtn.focus();
+    this.totalBar = totalBar;
+    this.totalEl = totalEl;
+    this.totalText = totalText;
+    this.offlineEl = offlineEl;
+    this.pauseBtn = pauseBtn;
+    this.nextBtn = nextBtn;
+    pauseBtn.focus();
   }
 
   private togglePause(): void {

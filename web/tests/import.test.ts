@@ -518,7 +518,7 @@ describe('drop target', () => {
   const files = (n: number) => ({ types: ['Files'], items: Array.from({ length: n }, () => ({ kind: 'file', webkitGetAsEntry: () => null, getAsFile: () => wav('a.wav') })), files: [] });
 
   it('shows the overlay card while files are dragged over, hides it when the drag leaves the area itself, and imports on drop', async () => {
-    const { ctl } = setup({ 'upload.finish': () => ok({ path: '/p', files: [], detected: 'audio' }), 'import.plan': () => ok(planOf([{ name: 'a', key: 'a' }], [], 'generic')) });
+    const { host, ctl } = setup({ 'upload.finish': () => ok({ path: '/p', files: [], detected: 'audio' }), 'import.plan': () => ok(planOf([{ name: 'a', key: 'a' }], [], 'generic')) });
     const area = document.createElement('section');
     const child = document.createElement('div');
     area.append(child);
@@ -544,7 +544,8 @@ describe('drop target', () => {
     area.dispatchEvent(drop);
     expect(drop.defaultPrevented).toBe(true);
     expect(area.classList.contains('dragover')).toBe(false);
-    await until(() => expect(document.querySelector('.import-dialog')).not.toBeNull());
-    expect(text('.import-dialog > header')).toContain('2/3');
+    // one clean audio file is planned and applied at once: the batch ran and the wizard is gone again
+    await until(() => expect(host.edit).toHaveBeenCalledWith('import.apply', expect.anything(), expect.anything()));
+    expect(host.mcp.call).toHaveBeenCalledWith('upload.finish', expect.anything());
   });
 });
