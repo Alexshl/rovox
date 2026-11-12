@@ -1,0 +1,832 @@
+{
+ "id": "pop-8th",
+ "version": 1,
+ "name": "Pop eighths",
+ "meters": [
+  "4/4"
+ ],
+ "tempo_range": [
+  70,
+  150
+ ],
+ "swing": 0.5,
+ "parts": {
+  "bass": {
+   "name": "Bass",
+   "program": 34,
+   "channel": 0,
+   "range": [
+    28,
+    48
+   ]
+  },
+  "comp": {
+   "name": "Electric piano",
+   "program": 4,
+   "channel": 1,
+   "range": [
+    48,
+    72
+   ]
+  },
+  "drums": {
+   "name": "Drums",
+   "program": 0,
+   "channel": 9
+  }
+ },
+ "levels": {
+  "beginner": {
+   "fill_every": 4,
+   "humanize_vel": 0,
+   "comp_tones": 3,
+   "bass": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 1.8,
+        "vel": 90
+       },
+       {
+        "at": 2,
+        "role": "fifth",
+        "len": 1.8,
+        "vel": 80
+       }
+      ]
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "role": "root",
+       "len": 3.9,
+       "vel": 82
+      }
+     ]
+    }
+   },
+   "comp": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "pick": "all",
+        "len": 1.9,
+        "vel": 66
+       },
+       {
+        "at": 2,
+        "pick": "all",
+        "len": 1.9,
+        "vel": 62
+       }
+      ]
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "pick": "all",
+       "len": 3.9,
+       "vel": 66
+      }
+     ]
+    }
+   },
+   "drums": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 86,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "snare",
+        "vel": 80,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "kick",
+        "vel": 82,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "snare",
+        "vel": 80,
+        "len": 0.1
+       },
+       {
+        "at": 0.0,
+        "drum": "hat",
+        "vel": 56,
+        "len": 0.1
+       },
+       {
+        "at": 1.0,
+        "drum": "hat",
+        "vel": 56,
+        "len": 0.1
+       },
+       {
+        "at": 2.0,
+        "drum": "hat",
+        "vel": 56,
+        "len": 0.1
+       },
+       {
+        "at": 3.0,
+        "drum": "hat",
+        "vel": 56,
+        "len": 0.1
+       }
+      ]
+     ],
+     "fill": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 86,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "snare",
+        "vel": 80,
+        "len": 0.1
+       },
+       {
+        "at": 0.0,
+        "drum": "hat",
+        "vel": 56,
+        "len": 0.1
+       },
+       {
+        "at": 1.0,
+        "drum": "hat",
+        "vel": 56,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "snare",
+        "vel": 76,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "snare",
+        "vel": 90,
+        "len": 0.1
+       }
+      ]
+     ],
+     "after_fill": [
+      {
+       "at": 0,
+       "drum": "crash",
+       "vel": 76,
+       "len": 2.0
+      }
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "drum": "kick",
+       "vel": 86,
+       "len": 0.1
+      },
+      {
+       "at": 0,
+       "drum": "crash",
+       "vel": 76,
+       "len": 3.0
+      }
+     ]
+    }
+   }
+  },
+  "intermediate": {
+   "fill_every": 4,
+   "humanize_vel": 3,
+   "bass": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 0.9,
+        "vel": 92
+       },
+       {
+        "at": 1,
+        "role": "root",
+        "len": 0.45,
+        "vel": 72
+       },
+       {
+        "at": 1.5,
+        "role": "root",
+        "len": 0.45,
+        "vel": 76
+       },
+       {
+        "at": 2,
+        "role": "root",
+        "len": 0.9,
+        "vel": 88
+       },
+       {
+        "at": 3,
+        "role": "root",
+        "len": 0.45,
+        "vel": 72
+       },
+       {
+        "at": 3.5,
+        "role": "approach",
+        "len": 0.45,
+        "vel": 70
+       }
+      ]
+     ],
+     "variants": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 0.9,
+        "vel": 92
+       },
+       {
+        "at": 1.5,
+        "role": "root",
+        "len": 0.45,
+        "vel": 76
+       },
+       {
+        "at": 2,
+        "role": "fifth",
+        "len": 0.9,
+        "vel": 84
+       },
+       {
+        "at": 3,
+        "role": "octave",
+        "len": 0.45,
+        "vel": 72
+       },
+       {
+        "at": 3.5,
+        "role": "fifth",
+        "len": 0.45,
+        "vel": 70
+       }
+      ],
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 0.9,
+        "vel": 92
+       },
+       {
+        "at": 1,
+        "role": "root",
+        "len": 0.45,
+        "vel": 72
+       },
+       {
+        "at": 1.5,
+        "role": "octave",
+        "len": 0.45,
+        "vel": 76
+       },
+       {
+        "at": 2,
+        "role": "root",
+        "len": 0.9,
+        "vel": 88
+       },
+       {
+        "at": 3,
+        "role": "fifth",
+        "len": 0.45,
+        "vel": 72
+       },
+       {
+        "at": 3.5,
+        "role": "approach",
+        "len": 0.45,
+        "vel": 70
+       }
+      ]
+     ],
+     "variant_prob": 0.35,
+     "ending": [
+      {
+       "at": 0,
+       "role": "root",
+       "len": 3.9,
+       "vel": 84
+      }
+     ]
+    }
+   },
+   "comp": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "pick": "all",
+        "len": 0.9,
+        "vel": 70
+       },
+       {
+        "at": 1.5,
+        "pick": "all",
+        "len": 0.45,
+        "vel": 62
+       },
+       {
+        "at": 2,
+        "pick": "all",
+        "len": 0.9,
+        "vel": 68
+       },
+       {
+        "at": 3,
+        "pick": "all",
+        "len": 0.45,
+        "vel": 60
+       },
+       {
+        "at": 3.5,
+        "pick": "all",
+        "len": 0.45,
+        "vel": 64
+       }
+      ]
+     ],
+     "variants": [
+      [
+       {
+        "at": 0.0,
+        "pick": "all",
+        "len": 0.45,
+        "vel": 66
+       },
+       {
+        "at": 0.5,
+        "pick": "upper",
+        "len": 0.45,
+        "vel": 56
+       },
+       {
+        "at": 1.0,
+        "pick": "all",
+        "len": 0.45,
+        "vel": 66
+       },
+       {
+        "at": 1.5,
+        "pick": "upper",
+        "len": 0.45,
+        "vel": 56
+       },
+       {
+        "at": 2.0,
+        "pick": "all",
+        "len": 0.45,
+        "vel": 66
+       },
+       {
+        "at": 2.5,
+        "pick": "upper",
+        "len": 0.45,
+        "vel": 56
+       },
+       {
+        "at": 3.0,
+        "pick": "all",
+        "len": 0.45,
+        "vel": 66
+       },
+       {
+        "at": 3.5,
+        "pick": "upper",
+        "len": 0.45,
+        "vel": 56
+       }
+      ],
+      [
+       {
+        "at": 0,
+        "pick": "all",
+        "len": 1.4,
+        "vel": 70
+       },
+       {
+        "at": 1.5,
+        "pick": "upper",
+        "len": 0.45,
+        "vel": 60
+       },
+       {
+        "at": 2,
+        "pick": "all",
+        "len": 0.9,
+        "vel": 68
+       },
+       {
+        "at": 3,
+        "pick": "upper",
+        "len": 0.9,
+        "vel": 60
+       }
+      ]
+     ],
+     "variant_prob": 0.35,
+     "ending": [
+      {
+       "at": 0,
+       "pick": "all",
+       "len": 3.9,
+       "vel": 68
+      }
+     ]
+    }
+   },
+   "drums": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 96,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "snare",
+        "vel": 88,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "kick",
+        "vel": 90,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "snare",
+        "vel": 88,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "kick",
+        "vel": 70,
+        "len": 0.1
+       },
+       {
+        "at": 0.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 1.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 2.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 3.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 3.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       }
+      ]
+     ],
+     "variants": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 96,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "snare",
+        "vel": 88,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "kick",
+        "vel": 90,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "kick",
+        "vel": 76,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "snare",
+        "vel": 88,
+        "len": 0.1
+       },
+       {
+        "at": 0.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 1.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 2.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 3.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 3.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       }
+      ]
+     ],
+     "variant_prob": 0.3,
+     "fill": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 96,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "snare",
+        "vel": 88,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "kick",
+        "vel": 90,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "kick",
+        "vel": 70,
+        "len": 0.1
+       },
+       {
+        "at": 0.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 1.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 2.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "snare",
+        "vel": 70,
+        "len": 0.1
+       },
+       {
+        "at": 3.25,
+        "drum": "snare",
+        "vel": 76,
+        "len": 0.1
+       },
+       {
+        "at": 3.5,
+        "drum": "snare",
+        "vel": 84,
+        "len": 0.1
+       },
+       {
+        "at": 3.75,
+        "drum": "snare",
+        "vel": 94,
+        "len": 0.1
+       }
+      ],
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 96,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "snare",
+        "vel": 88,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "kick",
+        "vel": 70,
+        "len": 0.1
+       },
+       {
+        "at": 0.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 1.0,
+        "drum": "hat",
+        "vel": 66,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 48,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "snare",
+        "vel": 72,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "snare",
+        "vel": 78,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "tom_hi",
+        "vel": 84,
+        "len": 0.1
+       },
+       {
+        "at": 3.25,
+        "drum": "tom_mid",
+        "vel": 88,
+        "len": 0.1
+       },
+       {
+        "at": 3.5,
+        "drum": "tom_low",
+        "vel": 92,
+        "len": 0.1
+       },
+       {
+        "at": 3.75,
+        "drum": "tom_low",
+        "vel": 96,
+        "len": 0.1
+       }
+      ]
+     ],
+     "after_fill": [
+      {
+       "at": 0,
+       "drum": "crash",
+       "vel": 84,
+       "len": 2.0
+      }
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "drum": "kick",
+       "vel": 96,
+       "len": 0.1
+      },
+      {
+       "at": 0,
+       "drum": "crash",
+       "vel": 88,
+       "len": 3.0
+      }
+     ]
+    }
+   }
+  }
+ }
+}

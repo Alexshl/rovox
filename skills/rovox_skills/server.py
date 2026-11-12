@@ -8,6 +8,7 @@ import sys
 
 from . import __version__
 from . import analysis
+from .accompany.tools import ACCOMPANY_TOOLS, wrap_handler as _accompany_wrap
 from .core import Core, CoreError
 from .skills import describe, run_skill
 from .notation import NOTATION_TOOLS, call_tool as call_notation, tool_specs as notation_specs
@@ -106,6 +107,9 @@ def _handle(message, core_factory):
     if method == "ping":
         return {"jsonrpc": "2.0", "id": mid, "result": {}}
     return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "method not found"}}
+
+
+TOOLS, _handle = TOOLS + ACCOMPANY_TOOLS, _accompany_wrap(_handle)      # adds accompany.styles / .generate / .apply
 
 
 def serve(url=None, token=None, stdin=sys.stdin, stdout=sys.stdout):

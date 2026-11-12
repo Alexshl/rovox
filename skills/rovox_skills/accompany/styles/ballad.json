@@ -1,0 +1,780 @@
+{
+ "id": "ballad",
+ "version": 1,
+ "name": "Ballad",
+ "meters": [
+  "4/4",
+  "6/8"
+ ],
+ "tempo_range": [
+  50,
+  100
+ ],
+ "swing": 0.5,
+ "parts": {
+  "bass": {
+   "name": "Bass",
+   "program": 33,
+   "channel": 0,
+   "range": [
+    28,
+    48
+   ]
+  },
+  "comp": {
+   "name": "Piano",
+   "program": 0,
+   "channel": 1,
+   "range": [
+    48,
+    72
+   ]
+  },
+  "drums": {
+   "name": "Drums",
+   "program": 0,
+   "channel": 9
+  }
+ },
+ "levels": {
+  "beginner": {
+   "fill_every": 8,
+   "humanize_vel": 0,
+   "comp_tones": 3,
+   "bass": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 1.9,
+        "vel": 84
+       },
+       {
+        "at": 2,
+        "role": "fifth",
+        "len": 1.9,
+        "vel": 74
+       }
+      ]
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "role": "root",
+       "len": 3.9,
+       "vel": 80
+      }
+     ]
+    },
+    "6/8": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 1.4,
+        "vel": 84
+       },
+       {
+        "at": 1.5,
+        "role": "fifth",
+        "len": 1.4,
+        "vel": 72
+       }
+      ]
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "role": "root",
+       "len": 2.9,
+       "vel": 80
+      }
+     ]
+    }
+   },
+   "comp": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "pick": "all",
+        "len": 1.9,
+        "vel": 60
+       },
+       {
+        "at": 2,
+        "pick": "all",
+        "len": 1.9,
+        "vel": 54
+       }
+      ]
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "pick": "all",
+       "len": 3.9,
+       "vel": 62
+      }
+     ]
+    },
+    "6/8": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "pick": "all",
+        "len": 1.4,
+        "vel": 60
+       },
+       {
+        "at": 1.5,
+        "pick": "all",
+        "len": 1.4,
+        "vel": 54
+       }
+      ]
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "pick": "all",
+       "len": 2.9,
+       "vel": 62
+      }
+     ]
+    }
+   }
+  },
+  "intermediate": {
+   "fill_every": 4,
+   "humanize_vel": 3,
+   "bass": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 1.9,
+        "vel": 86
+       },
+       {
+        "at": 2,
+        "role": "fifth",
+        "len": 1.4,
+        "vel": 72
+       },
+       {
+        "at": 3.5,
+        "role": "approach",
+        "len": 0.45,
+        "vel": 64
+       }
+      ]
+     ],
+     "variants": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 2.4,
+        "vel": 86
+       },
+       {
+        "at": 2.5,
+        "role": "fifth",
+        "len": 0.9,
+        "vel": 70
+       },
+       {
+        "at": 3.5,
+        "role": "approach",
+        "len": 0.45,
+        "vel": 64
+       }
+      ],
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 2.9,
+        "vel": 86
+       },
+       {
+        "at": 3,
+        "role": "octave",
+        "len": 0.9,
+        "vel": 68
+       }
+      ]
+     ],
+     "variant_prob": 0.35,
+     "ending": [
+      {
+       "at": 0,
+       "role": "root",
+       "len": 3.9,
+       "vel": 80
+      }
+     ]
+    },
+    "6/8": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 1.4,
+        "vel": 86
+       },
+       {
+        "at": 1.5,
+        "role": "fifth",
+        "len": 0.9,
+        "vel": 70
+       },
+       {
+        "at": 2.5,
+        "role": "approach",
+        "len": 0.45,
+        "vel": 62
+       }
+      ]
+     ],
+     "variants": [
+      [
+       {
+        "at": 0,
+        "role": "root",
+        "len": 1.4,
+        "vel": 86
+       },
+       {
+        "at": 1.5,
+        "role": "octave",
+        "len": 1.4,
+        "vel": 68
+       }
+      ]
+     ],
+     "variant_prob": 0.3,
+     "ending": [
+      {
+       "at": 0,
+       "role": "root",
+       "len": 2.9,
+       "vel": 80
+      }
+     ]
+    }
+   },
+   "comp": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "pick": [
+         0
+        ],
+        "len": 1.4,
+        "vel": 60
+       },
+       {
+        "at": 0.5,
+        "pick": [
+         1
+        ],
+        "len": 1.4,
+        "vel": 52
+       },
+       {
+        "at": 1,
+        "pick": [
+         2
+        ],
+        "len": 1.4,
+        "vel": 54
+       },
+       {
+        "at": 1.5,
+        "pick": [
+         -1
+        ],
+        "len": 1.4,
+        "vel": 56
+       },
+       {
+        "at": 2,
+        "pick": [
+         1
+        ],
+        "len": 1.4,
+        "vel": 54
+       },
+       {
+        "at": 2.5,
+        "pick": [
+         2
+        ],
+        "len": 1.4,
+        "vel": 50
+       },
+       {
+        "at": 3,
+        "pick": [
+         -1
+        ],
+        "len": 1.4,
+        "vel": 54
+       },
+       {
+        "at": 3.5,
+        "pick": [
+         2
+        ],
+        "len": 0.9,
+        "vel": 50
+       }
+      ]
+     ],
+     "variants": [
+      [
+       {
+        "at": 0,
+        "pick": [
+         0,
+         1
+        ],
+        "len": 1.9,
+        "vel": 58
+       },
+       {
+        "at": 2,
+        "pick": [
+         1
+        ],
+        "len": 0.9,
+        "vel": 50
+       },
+       {
+        "at": 2.5,
+        "pick": [
+         2
+        ],
+        "len": 0.9,
+        "vel": 50
+       },
+       {
+        "at": 3,
+        "pick": [
+         -1
+        ],
+        "len": 0.9,
+        "vel": 54
+       },
+       {
+        "at": 3.5,
+        "pick": [
+         2
+        ],
+        "len": 0.45,
+        "vel": 48
+       }
+      ]
+     ],
+     "variant_prob": 0.3,
+     "ending": [
+      {
+       "at": 0,
+       "pick": "all",
+       "len": 3.9,
+       "vel": 62
+      }
+     ]
+    },
+    "6/8": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "pick": [
+         0
+        ],
+        "len": 1.4,
+        "vel": 58
+       },
+       {
+        "at": 0.5,
+        "pick": [
+         1
+        ],
+        "len": 1.4,
+        "vel": 50
+       },
+       {
+        "at": 1,
+        "pick": [
+         2
+        ],
+        "len": 1.4,
+        "vel": 52
+       },
+       {
+        "at": 1.5,
+        "pick": [
+         -1
+        ],
+        "len": 1.4,
+        "vel": 56
+       },
+       {
+        "at": 2,
+        "pick": [
+         2
+        ],
+        "len": 0.9,
+        "vel": 48
+       },
+       {
+        "at": 2.5,
+        "pick": [
+         1
+        ],
+        "len": 0.45,
+        "vel": 48
+       }
+      ]
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "pick": "all",
+       "len": 2.9,
+       "vel": 62
+      }
+     ]
+    }
+   },
+   "drums": {
+    "4/4": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 72,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "side",
+        "vel": 54,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "hat",
+        "vel": 40,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "hat",
+        "vel": 40,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 3.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "kick",
+        "vel": 52,
+        "len": 0.1
+       }
+      ]
+     ],
+     "fill": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 72,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "side",
+        "vel": 54,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "hat",
+        "vel": 40,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "kick",
+        "vel": 52,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "tom_hi",
+        "vel": 60,
+        "len": 0.1
+       },
+       {
+        "at": 3.5,
+        "drum": "tom_mid",
+        "vel": 66,
+        "len": 0.1
+       }
+      ],
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 72,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "side",
+        "vel": 54,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "hat",
+        "vel": 40,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "kick",
+        "vel": 52,
+        "len": 0.1
+       },
+       {
+        "at": 3,
+        "drum": "snare",
+        "vel": 54,
+        "len": 0.1
+       },
+       {
+        "at": 3.5,
+        "drum": "snare",
+        "vel": 62,
+        "len": 0.1
+       }
+      ]
+     ],
+     "after_fill": [
+      {
+       "at": 0,
+       "drum": "crash",
+       "vel": 58,
+       "len": 2.0
+      }
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "drum": "kick",
+       "vel": 70,
+       "len": 0.1
+      }
+     ]
+    },
+    "6/8": {
+     "cycle": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 70,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "side",
+        "vel": 52,
+        "len": 0.1
+       },
+       {
+        "at": 0,
+        "drum": "hat",
+        "vel": 38,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 38,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       }
+      ]
+     ],
+     "fill": [
+      [
+       {
+        "at": 0,
+        "drum": "kick",
+        "vel": 70,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "side",
+        "vel": 52,
+        "len": 0.1
+       },
+       {
+        "at": 0,
+        "drum": "hat",
+        "vel": 38,
+        "len": 0.1
+       },
+       {
+        "at": 0.5,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 1,
+        "drum": "hat",
+        "vel": 30,
+        "len": 0.1
+       },
+       {
+        "at": 1.5,
+        "drum": "hat",
+        "vel": 38,
+        "len": 0.1
+       },
+       {
+        "at": 2,
+        "drum": "tom_hi",
+        "vel": 58,
+        "len": 0.1
+       },
+       {
+        "at": 2.5,
+        "drum": "tom_mid",
+        "vel": 64,
+        "len": 0.1
+       }
+      ]
+     ],
+     "after_fill": [
+      {
+       "at": 0,
+       "drum": "crash",
+       "vel": 56,
+       "len": 2.0
+      }
+     ],
+     "ending": [
+      {
+       "at": 0,
+       "drum": "kick",
+       "vel": 70,
+       "len": 0.1
+      }
+     ]
+    }
+   }
+  }
+ }
+}

@@ -24,4 +24,7 @@ notation = ["verovio"]
 rovox-skills = "rovox_skills.cli:main"
 
 [tool.setuptools]
-packages = ["rovox_skills", "rovox_skills.notation"]
+packages = ["rovox_skills", "rovox_skills.notation", "rovox_skills.accompany"]
+
+[tool.setuptools.package-data]
+"rovox_skills.accompany" = ["styles/*.json"]
