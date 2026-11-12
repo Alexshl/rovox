@@ -24,6 +24,14 @@ const ICONS = {
   loop: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7V6a2 2 0 0 1 2-2h7M13 9v1a2 2 0 0 1-2 2H4"/><path d="M10 2l2.5 2L10 6M6 10l-2.5 2L6 14" fill="currentColor"/></svg>',
 };
 
+function setText(el: HTMLElement, text: string): void {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+function setTitle(el: HTMLElement, title: string): void {
+  if (el.title !== title) el.title = title;
+}
+
 function icon(svg: string): HTMLElement {
   const span = document.createElement('span');
   span.innerHTML = svg;
@@ -103,6 +111,8 @@ export class Shell {
 
     app.changed.on(() => this.schedule());
     app.audio.onChange(() => this.schedule());
+    // the worklet reports ~30 times a second: that touches only the audio button, never the whole shell
+    app.audio.onStats(() => this.renderAudioButton());
     document.addEventListener('keydown', (e) => this.onKey(e));
     document.addEventListener('pointerdown', (e) => {
       if (this.openMenu && !this.openMenu.contains(e.target as Node)) this.closeMenus();
@@ -455,24 +465,31 @@ export class Shell {
     this.snapBtn.textContent = app.prefs.snap ? 'ON' : 'OFF';
     this.snapBtn.classList.toggle('on', app.prefs.snap);
 
+    this.renderAudioButton();
+    this.tickClock();
+  }
+
+  /** The audio button and its readout: the only part of the shell that follows the 30 Hz stream statistics. */
+  private renderAudioButton(): void {
+    const app = this.app;
+    const playing = !!app.active?.isPlaying();
     const a = app.audio.stats;
     const mode = app.serverInfo.audio.mode;
     this.audioBtn.classList.toggle('on', a.enabled && a.state !== 'underrun');
     this.audioBtn.classList.toggle('warn', a.enabled && (a.state === 'underrun' || a.underruns > 0) && playing);
     if (mode === 'none') {
-      this.audioBtn.textContent = 'Звук: preview';
+      setText(this.audioBtn, 'Звук: preview');
       this.audioBtn.disabled = true;
-      this.audioBtn.title = 'Сервер без аудіо-виходу (--audio none): відтворення через render.preview';
+      setTitle(this.audioBtn, 'Сервер без аудіо-виходу (--audio none): відтворення через render.preview');
     } else if (!a.supported) {
-      this.audioBtn.textContent = 'Звук: недоступний';
+      setText(this.audioBtn, 'Звук: недоступний');
       this.audioBtn.disabled = true;
-      this.audioBtn.title = a.error ?? 'Потрібен браузер з WebCodecs (Chrome, Edge, Firefox 130+)';
+      setTitle(this.audioBtn, a.error ?? 'Потрібен браузер з WebCodecs (Chrome, Edge, Firefox 130+)');
     } else {
       this.audioBtn.disabled = false;
-      this.audioBtn.textContent = a.enabled ? (a.underruns > 0 && playing ? `Звук ● ${a.underruns} underrun` : 'Звук увімкнено') : 'Увімкнути звук';
-      this.audioBtn.title = a.enabled ? `буфер ${Math.round(a.bufferedMs)} ms · затримка виходу ${Math.round(a.outputLatencyMs)} ms · underruns ${a.underruns}` : 'Браузер вмикає звук лише після кліку';
+      setText(this.audioBtn, a.enabled ? (a.underruns > 0 && playing ? `Звук ● ${a.underruns} underrun` : 'Звук увімкнено') : 'Увімкнути звук');
+      setTitle(this.audioBtn, a.enabled ? `буфер ${Math.round(a.bufferedMs)} ms · затримка виходу ${Math.round(a.outputLatencyMs)} ms · underruns ${a.underruns}` : 'Браузер вмикає звук лише після кліку');
     }
-    this.tickClock();
   }
 
   private renderMcp(p: ReturnType<App['projects']['get']>): void {

@@ -22,11 +22,13 @@ declare function registerProcessor(name: string, ctor: new () => AudioWorkletPro
 
 class RovoxPlayer extends AudioWorkletProcessor {
   private ring = new JitterRing();
+  // clock drift between the server and this sound card is absorbed by +-0.5 % resampling (see DriftController)
   private lastReport = 0;
   private lastUnderruns = 0;
 
   constructor() {
     super();
+    this.ring.adaptive = true;
     this.port.onmessage = (ev: MessageEvent<InMessage>) => {
       const m = ev.data;
       if (m.type === 'chunk') this.ring.push(m.l, m.r, m.pos);

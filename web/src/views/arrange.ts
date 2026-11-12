@@ -80,6 +80,9 @@ export class ArrangeView {
   private readonly tcpRows = new Map<string, TcpRow>();
   private readonly peaks: PeakCache;
   private palette!: Palette;
+  private paletteTheme: string | undefined;
+  private seekPending: number | null = null;
+  private seekRaf = 0;
   private drag: Drag | null = null;
   private hover: Hit | null = null;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
@@ -116,12 +119,14 @@ export class ArrangeView {
     this.lanesCanvas.addEventListener('pointerdown', (e) => this.onLanesDown(e));
     this.lanesCanvas.addEventListener('pointermove', (e) => this.onLanesMove(e));
     this.lanesCanvas.addEventListener('pointerup', (e) => this.onUp(e));
+    this.lanesCanvas.addEventListener('pointercancel', (e) => this.onCancel(e));
     this.lanesCanvas.addEventListener('pointerleave', () => this.hideTip());
     this.lanesCanvas.addEventListener('dblclick', (e) => this.onLanesDouble(e));
     this.lanesCanvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.rulerCanvas.addEventListener('pointerdown', (e) => this.onRulerDown(e));
     this.rulerCanvas.addEventListener('pointermove', (e) => this.onRulerMove(e));
     this.rulerCanvas.addEventListener('pointerup', (e) => this.onUp(e));
+    this.rulerCanvas.addEventListener('pointercancel', (e) => this.onCancel(e));
     this.rulerCanvas.addEventListener('dblclick', (e) => this.onRulerDouble(e));
     this.rulerCanvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.refreshPalette();
@@ -139,7 +144,7 @@ export class ArrangeView {
       this.storeSub = [];
       this.store = s;
       this.trackSignature = '';
-      this.tcpRows.clear();
+      this.disposeTcp();
       clear(this.inner);
       if (s) {
         this.storeSub.push(s.state.on(() => this.onStoreChanged()), s.agentChanged.on(() => this.draw()), s.transportChanged.on(() => this.draw()));
@@ -147,7 +152,7 @@ export class ArrangeView {
       }
     }
 
-    this.refreshPalette();
+    if (document.documentElement.dataset.theme !== this.paletteTheme) this.refreshPalette();
     this.onStoreChanged();
   }
 
@@ -205,6 +210,7 @@ export class ArrangeView {
   }
 
   private refreshPalette(): void {
+    this.paletteTheme = document.documentElement.dataset.theme;
     const t = (n: string) => token(n);
     this.palette = {
       panel900: t('panel-900'),
@@ -273,12 +279,17 @@ export class ArrangeView {
   // TCP
   private rebuildTcp(s: ProjectStore): void {
     clear(this.inner);
-    this.tcpRows.clear();
+    this.disposeTcp();
     s.tracks.forEach((t, i) => {
       const row = new TcpRow(this.app, s, t.track_id, i);
       this.tcpRows.set(t.track_id, row);
       this.inner.append(row.el);
     });
+  }
+
+  private disposeTcp(): void {
+    for (const row of this.tcpRows.values()) row.dispose();
+    this.tcpRows.clear();
   }
 
   private updateTcp(s: ProjectStore): void {
@@ -788,6 +799,11 @@ export class ArrangeView {
       const it = s.items.get(sid);
       if (it) orig.set(sid, { start: it.start_s, length: it.length_s, fadeIn: it.fade_in_s ?? 0, fadeOut: it.fade_out_s ?? 0, gain: it.gain_db ?? 0, offset: it.offset_s });
     }
+    if (!orig.has(id)) {
+      // shift-click took the anchor out of the selection: nothing to drag
+      s.state.emit();
+      return;
+    }
     this.drag = { kind: 'item', zone: hit.zone, ids: [...orig.keys()], startX: x, startY: y, orig, moved: false, anchor: id, delta: null };
     this.draw();
   }
@@ -818,7 +834,8 @@ export class ArrangeView {
     if (!d.moved && Math.abs(x - d.startX) < 3 && Math.abs(y - d.startY) < 3) return;
     d.moved = true;
     this.hideTip();
-    const a = d.orig.get(d.anchor)!;
+    const a = d.orig.get(d.anchor);
+    if (!a) return;
     const dt = (x - d.startX) / this.pps;
     const delta: Geometry = { start: a.start, length: a.length, fadeIn: a.fadeIn, fadeOut: a.fadeOut, gain: a.gain, offset: a.offset };
     const opts = this.snapOptions(e);
@@ -848,10 +865,28 @@ export class ArrangeView {
     this.draw();
   }
 
+  /** The browser took the pointer away (touch scroll, window blur): finish the gesture with what it has. */
+  private onCancel(e: PointerEvent): void {
+    if (this.drag?.kind === 'ruler-loop') {
+      this.drag = null;
+      return;
+    }
+    this.onUp(e);
+  }
+
+  private flushSeek(): void {
+    if (this.seekRaf) cancelAnimationFrame(this.seekRaf);
+    this.seekRaf = 0;
+    const t = this.seekPending;
+    this.seekPending = null;
+    if (t !== null) this.app.seek(t);
+  }
+
   private onUp(e: PointerEvent): void {
     const d = this.drag;
     this.drag = null;
     const s = this.store;
+    if (d?.kind === 'ruler-seek') this.flushSeek();
     if (!s || !d) return;
 
     if (d.kind === 'item') {
@@ -955,8 +990,14 @@ export class ArrangeView {
   private onRulerMove(e: PointerEvent): void {
     const d = this.drag;
     const { x } = this.local(e, this.rulerCanvas);
-    if (d?.kind === 'ruler-seek') this.app.seek(this.snappedTime(x, e));
-    else if (d?.kind === 'marker') {
+    if (d?.kind === 'ruler-seek') {
+      this.seekPending = this.snappedTime(x, e);
+      if (!this.seekRaf)
+        this.seekRaf = requestAnimationFrame(() => {
+          this.seekRaf = 0;
+          this.flushSeek();
+        });
+    } else if (d?.kind === 'marker') {
       d.moved = true;
       const mk = this.store?.markers.find((m) => m.marker_id === d.id);
       if (mk) mk.time_s = this.snappedTime(x, e);
@@ -1085,7 +1126,6 @@ class TcpRow {
   private readonly solo = h('button', { class: 'sbtn solo', text: 'S', title: 'Solo', attrs: { 'aria-label': 'Solo' } });
   private readonly fx = h('button', { class: 'sbtn fx', text: 'FX', title: 'FX', attrs: { 'aria-label': 'FX' } });
   private readonly arm = h('button', { class: 'sbtn arm', text: '●', title: 'Запис недоступний у цій версії', attrs: { 'aria-label': 'Запис', disabled: '' } });
-  private popover: HTMLElement | null = null;
 
   constructor(
     private readonly app: App,
@@ -1135,7 +1175,10 @@ class TcpRow {
 
   private rename(): void {
     const input = h('input', { class: 'name-input', attrs: { value: this.nameEl.textContent ?? '' } });
+    let finished = false;
     const done = (commit: boolean) => {
+      if (finished) return;
+      finished = true;
       const v = input.value.trim();
       input.replaceWith(this.nameEl);
       if (commit && v && v !== this.nameEl.textContent) {
@@ -1188,14 +1231,29 @@ class TcpRow {
     const up = () => {
       this.vol.removeEventListener('pointermove', move);
       this.vol.removeEventListener('pointerup', up);
+      this.vol.removeEventListener('pointercancel', up);
       this.setVolume(db, true);
     };
     this.vol.addEventListener('pointermove', move);
     this.vol.addEventListener('pointerup', up);
+    this.vol.addEventListener('pointercancel', up);
+  }
+
+  private popoverCleanup: (() => void) | null = null;
+
+  /** Closes the FX popover and drops its document listeners; `refocus` returns focus to the FX button (Escape). */
+  private hideFx(refocus: boolean): void {
+    this.popoverCleanup?.();
+    this.popoverCleanup = null;
+    if (refocus) this.fx.focus();
+  }
+
+  dispose(): void {
+    this.hideFx(false);
   }
 
   private showFx(): void {
-    this.popover?.remove();
+    this.hideFx(false);
     // the fader and the level meter are the track's own controls, not effects (the mixer strip hides them the same way)
     const list = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
     const sections: FxPluginSection[] = list.map((p) => new FxPluginSection(this.app, p, (self) => sections.forEach((o) => o !== self && o.collapse())));
@@ -1207,15 +1265,23 @@ class TcpRow {
       h('div', { class: 'head label', text: `FX · ${this.store.track(this.id)?.name ?? ''}` }),
       ...(rows.length ? rows : [h('div', { class: 'row', text: 'Немає плагінів' })]),
     );
-    this.popover = pop;
     document.body.append(pop);
-    const close = (ev: Event) => {
-      if (!pop.contains(ev.target as Node)) {
-        pop.remove();
-        document.removeEventListener('pointerdown', close, true);
-      }
+    const onDown = (ev: Event) => {
+      if (!pop.contains(ev.target as Node)) this.hideFx(false);
     };
-    setTimeout(() => document.addEventListener('pointerdown', close, true), 0);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Escape') return;
+      ev.stopPropagation();
+      this.hideFx(true);
+    };
+    const timer = setTimeout(() => document.addEventListener('pointerdown', onDown, true), 0);
+    document.addEventListener('keydown', onKey, true);
+    this.popoverCleanup = () => {
+      clearTimeout(timer);
+      document.removeEventListener('pointerdown', onDown, true);
+      document.removeEventListener('keydown', onKey, true);
+      pop.remove();
+    };
   }
 }
 
