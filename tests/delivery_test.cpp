@@ -5,6 +5,7 @@
 // webhook (HMAC), file; hold / release, idempotency, retries and the rule that secrets never show up in results, errors, the journal or the log.
 #include "Delivery.h"
 #include "DeliveryService.h"
+#include "EventWebhooks.h"
 #include "Hmac.h"
 #include "JobCallback.h"
 #include "JobManager.h"
@@ -16,8 +17,11 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <atomic>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <thread>
 
@@ -851,4 +855,253 @@ ROVOX_TEST (delivery, webhook_streams_the_file_and_refuses_one_over_the_limit)
     REQUIRE (! refused.ok());
     CHECK (refused.error().code == "FILE_TOO_LARGE");
     CHECK (mock.count() == 1);                                  // nothing was sent
+}
+
+//==============================================================================
+// Event webhooks (E9-01): an EventHub observer per tenant on top of the callback dispatcher
+namespace
+{
+const char* webhookSecret = "whsec_event_webhook_secret";
+
+struct HookTenant
+{
+    std::string id;
+    int port = 0;
+    std::vector<std::string> events;
+};
+
+std::filesystem::path writeWebhookConfig (const std::filesystem::path& file, bool allowPrivate, const std::vector<HookTenant>& tenants)
+{
+    ::setenv ("ROVOX_TEST_WH_SECRET", webhookSecret, 1);
+    std::ofstream out (file, std::ios::trunc);
+    out << "[callbacks]\nallow_hosts = [\"hooks.test\"]\nallow_private = " << (allowPrivate ? "true" : "false") << "\n"
+        << "[callbacks.secrets.hook]\nenv = \"ROVOX_TEST_WH_SECRET\"\n";
+
+    for (auto& t : tenants)
+    {
+        out << "[tenants." << t.id << ".webhooks]\nurl = \"http://hooks.test:" << t.port << "/events\"\nsecret_ref = \"hook\"\nevents = [";
+
+        for (size_t i = 0; i < t.events.size(); ++i)
+            out << (i > 0 ? ", " : "") << "\"" << t.events[i] << "\"";
+
+        out << "]\n";
+    }
+
+    return file;
+}
+
+EventWebhooks::Options webhookOptions (const std::filesystem::path& config)
+{
+    EventWebhooks::Options o;
+    o.configFile = config;
+    o.resolver = [] (const std::string&, int) { return std::vector<std::string> { "127.0.0.1" }; };
+    return o;
+}
+
+bool waitUntil (const std::function<bool()>& cond, int ms = 10000)
+{
+    for (int i = 0; i < ms / 10; ++i)
+    {
+        if (cond())
+            return true;
+
+        std::this_thread::sleep_for (std::chrono::milliseconds (10));
+    }
+
+    return cond();
+}
+
+json jobEvent (const std::string& jobId, const std::string& kind, const std::string& state)
+{
+    return { { "type", "job.updated" }, { "job", { { "job_id", jobId }, { "kind", kind }, { "state", state }, { "project_id", "p_1" }, { "finished", "2026-01-01T00:00:00Z" } } } };
+}
+}
+
+ROVOX_TEST (delivery, webhook_is_signed_and_carries_the_public_payload)
+{
+    Mock mock;
+    const auto dir = test::makeTempDir ("whsig");
+    const auto config = writeWebhookConfig (dir / "rovox.toml", true, { { "wh_sig", mock.port, { "job.*", "render.done" } } });
+    EventHub hub;
+    auto options = webhookOptions (config);
+    options.tenantRoot = [dir] (const std::string& tenant) { return dir / "tenants" / tenant / "projects"; };
+    options.hostRoot = dir;
+    EventWebhooks hooks (hub, options);
+
+    json event = jobEvent ("j_sig", "render", "succeeded");
+    event["job"]["edit"] = (dir / "tenants" / "wh_sig" / "projects" / "p_1" / "project.rvx" / "edit.xml").string();
+    event["job"]["elsewhere"] = (dir / "exports" / "mix.wav").string();
+    event["job"]["api_token"] = "should-never-leave";
+    event["job"]["note"] = "/volume_db";                                    // not a host path: untouched
+    const auto id = hub.publish ("wh_sig", "p_1", event);
+
+    REQUIRE (waitUntil ([&] { return mock.count() == 2; }));                // job.updated and render.done
+    std::map<std::string, json> byType;
+
+    for (size_t i = 0; i < mock.count(); ++i)
+    {
+        const auto r = mock.at (i);
+        CHECK (r.path == "/events");
+        CHECK (header (r, "Host") == "hooks.test:" + std::to_string (mock.port));
+        const auto ts = header (r, "X-Rovox-Timestamp");
+        CHECK (! ts.empty());
+        CHECK (header (r, "X-Rovox-Signature") == JobCallbackDispatcher::signature (webhookSecret, ts, r.body));
+        CHECK (header (r, "X-Rovox-Event") == json::parse (r.body)["type"].get<std::string>());
+        CHECK (! contains (r.body, webhookSecret));
+        CHECK (! contains (r.body, "should-never-leave"));
+        CHECK (! contains (r.body, dir.string()));
+        byType[json::parse (r.body)["type"].get<std::string>()] = json::parse (r.body);
+    }
+
+    REQUIRE (byType.count ("job.updated") == 1);
+    REQUIRE (byType.count ("render.done") == 1);
+    const auto& updated = byType["job.updated"];
+    CHECK (updated["event_id"].get<std::uint64_t>() == id);
+    CHECK (updated["tenant"] == "wh_sig");
+    CHECK (updated["project_id"] == "p_1");
+    CHECK (updated["ts"].is_string());
+    CHECK (updated["data"]["job"]["job_id"] == "j_sig");
+    CHECK (updated["data"]["job"]["edit"] == "p_1/project.rvx/edit.xml");   // relative to the tenant root
+    CHECK (updated["data"]["job"]["elsewhere"] == "[redacted]");
+    CHECK (updated["data"]["job"]["note"] == "/volume_db");
+    CHECK (! updated["data"]["job"].contains ("api_token"));
+    CHECK (! updated["data"].contains ("event_id"));
+    CHECK (! updated["data"].contains ("tenant_id"));
+    CHECK (byType["render.done"]["event_id"].get<std::uint64_t>() == id);
+    CHECK (byType["render.done"]["data"]["state"] == "succeeded");
+    CHECK (byType["render.done"]["data"]["job_id"] == "j_sig");
+}
+
+ROVOX_TEST (delivery, webhook_filters_by_glob_on_the_event_type)
+{
+    Mock mock;
+    const auto config = writeWebhookConfig (test::makeTempDir ("whglob") / "rovox.toml", true, { { "wh_glob", mock.port, { "project.*", "media.added" } } });
+    EventHub hub;
+    EventWebhooks hooks (hub, webhookOptions (config));
+
+    CHECK (EventWebhooks::globMatch ("job.*", "job.updated"));
+    CHECK (EventWebhooks::globMatch ("*", "anything.at.all"));
+    CHECK (EventWebhooks::globMatch ("render.d?ne", "render.done"));
+    CHECK (! EventWebhooks::globMatch ("job.*", "projects.changed"));
+    CHECK (! EventWebhooks::globMatch ("render.done", "render.done.x"));
+
+    hub.publish ("wh_glob", "p_1", jobEvent ("j_glob", "render", "succeeded"));            // job.updated, render.done: not selected
+    hub.publish ("wh_glob", "p_1", { { "type", "upload.completed" } });
+    hub.publish ("wh_glob", "p_1", { { "type", "project.changed" }, { "revision", 3 } });
+    hub.publish ("wh_glob", "p_1", { { "type", "media.added" }, { "path", "media/x.wav" } });
+
+    REQUIRE (waitUntil ([&] { return mock.count() == 2; }));
+    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+    CHECK (mock.count() == 2);
+    CHECK (json::parse (mock.at (0).body)["type"] == "project.changed");
+    CHECK (json::parse (mock.at (1).body)["type"] == "media.added");
+}
+
+ROVOX_TEST (delivery, webhook_events_only_go_to_the_webhook_of_their_own_tenant)
+{
+    Mock mockA, mockB;
+    const auto config = writeWebhookConfig (test::makeTempDir ("whiso") / "rovox.toml", true,
+                                            { { "wh_iso_a", mockA.port, { "*" } }, { "wh_iso_b", mockB.port, { "*" } } });
+    EventHub hub;
+    EventWebhooks hooks (hub, webhookOptions (config));
+
+    hub.publish ("wh_iso_b", "p_b", { { "type", "project.changed" }, { "revision", 1 } });
+    hub.publish ("wh_iso_none", "p_n", { { "type", "project.changed" }, { "revision", 1 } });      // a tenant without a webhook
+    hub.publish ("wh_iso_a", "p_a", { { "type", "project.changed" }, { "revision", 2 } });
+
+    REQUIRE (waitUntil ([&] { return mockA.count() == 1 && mockB.count() == 1; }));
+    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+    CHECK (mockA.count() == 1);
+    CHECK (mockB.count() == 1);
+    CHECK (json::parse (mockA.at (0).body)["tenant"] == "wh_iso_a");
+    CHECK (json::parse (mockA.at (0).body)["project_id"] == "p_a");
+    CHECK (json::parse (mockB.at (0).body)["tenant"] == "wh_iso_b");
+    CHECK (json::parse (mockB.at (0).body)["project_id"] == "p_b");
+}
+
+ROVOX_TEST (delivery, webhook_retries_with_the_same_event_id_until_it_succeeds)
+{
+    Mock mock;
+    mock.script = { { 500, "{}" }, { 503, "{}" }, { 200, "{}" } };
+    const auto config = writeWebhookConfig (test::makeTempDir ("whretry") / "rovox.toml", true, { { "wh_retry", mock.port, { "project.changed" } } });
+    EventHub hub;
+    EventWebhooks hooks (hub, webhookOptions (config));
+    hooks.dispatcher().setDelayScale (0.001);
+
+    const auto id = hub.publish ("wh_retry", "p_1", { { "type", "project.changed" }, { "revision", 7 } });
+    REQUIRE (waitUntil ([&] { return mock.count() == 3; }));
+    std::this_thread::sleep_for (std::chrono::milliseconds (200));
+    CHECK (mock.count() == 3);                                              // delivered on the third attempt, then nothing more
+
+    for (size_t i = 0; i < 3; ++i)
+    {
+        const auto r = mock.at (i);
+        CHECK (json::parse (r.body)["event_id"].get<std::uint64_t>() == id);
+        CHECK (header (r, "X-Rovox-Signature") == JobCallbackDispatcher::signature (webhookSecret, header (r, "X-Rovox-Timestamp"), r.body));
+    }
+}
+
+ROVOX_TEST (delivery, webhook_queue_is_bounded_and_the_oldest_events_are_dropped)
+{
+    const auto config = writeWebhookConfig (test::makeTempDir ("whover") / "rovox.toml", true, { { "wh_over", 9, { "*" } } });
+    EventHub hub;
+    auto options = webhookOptions (config);
+    options.queueLimit = 3;
+    EventWebhooks hooks (hub, options);
+
+    std::atomic<bool> release { false };
+    std::mutex mutex;
+    std::vector<std::string> delivered;
+    hooks.dispatcher().setDeliverOverride ([&] (const std::string& id, const std::string&) -> Result<void>      // a receiver that hangs until released
+    {
+        while (! release)
+            std::this_thread::sleep_for (std::chrono::milliseconds (2));
+
+        std::lock_guard<std::mutex> lock (mutex);
+        delivered.push_back (id);
+        return {};
+    });
+
+    std::uint64_t last = 0;
+    const auto started = std::chrono::steady_clock::now();
+
+    for (int i = 0; i < 12; ++i)
+        last = hub.publish ("wh_over", "p_1", { { "type", "project.changed" }, { "revision", i } });
+
+    CHECK (std::chrono::steady_clock::now() - started < std::chrono::seconds (2));       // publishing never waited for the receiver
+    REQUIRE (waitUntil ([&] { return hooks.overflowCount() >= 5; }));
+    release = true;
+    REQUIRE (waitUntil ([&] { std::lock_guard<std::mutex> lock (mutex); return delivered.size() >= 3; }));
+    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+
+    std::lock_guard<std::mutex> lock (mutex);
+    CHECK (delivered.size() <= 4);                                          // the one in flight plus at most the limit
+    CHECK (std::find (delivered.begin(), delivered.end(), "wh_over:" + std::to_string (last) + ":project.changed") != delivered.end());     // the newest survived
+}
+
+ROVOX_TEST (delivery, webhook_to_a_private_address_is_refused_unless_allowed_and_config_is_reloaded)
+{
+    Mock mock;
+    const auto dir = test::makeTempDir ("whpriv");
+    const auto config = writeWebhookConfig (dir / "rovox.toml", false, { { "wh_priv", mock.port, { "project.changed" } } });
+    EventHub hub;
+    EventWebhooks hooks (hub, webhookOptions (config));                     // the resolver answers 127.0.0.1
+
+    hub.publish ("wh_priv", "p_1", { { "type", "project.changed" }, { "revision", 1 } });
+    REQUIRE (waitUntil ([&] { return hooks.refusedCount() == 1; }));
+    std::this_thread::sleep_for (std::chrono::milliseconds (200));
+    CHECK (mock.count() == 0);
+
+    writeWebhookConfig (config, true, { { "wh_priv", mock.port, { "project.changed" } } });
+    std::filesystem::last_write_time (config, std::filesystem::last_write_time (config) + std::chrono::seconds (5));
+    hub.publish ("wh_priv", "p_1", { { "type", "project.changed" }, { "revision", 2 } });
+    REQUIRE (waitUntil ([&] { return mock.count() == 1; }));
+    CHECK (json::parse (mock.at (0).body)["data"]["revision"] == 2);
+
+    // removing the webhook from the config stops delivery
+    writeWebhookConfig (config, true, {});
+    std::filesystem::last_write_time (config, std::filesystem::last_write_time (config) + std::chrono::seconds (10));
+    hub.publish ("wh_priv", "p_1", { { "type", "project.changed" }, { "revision", 3 } });
+    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+    CHECK (mock.count() == 1);
 }

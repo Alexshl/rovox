@@ -256,27 +256,55 @@ void JobCallbackDispatcher::enqueue (const JobInfo& finished, CallbackTarget tar
     auto j = finished.toJson();
     j.erase ("callback");
     j["event"] = "job.finished";
+    enqueueBody (finished.id, "job.finished", j.dump(), std::move (target));
+}
 
+void JobCallbackDispatcher::enqueueBody (const std::string& id, const std::string& event, std::string body, CallbackTarget target, const std::string& group, size_t maxPerGroup)
+{
     Task t;
-    t.jobId = finished.id;
-    t.body = j.dump();
+    t.jobId = id;
+    t.event = event;
+    t.group = group;
+    t.body = std::move (body);
     t.url = std::move (target.url);
     t.secretName = std::move (target.secretName);
     t.ip = std::move (target.resolvedIp);
     t.due = std::chrono::steady_clock::now();
+    std::vector<Task> dropped;
+    bool rejected = false;
 
     {
         std::lock_guard<std::mutex> lock (mutex_);
 
         if (! stopping_)
         {
+            if (! group.empty() && maxPerGroup > 0)
+                for (;;)
+                {
+                    const auto inGroup = (size_t) std::count_if (tasks_.begin(), tasks_.end(), [&] (const Task& x) { return x.group == group; });
+
+                    if (inGroup < maxPerGroup)
+                        break;
+
+                    auto oldest = std::find_if (tasks_.begin(), tasks_.end(), [&] (const Task& x) { return x.group == group; });
+                    dropped.push_back (std::move (*oldest));
+                    tasks_.erase (oldest);
+                }
+
             tasks_.push_back (std::move (t));
             cv_.notify_all();
-            return;
+        }
+        else
+        {
+            rejected = true;
         }
     }
 
-    onState_ (finished.id, { { "state", "callback_failed" }, { "attempts", 0 }, { "last_error", "shutdown" } });
+    for (auto& d : dropped)
+        onState_ (d.jobId, { { "state", "callback_failed" }, { "attempts", d.attempts }, { "last_error", "overflow" } });
+
+    if (rejected)
+        onState_ (id, { { "state", "callback_failed" }, { "attempts", 0 }, { "last_error", "shutdown" } });
 }
 
 Result<void> JobCallbackDispatcher::deliver (const Task& t)
@@ -304,7 +332,7 @@ Result<void> JobCallbackDispatcher::deliver (const Task& t)
     const auto timestamp = std::to_string (std::chrono::duration_cast<std::chrono::seconds> (std::chrono::system_clock::now().time_since_epoch()).count());
     httplib::Headers headers;
     headers.emplace ("X-Rovox-Timestamp", timestamp);
-    headers.emplace ("X-Rovox-Event", "job.finished");
+    headers.emplace ("X-Rovox-Event", t.event.empty() ? std::string ("job.finished") : t.event);
     headers.emplace ("X-Rovox-Signature", signature (secret, timestamp, t.body));
 
     httplib::Client client (url.origin);

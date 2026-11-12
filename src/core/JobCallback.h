@@ -72,6 +72,11 @@ public:
     /** Posts the finished job (without its `callback` field) to the target, retrying as described above. */
     void enqueue (const JobInfo& finished, CallbackTarget);
 
+    /** The general form: posts `body` (JSON text) signed like a job callback, with `event` as X-Rovox-Event. `id` is what `onState` reports.
+        With a non-empty `group` and `maxPerGroup` > 0, at most that many tasks of the group wait at once: the oldest waiting one is dropped
+        (reported as callback_failed with last_error "overflow") so that a dead receiver cannot grow memory. Never blocks. */
+    void enqueueBody (const std::string& id, const std::string& event, std::string body, CallbackTarget, const std::string& group = {}, size_t maxPerGroup = 0);
+
     void shutdown();
 
     /** Replaces the HTTP delivery (tests: makes an attempt succeed, fail or throw). Set before enqueue. */
@@ -86,7 +91,7 @@ public:
 private:
     struct Task
     {
-        std::string jobId, body, url, secretName, ip;
+        std::string jobId, event, group, body, url, secretName, ip;
         int attempts = 0;
         std::chrono::steady_clock::time_point due;
     };

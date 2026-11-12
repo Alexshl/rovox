@@ -6,6 +6,8 @@
 #include "CommandBus.h"
 #include "DrumKitLibrary.h"
 #include "EngineHost.h"
+#include "EventWebhooks.h"
+#include "FsObjectStore.h"
 #include "Gateway.h"
 #include "HttpServer.h"
 #include "Import.h"
@@ -23,6 +25,8 @@
 #include "Sha256.h"
 
 #include <httplib.h>
+
+#include <toml++/toml.h>
 
 #include <algorithm>
 #include <atomic>
@@ -445,19 +449,60 @@ std::shared_ptr<RemoteStorage> makeRemoteStorage (const StorageConfig& cfg)
     return std::make_shared<RemoteStorage> (store, StorageKeys { cfg.prefix }, store->describe(), instanceOwnerId(), cfg.leaseTtlS);
 }
 
+/** The root of `--storage fs`: ROVOX_STORAGE_FS_ROOT, else `[storage] fs_root` of the config file. Empty if neither is set. */
+std::string fsStorageRoot (const Options& o)
+{
+    if (const char* env = std::getenv ("ROVOX_STORAGE_FS_ROOT"); env != nullptr && env[0] != 0)
+        return env;
+
+    const char* envConfig = std::getenv ("ROVOX_CONFIG");
+    const std::string file = ! o.config.empty() ? o.config : (envConfig != nullptr ? std::string (envConfig) : std::string());
+
+    if (file.empty())
+        return {};
+
+    try
+    {
+        return toml::parse_file (file)["storage"]["fs_root"].value_or (std::string());
+    }
+    catch (const toml::parse_error&)
+    {
+        return {};
+    }
+}
+
 /** Storage from --storage / the S3_* environment. Local storage gives a null pointer (and no error). The bucket is listed once so that wrong
     credentials stop the server at start-up instead of showing up as a failed save later; an unreachable endpoint only warns. */
 Result<std::shared_ptr<RemoteStorage>> setupStorage (const Options& o, ProjectManager* pm)
 {
-    auto cfg = StorageConfig::fromEnvironment (o.storage);
+    std::shared_ptr<RemoteStorage> storage;
+    std::string where;
 
-    if (! cfg.ok())
-        return cfg.error();
+    if (const char* env = std::getenv ("ROVOX_STORAGE"); lower (o.storage.empty() && env != nullptr ? env : o.storage) == "fs")
+    {
+        const auto root = fsStorageRoot (o);
 
-    if (! cfg.value().s3)
-        return std::shared_ptr<RemoteStorage>();
+        if (root.empty())
+            return makeError (errc::preconditionFailed, "storage is fs but no directory is set: set ROVOX_STORAGE_FS_ROOT or [storage] fs_root in the config file");
 
-    auto storage = makeRemoteStorage (cfg.value());
+        auto store = makeFsObjectStore (root);
+        DrumKitLibrary::instance().setObjectStore (store, "rovox/");
+        storage = std::make_shared<RemoteStorage> (store, StorageKeys { "rovox/" }, store->describe(), instanceOwnerId(), 60);
+        where = "directory " + root;
+    }
+    else
+    {
+        auto cfg = StorageConfig::fromEnvironment (o.storage);
+
+        if (! cfg.ok())
+            return cfg.error();
+
+        if (! cfg.value().s3)
+            return std::shared_ptr<RemoteStorage>();
+
+        storage = makeRemoteStorage (cfg.value());
+        where = "s3 bucket " + cfg.value().store.bucket + " at " + cfg.value().store.endpoint;
+    }
 
     if (auto r = storage->refreshHeads(); ! r.ok())
     {
@@ -472,8 +517,7 @@ Result<std::shared_ptr<RemoteStorage>> setupStorage (const Options& o, ProjectMa
     if (pm != nullptr)
         pm->setStorage (storage);
 
-    std::cout << "storage: s3 bucket " << cfg.value().store.bucket << " at " << cfg.value().store.endpoint << ", prefix '" << cfg.value().prefix << "' (source of truth; "
-              << "the data directory is a working cache)" << std::endl;
+    std::cout << "storage: " << where << " (source of truth; the data directory is a working cache)" << std::endl;
     return storage;
 }
 
@@ -676,6 +720,12 @@ int runServe (const Options& o)
     registerBuiltinCommands (registry);
     MessageThreadExecutor executor;
     CommandBus bus (pm, registry, executor);
+
+    // event webhooks of [tenants.<id>.webhooks]: declared before the MCP stack, whose jobs publish events until they are shut down
+    const char* envConfig = std::getenv ("ROVOX_CONFIG");
+    EventWebhooks webhooks (hub, { .configFile = ! o.config.empty() ? fs::path (o.config) : (envConfig != nullptr ? fs::path (envConfig) : cfg.dataDir / "config" / "rovox.toml"),
+                                   .tenantRoot = [&pm] (const std::string& tenant) { return pm.projectsRoot (tenant); },
+                                   .hostRoot = cfg.dataDir });
 
     auto storage = setupStorage (o, &pm);
 
