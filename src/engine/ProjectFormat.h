@@ -95,6 +95,8 @@ Result<LoadedProject> readProject (const fs::path& dir);
 Result<void> writeAutosave (const fs::path& dir, const juce::ValueTree& editState, const Manifest&);
 std::vector<std::uint64_t> listAutosaves (const fs::path& dir);      // ascending revisions
 Result<LoadedProject> readAutosave (const fs::path& dir, std::uint64_t revision);
+/** Explicit discard: removes the autosaves newer than the saved revision so the next open shows the saved state. */
+void removeAutosavesNewerThanSaved (const fs::path& dir);
 
 /** Track count and length of an edit.xml without loading an Edit (project.catalog of a closed project, the HEAD object of the bucket). */
 struct EditSummary

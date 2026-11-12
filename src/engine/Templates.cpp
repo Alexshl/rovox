@@ -125,6 +125,9 @@ std::optional<json> loadTemplate (EngineHost& host, const std::string& tenant, c
         if (t["id"] == id)
             return t;
 
+    if (! validTemplateId (id))
+        return std::nullopt;
+
     std::ifstream in (templatesDir (host, tenant) / id / "template.json");
 
     if (! in)
@@ -313,6 +316,9 @@ void registerTemplateCommands (CommandRegistry& r)
     r.add (makeGlobalCommand ("template.get", obj ({ { "template_id", strMin (1) } }, { "template_id" }), anyObject(), false,
         [] (ProjectManager& pm, const json& params, const CommandContext& ctx) -> Result<json>
         {
+            if (! validTemplateId (params["template_id"].get<std::string>()))
+                return makeError (errc::invalidParams, "a template id is letters, digits, - and _", json { { "path", "/template_id" } });
+
             auto t = loadTemplate (pm.host(), ctx.tenant, params["template_id"].get<std::string>());
 
             if (! t)

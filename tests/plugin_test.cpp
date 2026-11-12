@@ -925,3 +925,11 @@ ROVOX_TEST (projects, delivery_hold_is_a_project_setting_with_undo)
     env.ok (id, "undo");
     CHECK (env.ok (id, "project.update", json::object())["delivery_hold"] == false);
 }
+
+ROVOX_TEST (templates, a_template_id_with_path_segments_is_refused)
+{
+    test::Env env;
+    auto r = env.run ("", "template.get", { { "template_id", "../other" } });
+    CHECK (! r.ok);
+    CHECK (r.error.has_value() && r.error->code == errc::invalidParams);
+}

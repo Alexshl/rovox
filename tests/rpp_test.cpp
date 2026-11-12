@@ -975,3 +975,31 @@ ROVOX_TEST (rpp, item_playrate_scales_speed_and_source_offset_and_preserve_pitch
 
     CHECK_NEAR ((double) crossings2 / ((38400 - 9601) / sr), 440.0, 15.0);
 }
+
+ROVOX_TEST (rpp, nesting_depth_and_file_size_are_limited)
+{
+    std::string deep = "<REAPER_PROJECT 0.1\n";
+
+    for (int i = 0; i < 100000; ++i)
+        deep += "<X\n";
+
+    CHECK (! parseRpp (deep).ok());                         // rejected at the limit, without recursing
+
+    std::string shallow = "<REAPER_PROJECT 0.1\n";
+
+    for (int i = 0; i < 20; ++i)
+        shallow += "<X\n";
+
+    for (int i = 0; i < 21; ++i)
+        shallow += ">\n";
+
+    CHECK (parseRpp (shallow).ok());
+
+    test::Env env;
+    const auto big = test::makeTempDir ("rpp-big") / "big.RPP";
+    std::ofstream (big) << "<REAPER_PROJECT 0.1\n>\n";
+    fs::resize_file (big, 65ull * 1024 * 1024);
+    const auto id = env.newProject ("big");
+    CHECK (! env.run (id, "import.rpp", { { "path", big.string() } }).ok);
+    CHECK (env.run (id, "track.list").ok);                  // the server is alive
+}

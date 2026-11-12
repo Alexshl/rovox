@@ -174,6 +174,8 @@ std::vector<MidiNoteData> parseMidiSource (const RppNode& source, double& ppq)
     return notes;
 }
 
+constexpr std::uintmax_t maxRppBytes = 64ull * 1024 * 1024;
+
 struct Importer
 {
     Project& project;
@@ -196,11 +198,25 @@ struct Importer
     {
         Resolved r;
         auto found = finder->find (fileTok);
+        std::string refused;
+
+        // every resolved path (absolute FILE, ../ , RECORD_PATH, the basename index) obeys the same path policy as a direct path parameter
+        if (found)
+            if (auto allowed = project.host().checkPath (*found); ! allowed.ok())
+            {
+                refused = allowed.error().message;
+                report.warnings.push_back ({ { "code", "MEDIA_PATH_FORBIDDEN" }, { "message", refused } });
+                found.reset();
+            }
 
         if (! found)
         {
             r.file = finder->expected (fileTok);
             report.missingMedia.push_back ({ { "path", fileTok }, { "expected", r.file.string() }, { "track_id", trackId } });
+
+            if (! refused.empty())
+                report.missingMedia.back()["reason"] = "path not allowed";
+
             return r;
         }
 
@@ -846,6 +862,11 @@ struct Importer
 
         if (! in)
             return makeError (errc::notFound, "cannot read " + rppFile.string());
+
+        std::error_code sizeEc;
+
+        if (const auto size = fs::file_size (rppFile, sizeEc); ! sizeEc && size > maxRppBytes)
+            return makeError (errc::invalidParams, "RPP file is too large (" + std::to_string (size) + " bytes, the limit is " + std::to_string (maxRppBytes) + ")");
 
         std::stringstream ss;
         ss << in.rdbuf();
