@@ -49,6 +49,14 @@ struct Fixture
         so.port = 0;
         server = std::make_unique<HttpServer> (test::host(), env.pm, env.bus, env.hub, so);
         REQUIRE (server->start().ok());
+
+        // the engine host (and so the upload directory) is shared by all tests: start each one from an empty store, the batch id is fixed
+        std::error_code ec;
+        const auto root = server->uploads().materialisedDir ("x").parent_path();
+
+        for (auto& e : fs::directory_iterator (root, ec))
+            fs::remove_all (e.path(), ec);
+
         client = std::make_unique<httplib::Client> ("127.0.0.1", server->port());
     }
 
@@ -534,7 +542,7 @@ ROVOX_TEST (upload, finish_materialises_a_batch_that_import_plan_can_read)
     for (auto& t : plan["tracks"])
         names.insert (t["clips"][0]["file"].get<std::string>());
 
-    CHECK (names == std::set<std::string> { "gtr.wav", "bass.wav", "vox.wav" });
+    CHECK ((names == std::set<std::string> { "gtr.wav", "bass.wav", "vox.wav" }));
 }
 
 ROVOX_TEST (upload, finish_is_idempotent_and_refuses_unfinished_batches)

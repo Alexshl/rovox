@@ -831,6 +831,7 @@ struct MockS3
                 return;
             }
 
+            res.set_header ("ETag", "\"etag\"");
             res.set_content (it->second, "application/octet-stream");
         });
 

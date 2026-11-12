@@ -28,7 +28,9 @@ const std::map<std::string, std::vector<Scope>>& table()
 
         add ({ "project.list", "project.catalog", "project.info", "project.get", "project.activity", "project.diff", "history.list", "track.list", "item.list", "item.source",
                "fx.list", "fx.params", "fx.presets", "marker.list", "midi.get", "routing.list", "tempo.get", "transport.get", "mixer.get_meters", "time.convert",
-               "job.get", "job.list", "events.poll", "events.subscribe", "upload.status", "delivery.list" }, { S::projectsRead });
+               "job.get", "job.list", "events.poll", "events.subscribe", "upload.status", "delivery.list", "review.wait", "review.list" }, { S::projectsRead });
+        add ({ "review.resolve" }, { S::projectsWrite });
+        add ({ "review.request" }, { S::projectsWrite, S::delivery });
 
         add ({ "project.new", "project.open", "project.close", "project.save", "project.update", "project.set_ttl", "project.delete", "project.mix",
                "track.create", "track.delete", "track.duplicate", "track.move", "track.update",

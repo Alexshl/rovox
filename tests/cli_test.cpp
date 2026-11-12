@@ -83,7 +83,10 @@ Process spawn (const std::vector<std::string>& args, const fs::path& dataDir, co
     }
 
     if (keepStdin != nullptr)
+    {
         *keepStdin = inPipe[1];             // the caller feeds more lines and closes it
+        fcntl (inPipe[1], F_SETFD, FD_CLOEXEC);     // a process spawned later must not keep this pipe open: the EOF would never reach the child
+    }
     else
         close (inPipe[1]);
 
@@ -555,7 +558,20 @@ ROVOX_TEST (cli, mcp_connect_recovers_after_the_server_restarts)
     REQUIRE (write (stdinFd, list.data(), list.size()) == (ssize_t) list.size());
     CHECK (pump (proxy, 20, [&] { return proxy.out.find ("\"id\":2") != std::string::npos; }));
     CHECK (proxy.out.find ("\"tools\"") != std::string::npos);
-    CHECK (proxy.out.find ("\"error\"") == std::string::npos);
+
+    // the schemas of the tools contain "error" as a property name: look for a JSON-RPC error object, not for the word
+    {
+        std::istringstream lines (proxy.out);
+        std::string l;
+
+        while (std::getline (lines, l))
+        {
+            auto j = json::parse (l, nullptr, false);
+
+            if (j.is_object() && j.value ("id", 0) == 2)
+                CHECK (! j.contains ("error"));
+        }
+    }
 
     close (stdinFd);
     CHECK (waitExit (proxy, 20) == 0);

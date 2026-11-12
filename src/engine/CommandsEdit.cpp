@@ -145,6 +145,9 @@ json pluginInfo (te::Plugin& p, bool withParams)
         j["units"] = extras["units"];
         j["latency_samples"] = extras["latency_samples"];
 
+        if (extras.contains ("non_automatable") && ! extras["non_automatable"].empty())
+            j["non_automatable"] = extras["non_automatable"];
+
         if (withParams)
             j["meters"] = extras["meters"];
     }

@@ -303,7 +303,7 @@ ROVOX_TEST (review, another_tenant_can_neither_read_nor_answer_nor_request)
 
     // the owner is not affected
     CHECK (f.reviews.get ("local", reviewId).value()["status"] == "pending");
-    CHECK (f.reviews.list ("local", "", "").value()["reviews"].size() == 1);
+    CHECK (f.reviews.list ("local", f.id, "").value()["reviews"].size() == 1);
 }
 
 ROVOX_TEST (review, a_project_on_hold_queues_the_delivery_and_the_review_stays_pending)

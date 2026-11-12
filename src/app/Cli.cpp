@@ -34,6 +34,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -802,6 +803,42 @@ public:
             const bool isRequest = request.is_object() && request.contains ("id") && request.contains ("method");
             const auto method = request.is_object() ? request.value ("method", "") : std::string();
 
+            // a cancel for a call that is still running may overtake that call on the way to the server (the call is POSTed from its own thread):
+            // it is repeated until the call is over, the server ignores a cancel for a request it does not know (or no longer waits for)
+            if (method == "notifications/cancelled" && request.contains ("params") && request["params"].is_object() && request["params"].contains ("requestId"))
+            {
+                const auto target = request["params"]["requestId"].dump();
+                bool running = false;
+
+                {
+                    std::lock_guard<std::mutex> lock (flightMutex);
+                    running = activeIds.count (target) != 0;
+
+                    if (running)
+                        ++inFlight;
+                }
+
+                if (running)
+                {
+                    std::thread ([this, line, target]
+                    {
+                        for (;;)
+                        {
+                            handle (line);
+                            std::unique_lock<std::mutex> lock (flightMutex);
+
+                            if (flightCv.wait_for (lock, std::chrono::milliseconds (500), [&] { return activeIds.count (target) == 0; }))
+                                break;
+                        }
+
+                        std::lock_guard<std::mutex> lock (flightMutex);
+                        --inFlight;
+                        flightCv.notify_all();
+                    }).detach();
+                    continue;
+                }
+            }
+
             // notifications, initialize and ping are quick and keep their order; calls go to a worker each
             if (! isRequest || method == "initialize" || method == "ping")
             {
@@ -809,16 +846,20 @@ public:
                 continue;
             }
 
+            const auto idKey = request["id"].dump();
+
             {
                 std::unique_lock<std::mutex> lock (flightMutex);
                 flightCv.wait (lock, [&] { return inFlight < maxInFlight; });
                 ++inFlight;
+                activeIds.insert (idKey);
             }
 
-            std::thread ([this, line]
+            std::thread ([this, line, idKey]
             {
                 handle (line);
                 std::lock_guard<std::mutex> lock (flightMutex);
+                activeIds.erase (idKey);
                 --inFlight;
                 flightCv.notify_all();
             }).detach();
@@ -1204,6 +1245,7 @@ private:
     std::mutex outMutex, stateMutex, reinitMutex, flightMutex, listenMutex;
     std::condition_variable flightCv, listenCv;
     int inFlight = 0;
+    std::set<std::string> activeIds;                // JSON of the ids of the calls being served
     std::string sessionId, initializeLine;
     std::atomic<bool> stopListener { false };
     std::thread listener;
