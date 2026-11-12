@@ -33,64 +33,121 @@ export function entrySuffices(e: PeakEntry, it: ItemState, visT0: number, visT1:
   return density >= pixelsPerSecond * 0.7;
 }
 
+/** Entries kept (least recently used go first) and the pauses after consecutive failures of one item. */
+export const PEAK_CACHE_LIMIT = 500;
+export const PEAK_BACKOFF_MS = [5_000, 30_000, 300_000];
+const MAX_PARALLEL = 6;
+
+interface Job {
+  sig: string;
+  run: () => Promise<void>;
+}
+
 export class PeakCache {
-  private entries = new Map<string, PeakEntry>();
-  private pending = new Set<string>();
-  private queue: (() => void)[] = [];
+  private entries = new Map<string, PeakEntry>(); // insertion order = recency
+  private inflight = new Map<string, string>(); // key -> window signature being fetched
+  private queued = new Map<string, Job>(); // at most one waiting request per item: a newer window replaces it
+  private failures = new Map<string, { count: number; until: number }>();
   private active = 0;
 
   constructor(
     private readonly onReady: () => void,
     private readonly fetchImpl: typeof fetch = (...a) => fetch(...a),
+    private readonly now: () => number = () => Date.now(),
   ) {}
 
   /** The best entry available now (maybe stale) and, if it is not good enough, a fetch is started. */
   get(projectId: string, it: ItemState, visT0: number, visT1: number, pixelsPerSecond: number): PeakEntry | undefined {
-    const e = this.entries.get(it.item_id);
+    const key = cacheKey(projectId, it.item_id);
+    const e = this.entries.get(key);
     const usable = e && e.geom === geomKey(it) ? e : undefined;
-    if (usable && entrySuffices(usable, it, visT0, visT1, pixelsPerSecond)) return usable;
-    this.request(projectId, it, visT0, visT1, pixelsPerSecond);
+    if (usable) {
+      this.entries.delete(key); // touch
+      this.entries.set(key, usable);
+      if (entrySuffices(usable, it, visT0, visT1, pixelsPerSecond)) return usable;
+    }
+    this.request(projectId, key, it, visT0, visT1, pixelsPerSecond);
     return usable;
   }
 
-  private request(projectId: string, it: ItemState, visT0: number, visT1: number, pps: number): void {
+  private request(projectId: string, key: string, it: ItemState, visT0: number, visT1: number, pps: number): void {
+    const fail = this.failures.get(key);
+    if (fail && this.now() < fail.until) return;
     const w = peakWindow(it, visT0, visT1, pps);
-    const key = `${it.item_id}|${geomKey(it)}|${w.t0.toFixed(2)}|${w.bins}`;
-    if (this.pending.has(key) || w.t1 <= w.t0) return;
-    this.pending.add(key);
+    if (w.t1 <= w.t0) return;
     const geom = geomKey(it);
+    const sig = `${geom}|${w.t0.toFixed(2)}|${w.bins}`;
+    if (this.inflight.get(key) === sig || this.queued.get(key)?.sig === sig) return;
     const run = async () => {
-      this.active++;
+      let ok = false;
       try {
         const url = `/api/projects/${encodeURIComponent(projectId)}/peaks/${encodeURIComponent(it.item_id)}?bins=${w.bins}&t0=${w.t0}&t1=${w.t1}`;
         const res = await this.fetchImpl(url, { credentials: 'same-origin' });
         if (res.ok) {
           const t0 = Number(res.headers.get('X-Rovox-T0') ?? w.t0);
           const t1 = Number(res.headers.get('X-Rovox-T1') ?? w.t1);
-          this.entries.set(it.item_id, { geom, t0, t1, bins: w.bins, data: new Int8Array(await res.arrayBuffer()) });
-          this.onReady();
+          this.store(key, { geom, t0, t1, bins: w.bins, data: new Int8Array(await res.arrayBuffer()) });
+          ok = true;
         }
       } catch {
-        /* the next draw asks again */
-      } finally {
-        this.active--;
-        this.pending.delete(key);
-        this.next();
+        /* counted as a failure below */
       }
+      if (ok) {
+        this.failures.delete(key);
+        this.onReady();
+      } else this.fail(key);
     };
-    this.queue.push(run);
+    this.queued.set(key, { sig, run });
     this.next();
   }
 
-  private next(): void {
-    while (this.active < 6 && this.queue.length) this.queue.shift()!();
+  private store(key: string, e: PeakEntry): void {
+    this.entries.delete(key);
+    this.entries.set(key, e);
+    while (this.entries.size > PEAK_CACHE_LIMIT) this.entries.delete(this.entries.keys().next().value!);
   }
 
-  forget(itemId: string): void {
-    this.entries.delete(itemId);
+  private fail(key: string): void {
+    const count = (this.failures.get(key)?.count ?? 0) + 1;
+    this.failures.delete(key);
+    this.failures.set(key, { count, until: this.now() + PEAK_BACKOFF_MS[Math.min(count, PEAK_BACKOFF_MS.length) - 1]! });
+    while (this.failures.size > PEAK_CACHE_LIMIT) this.failures.delete(this.failures.keys().next().value!);
+  }
+
+  private next(): void {
+    for (const [key, job] of this.queued) {
+      if (this.active >= MAX_PARALLEL) return;
+      if (this.inflight.has(key)) continue; // one request per item at a time
+      this.queued.delete(key);
+      this.inflight.set(key, job.sig);
+      this.active++;
+      void job.run().finally(() => {
+        this.active--;
+        this.inflight.delete(key);
+        this.next();
+      });
+    }
+  }
+
+  forget(projectId: string, itemId: string): void {
+    const key = cacheKey(projectId, itemId);
+    this.entries.delete(key);
+    this.failures.delete(key);
+    this.queued.delete(key);
   }
 
   clear(): void {
     this.entries.clear();
+    this.failures.clear();
+    this.queued.clear();
   }
+
+  /** Test hook. */
+  stats(): { entries: number; queued: number; inflight: number } {
+    return { entries: this.entries.size, queued: this.queued.size, inflight: this.inflight.size };
+  }
+}
+
+function cacheKey(projectId: string, itemId: string): string {
+  return `${projectId}\u0000${itemId}`;
 }

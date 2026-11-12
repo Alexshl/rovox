@@ -8,6 +8,40 @@
 export const STREAM_RATE = 48000;
 export const DEFAULT_TARGET_MS = 150;
 
+/** Largest deviation of the playback rate from 1 the drift controller may ask for (0.5 %, about 8 cents of pitch). */
+export const MAX_RATE_DEVIATION = 0.005;
+
+/**
+ * Keeps the buffer fill near the target against the clock drift between the server (48 kHz) and the sound card: a slow
+ * proportional controller on the smoothed fill returns the playback rate to resample with (1 = untouched). Pure: it only sees
+ * the fill and the number of frames output since the last call. A fill above the target speeds playback up, below slows it
+ * down; the gain makes a drift of d need only d / gain of offset (200 ppm -> 2 ms), the time constant is 1 / gain (10 s).
+ */
+export class DriftController {
+  private smooth: number | null = null;
+
+  constructor(
+    public targetFrames: number,
+    private readonly gain = 0.1, // rate deviation per second of fill error
+    private readonly smoothingS = 1, // time constant of the fill low-pass (chunks arrive in 20 ms steps)
+    private readonly maxDeviation = MAX_RATE_DEVIATION,
+    private readonly rate = STREAM_RATE,
+  ) {}
+
+  /** `buffered` frames now, `frames` output since the last call. Returns the rate for the next block. */
+  update(buffered: number, frames: number): number {
+    const dt = frames / this.rate;
+    if (this.smooth === null) this.smooth = buffered;
+    else this.smooth += (buffered - this.smooth) * Math.min(1, dt / this.smoothingS);
+    const errS = (this.smooth - this.targetFrames) / this.rate;
+    return 1 + Math.max(-this.maxDeviation, Math.min(this.maxDeviation, this.gain * errS));
+  }
+
+  reset(): void {
+    this.smooth = null;
+  }
+}
+
 export interface JitterStats {
   buffered: number;
   underruns: number;
@@ -23,6 +57,11 @@ export class JitterRing {
   private readIdx = 0;
   private chunks: { start: number; pos: number }[] = [];
   private _playing = false;
+  private frac = 0; // fractional read offset (frames after readIdx) while resampling
+  private readonly drift: DriftController;
+  /** Adaptive resampling against clock drift; off by default so plain playback stays bit-exact. */
+  adaptive = false;
+  rate = 1;
   underruns = 0;
   overflows = 0;
   pushed = 0;
@@ -33,6 +72,7 @@ export class JitterRing {
   ) {
     this.l = new Float32Array(capacity);
     this.r = new Float32Array(capacity);
+    this.drift = new DriftController(targetFrames);
   }
 
   get buffered(): number {
@@ -72,19 +112,39 @@ export class JitterRing {
       outR.fill(0);
       return false;
     }
-    const have = Math.min(n, this.buffered);
-    for (let i = 0; i < have; i++) {
-      const k = (this.readIdx + i) % this.capacity;
-      outL[i] = this.l[k]!;
-      outR[i] = this.r[k]!;
+    if (this.adaptive) {
+      this.drift.targetFrames = this.targetFrames;
+      this.rate = this.drift.update(this.buffered, n);
+    } else this.rate = 1;
+    // linear interpolation between neighbours; at rate 1 the fractional part stays 0 and the samples are copied as they are
+    let p = this.frac;
+    let have = 0;
+    for (; have < n; have++) {
+      const i0 = Math.floor(p);
+      const f = p - i0;
+      if (i0 >= this.buffered || (f > 0 && i0 + 1 >= this.buffered)) break;
+      const k = (this.readIdx + i0) % this.capacity;
+      if (f === 0) {
+        outL[have] = this.l[k]!;
+        outR[have] = this.r[k]!;
+      } else {
+        const k1 = (k + 1) % this.capacity;
+        outL[have] = this.l[k]! * (1 - f) + this.l[k1]! * f;
+        outR[have] = this.r[k]! * (1 - f) + this.r[k1]! * f;
+      }
+      p += this.rate;
     }
     for (let i = have; i < n; i++) {
       outL[i] = 0;
       outR[i] = 0;
     }
-    this.readIdx += have;
+    const whole = Math.min(Math.floor(p), this.buffered);
+    this.readIdx += whole;
+    this.frac = whole === Math.floor(p) ? p - whole : 0;
     this.dropOldChunks();
     if (have < n) {
+      this.frac = 0;
+      this.drift.reset();
       this.underruns++;
       this._playing = false; // buffer up to the target again
       return true;
@@ -105,6 +165,8 @@ export class JitterRing {
     this.readIdx = 0;
     this.chunks = [];
     this._playing = false;
+    this.frac = 0;
+    this.drift.reset();
   }
 
   stats(): JitterStats {

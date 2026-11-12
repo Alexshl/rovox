@@ -51,12 +51,23 @@ export class BrowserAudio {
   private lastSeq = -1;
   private report: { t: number; pos: number | null; playing: boolean } | null = null;
   private listeners = new Set<() => void>();
+  private statListeners = new Set<() => void>();
 
   constructor(private readonly setServerAudio: (on: boolean) => void) {}
 
   onChange(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  /** Worklet statistics (about 30 per second); `onChange` is only for enable / disable / errors. */
+  onStats(fn: () => void): () => void {
+    this.statListeners.add(fn);
+    return () => this.statListeners.delete(fn);
+  }
+
+  private emitStats(): void {
+    for (const l of this.statListeners) l();
   }
 
   private emit(): void {
@@ -188,6 +199,6 @@ export class BrowserAudio {
     this.stats.outputLatencyMs = ((this.ctx?.outputLatency ?? this.ctx?.baseLatency ?? 0) as number) * 1000;
     this.stats.state = !this.stats.enabled ? 'off' : m.newUnderrun === true ? 'underrun' : playing ? 'playing' : 'buffering';
     this.report = { t: m.t as number, pos: m.pos as number | null, playing };
-    this.emit();
+    this.emitStats();
   }
 }

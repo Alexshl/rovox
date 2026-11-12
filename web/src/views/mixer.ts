@@ -5,7 +5,6 @@
 // meters (green to -12 dBFS, amber to -3, red above; fed by the 0x02 frames at 30 Hz). Changes go through track.update with a
 // coalesce key, so a drag is one undo step.
 import { clear, h, token } from '../lib/dom';
-import { alpha } from '../lib/color';
 import { SILENCE_DB, clamp, dbToFader, faderToDb, formatDb, formatPan, meterPosition } from '../lib/units';
 import type { PluginState, TrackState } from '../net/protocol';
 import type { MasterState } from '../net/protocol';
@@ -15,6 +14,42 @@ import type { ProjectStore } from '../store/project';
 const DRUMS_CREDIT = 'Drum samples: DRSKit by the DrumGizmo team and Jes Eiler (DRSDrums), CC BY 4.0';
 
 const SCALE_DB = [12, 6, 0, -6, -12, -20, -30, -40, -60];
+
+interface MixerTokens {
+  green: string;
+  amber: string;
+  red: string;
+  hairline: string;
+  muted: string;
+  ink: string;
+  panel700: string;
+  panel900: string;
+  cyan: string;
+}
+
+let tokenCache: { theme: string | undefined; tokens: MixerTokens } | undefined;
+
+/** Design tokens for painting; read from the computed style only when the theme changed. */
+function mixerTokens(): MixerTokens {
+  const theme = document.documentElement.dataset.theme;
+  if (!tokenCache || tokenCache.theme !== theme) {
+    tokenCache = {
+      theme,
+      tokens: {
+        green: token('signal-green'),
+        amber: token('amber'),
+        red: token('red'),
+        hairline: token('hairline'),
+        muted: token('ink-muted'),
+        ink: token('ink'),
+        panel700: token('panel-700'),
+        panel900: token('panel-900'),
+        cyan: token('agent-cyan'),
+      },
+    };
+  }
+  return tokenCache.tokens;
+}
 
 class Strip {
   readonly el: HTMLElement;
@@ -28,7 +63,12 @@ class Strip {
   private readonly mute = h('button', { class: 'sbtn mute', text: 'M', attrs: { 'aria-label': 'Mute' } });
   private readonly solo = h('button', { class: 'sbtn solo', text: 'S', attrs: { 'aria-label': 'Solo' } });
   private dragging = false;
+  private dragDb = 0; // the value under the pointer while dragging; external updates do not move the fader
   private lastSent = 0;
+  private fxSignature = '';
+  private paintSignature = '';
+  private panPending: number | null = null;
+  private panRaf = 0;
 
   constructor(
     private readonly app: App,
@@ -50,9 +90,16 @@ class Strip {
     this.pan.addEventListener('input', () => {
       const v = Number(this.pan.value) / 100;
       this.store.patchTrack(this.id, { pan: v });
-      this.send({ pan: v }, `pan:${this.id}`);
+      this.panPending = v;
+      if (!this.panRaf)
+        this.panRaf = requestAnimationFrame(() => {
+          this.panRaf = 0;
+          this.flushPan();
+        });
     });
+    this.pan.addEventListener('change', () => this.flushPan());
     this.pan.addEventListener('dblclick', () => {
+      this.panPending = null;
       this.store.patchTrack(this.id, { pan: 0 });
       this.send({ pan: 0 });
     });
@@ -63,6 +110,15 @@ class Strip {
       this.store.patchTrack(this.id, { volume_db: 0 });
       this.send({ volume_db: 0 });
     });
+  }
+
+  /** One pan command per animation frame; `change` sends the final exact value. */
+  private flushPan(): void {
+    if (this.panRaf) cancelAnimationFrame(this.panRaf);
+    this.panRaf = 0;
+    const v = this.panPending;
+    this.panPending = null;
+    if (v !== null) this.send({ pan: v }, `pan:${this.id}`);
   }
 
   private send(patch: Record<string, unknown>, coalesceKey?: string): void {
@@ -84,6 +140,7 @@ class Strip {
     const trackTop = 8;
     const trackBottom = () => rect().height - 8;
     const startDb = this.current().volume_db ?? 0;
+    this.dragDb = startDb;
     const startY = e.clientY;
     const fine = e.shiftKey || e.ctrlKey;
     const posOf = (y: number) => clamp(1 - (y - rect().top - trackTop) / (trackBottom() - trackTop), 0, 1);
@@ -92,6 +149,7 @@ class Strip {
       if (fine) db = clamp(startDb - (ev.clientY - startY) * 0.1, SILENCE_DB, 12);
       else db = faderToDb(posOf(ev.clientY));
       db = Math.round(db * 10) / 10;
+      this.dragDb = db;
       this.store.patchTrack(this.id, { volume_db: db });
       const now = performance.now();
       if (now - this.lastSent >= 33) {
@@ -108,10 +166,12 @@ class Strip {
       this.dragging = false;
       this.canvas.removeEventListener('pointermove', move);
       this.canvas.removeEventListener('pointerup', up);
+      this.canvas.removeEventListener('pointercancel', up);
       this.send({ volume_db: db }, `vol:${this.id}`);
     };
     this.canvas.addEventListener('pointermove', move);
     this.canvas.addEventListener('pointerup', up);
+    this.canvas.addEventListener('pointercancel', up);
   }
 
   private current(): { name: string; color?: string; volume_db?: number; pan?: number; mute?: boolean; solo?: boolean } {
@@ -134,9 +194,12 @@ class Strip {
     this.solo.classList.toggle('on', !!t?.solo);
     if (document.activeElement !== this.pan) this.pan.value = String(Math.round((c.pan ?? 0) * 100));
     this.panRead.textContent = formatPan(c.pan);
-    this.dbRead.textContent = formatDb(c.volume_db ?? 0, true);
+    this.dbRead.textContent = formatDb(this.dragging ? this.dragDb : (c.volume_db ?? 0), true);
 
     const list: PluginState[] = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
+    const fxSig = list.map((p) => `${p.name}\u0001${p.type}\u0001${p.enabled ? 1 : 0}`).join('\u0002');
+    if (fxSig === this.fxSignature) return;
+    this.fxSignature = fxSig;
     clear(this.fxList);
     if (!list.length) this.fxList.append(h('div', { class: 'none', text: this.id === 'master' ? 'no master FX' : 'no FX' }));
     for (const p of list.slice(0, 4)) {
@@ -147,7 +210,7 @@ class Strip {
     if (list.length > 4) this.fxList.append(h('div', { class: 'none', text: `+${list.length - 4} ще` }));
   }
 
-  paint(now: number): void {
+  paint(): void {
     const dpr = window.devicePixelRatio || 1;
     const w = this.canvas.clientWidth;
     const hh = this.canvas.clientHeight;
@@ -156,6 +219,13 @@ class Strip {
       this.canvas.width = Math.round(w * dpr);
       this.canvas.height = Math.round(hh * dpr);
     }
+    const tk = mixerTokens();
+    const vol = this.dragging ? this.dragDb : (this.current().volume_db ?? 0);
+    const marked = this.store.trackMark(this.id) !== undefined;
+    const m = this.store.meters.get(this.id);
+    const sig = `${w}|${hh}|${dpr}|${document.documentElement.dataset.theme ?? ''}|${vol}|${marked}|${m ? `${m.l}|${m.r}|${m.holdL}|${m.holdR}` : ''}`;
+    if (sig === this.paintSignature) return;
+    this.paintSignature = sig;
     const ctx = this.canvas.getContext('2d')!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, hh);
@@ -163,14 +233,7 @@ class Strip {
     const top = 8;
     const bottom = hh - 8;
     const trackH = bottom - top;
-    const green = token('signal-green');
-    const amber = token('amber');
-    const red = token('red');
-    const hairline = token('hairline');
-    const muted = token('ink-muted');
-    const ink = token('ink');
-    const panel700 = token('panel-700');
-    const cyan = token('agent-cyan');
+    const { green, amber, red, hairline, muted, ink, panel700, cyan } = tk;
 
     // dB scale (left), fader slot (middle), meters (right)
     ctx.font = '9px "IBM Plex Mono", ui-monospace, monospace';
@@ -189,20 +252,15 @@ class Strip {
     ctx.fillStyle = panel700;
     ctx.fillRect(slotX + 2, top, 3, trackH);
 
-    const vol = this.current().volume_db ?? 0;
     const fy = bottom - dbToFader(vol) * trackH;
-    const marked = this.store.trackMark(this.id) !== undefined;
     ctx.fillStyle = marked ? cyan : ink;
     ctx.fillRect(slotX - 4, fy - 5, 15, 10); // fader cap, hardware-square
-    ctx.fillStyle = token('panel-900');
+    ctx.fillStyle = tk.panel900;
     ctx.fillRect(slotX - 4, fy - 0.5, 15, 1);
 
     // meters: two bars
     const mx = slotX + 18;
     const barW = Math.max(6, Math.floor((w - mx - 2) / 2) - 2);
-    const m = this.store.meters.get(this.id);
-    const decay = m ? Math.min(1, (now - m.holdAt) / 1500) : 1;
-    void decay;
     for (let c = 0; c < 2; c++) {
       const x = mx + c * (barW + 3);
       ctx.fillStyle = panel700;
@@ -231,8 +289,6 @@ class Strip {
         ctx.fillRect(x, Math.round(hy), barW, 2);
       }
     }
-    ctx.fillStyle = alpha(muted, 0.0);
-    void this.dragging;
   }
 }
 
@@ -285,8 +341,7 @@ export class MixerView {
 
   private loop = () => {
     if (this.app.prefs.mixerOpen && this.store?.loaded) {
-      const now = performance.now();
-      for (const strip of this.rows.values()) strip.paint(now);
+      for (const strip of this.rows.values()) strip.paint();
     }
     this.raf = requestAnimationFrame(this.loop);
   };
