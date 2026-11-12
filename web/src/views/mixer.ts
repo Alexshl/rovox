@@ -11,6 +11,7 @@ import type { PluginState, TrackState } from '../net/protocol';
 import type { MasterState } from '../net/protocol';
 import type { App } from '../store/session';
 import type { ProjectStore } from '../store/project';
+import { PHONE_QUERY, mediaMatches, watchMedia } from './sheet';
 
 const DRUMS_CREDIT = 'Drum samples: DRSKit by the DrumGizmo team and Jes Eiler (DRSDrums), CC BY 4.0';
 
@@ -327,6 +328,9 @@ export class MixerView {
   private signature = '';
   private store: ProjectStore | undefined;
   private raf = 0;
+  /** The phone layout: the mixer is a bottom sheet with a drag handle (null on a wider screen, where the markup is unchanged). */
+  private handle: HTMLButtonElement | null = null;
+  private expanded = false;
 
   constructor(private readonly app: App) {
     this.el = h(
@@ -336,7 +340,112 @@ export class MixerView {
       this.strips,
     );
     this.relabel();
+    this.setPhone(mediaMatches(PHONE_QUERY));
+    watchMedia(PHONE_QUERY, (on) => this.setPhone(on));
     this.loop();
+  }
+
+  //==========================================================================
+  // phone: bottom sheet (60dvh), a handle that toggles it and drag-resizes it
+  private setPhone(on: boolean): void {
+    this.el.classList.toggle('sheet', on);
+    this.expanded = false;
+    this.el.style.height = '';
+    if (!on) {
+      this.handle?.remove();
+      this.handle = null;
+      this.el.classList.remove('peek');
+      this.publishHeight();
+      return;
+    }
+    if (!this.handle) {
+      const handle = h('button', { class: 'sheet-handle', attrs: { 'aria-expanded': 'false' } }, h('span', { class: 'grip' }), h('span', { class: 'cap' }));
+      this.handle = handle;
+      this.el.prepend(handle);
+      this.wireHandle(handle);
+    }
+    this.labelHandle();
+    this.collapse();
+  }
+
+  private labelHandle(): void {
+    if (!this.handle) return;
+    const label = t('narrow.mixerHandle');
+    this.handle.setAttribute('aria-label', label);
+    const cap = this.handle.querySelector('.cap');
+    if (cap) cap.textContent = label;
+  }
+
+  private collapse(): void {
+    this.expanded = false;
+    this.el.style.height = '';
+    this.el.classList.add('peek');
+    this.handle?.setAttribute('aria-expanded', 'false');
+    this.publishHeight();
+  }
+
+  private expand(px?: number): void {
+    this.expanded = true;
+    this.el.classList.remove('peek');
+    this.el.style.height = px === undefined ? '' : `${px}px`;
+    this.handle?.setAttribute('aria-expanded', 'true');
+    this.publishHeight();
+  }
+
+  /** The room the sheet takes at the bottom, for the page to leave free (--rx-sheet-h on the root: padding of .main, bottom of the agent bar). */
+  private publishHeight(): void {
+    const root = document.documentElement.style;
+    if (!this.el.classList.contains('sheet')) {
+      root.removeProperty('--rx-sheet-h');
+      return;
+    }
+    const inset = 'env(safe-area-inset-bottom, 0px)';
+    let v = this.el.classList.contains('peek') ? `calc(32px + ${inset})` : this.el.style.height || '60dvh';
+    if (this.el.classList.contains('closed')) v = inset;
+    root.setProperty('--rx-sheet-h', v);
+  }
+
+  private wireHandle(handle: HTMLButtonElement): void {
+    let startY = 0;
+    let startH = 0;
+    let moved = false;
+    let dragging = false;
+    handle.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      moved = false;
+      startY = e.clientY;
+      startH = this.el.getBoundingClientRect().height;
+      handle.setPointerCapture?.(e.pointerId);
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const dy = startY - e.clientY;
+      if (!moved && Math.abs(dy) < 4) return;
+      moved = true;
+      this.expand(clamp(startH + dy, 32, window.innerHeight * 0.85));
+    });
+    const end = () => {
+      if (!dragging) return;
+      dragging = false;
+      if (moved && this.el.getBoundingClientRect().height < 96) this.collapse();
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+    handle.addEventListener('click', () => {
+      if (moved) {
+        moved = false; // the click that ends a drag is not a toggle
+        return;
+      }
+      if (this.expanded) this.collapse();
+      else this.expand();
+    });
+    handle.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') this.expand();
+      else if (e.key === 'ArrowDown') this.collapse();
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
   }
 
   /** The labels of the section itself; the strips get theirs when they are rebuilt (their signature is reset here). */
@@ -345,6 +454,7 @@ export class MixerView {
     this.title.textContent = t('mixer.head');
     this.peakLabel.textContent = t('mixer.peak');
     this.signature = '';
+    this.labelHandle();
     this.sync();
   }
 
@@ -352,6 +462,7 @@ export class MixerView {
     const s = this.app.active;
     this.store = s;
     this.el.classList.toggle('closed', !this.app.prefs.mixerOpen);
+    if (this.el.classList.contains('sheet')) this.publishHeight();
     if (!s || !s.loaded) {
       clear(this.strips);
       this.rows.clear();
@@ -377,7 +488,7 @@ export class MixerView {
   }
 
   private loop = () => {
-    if (this.app.prefs.mixerOpen && this.store?.loaded) {
+    if (this.app.prefs.mixerOpen && this.store?.loaded && !this.el.classList.contains('peek')) {
       for (const strip of this.rows.values()) strip.paint();
     }
     this.raf = requestAnimationFrame(this.loop);

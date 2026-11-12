@@ -13,6 +13,7 @@ import { MixerView } from './mixer';
 import { textDialog } from './dialog';
 import { openProjectDialog } from './projects';
 import { openRenderDialog } from './render';
+import { NARROW_QUERY, PHONE_QUERY, type Sheet, isNarrow, isPhone, openSheet, watchMedia } from './sheet';
 
 const ICONS = {
   start: '<svg viewBox="0 0 16 16"><rect x="2" y="3" width="2" height="10"/><path d="M14 3v10L5.5 8z"/></svg>',
@@ -50,6 +51,20 @@ interface MenuEntry {
   action?: () => void;
   disabled?: boolean;
   separator?: boolean;
+}
+
+/** One menu entry as DOM (separator, group heading or item); `onPick` runs when an item is chosen, before its action. */
+function menuEntryEl(e: MenuEntry, onPick: () => void): HTMLElement {
+  if (e.separator) return h('div', { class: 'sep', attrs: { role: 'separator' } });
+  if (e.heading) return h('div', { class: 'heading', text: e.label, attrs: { role: 'presentation' } });
+  const radio = e.checked !== undefined;
+  const item = h('button', { class: 'item', attrs: { role: radio ? 'menuitemradio' : 'menuitem', ...(radio ? { 'aria-checked': String(e.checked) } : {}) } }, h('span', { text: e.label }), h('span', { class: 'key', text: radio ? (e.checked ? '✓' : '') : (e.key ?? '') }));
+  item.disabled = !!e.disabled;
+  item.addEventListener('click', () => {
+    onPick();
+    e.action?.();
+  });
+  return item;
 }
 
 /** Object-storage sync state of a project for its tab: cloud ok / uploading / error. Nothing for local storage. */
@@ -102,6 +117,21 @@ export class Shell {
   private activityTitle = h('div', { class: 'activity-title label' });
   private connEl = h('span', { class: 'conn' });
   private openMenu: HTMLElement | null = null;
+  // narrow layout: the layout the DOM was built for (changes on a breakpoint), and the parts that exist only there
+  private narrow = isNarrow();
+  private phone = isPhone();
+  private readonly menuModels: { title: string; entries: () => MenuEntry[] }[] = [];
+  private readonly menuBtn = h('button', { class: 'menu-btn', text: '☰', attrs: { 'aria-haspopup': 'dialog', 'aria-expanded': 'false' } });
+  private readonly agentsLabel = h('span', { class: 'agents-label' });
+  private readonly agentsBtn = h('button', { class: 'agents-btn', attrs: { 'aria-haspopup': 'dialog', 'aria-expanded': 'false' } }, this.agentsLabel, h('i', { class: 'adot' }));
+  private readonly moreBtn = h('button', { class: 'tbtn more-btn', text: '⋯', attrs: { 'aria-haspopup': 'dialog', 'aria-expanded': 'false' } });
+  private readonly agentBarText = h('span', { class: 'text' });
+  private readonly agentBarUndo = h('button', { class: 'btn' });
+  private readonly agentBarAccept = h('button', { class: 'btn primary' });
+  private readonly agentBar = h('div', { class: 'agent-bar', attrs: { role: 'status' } }, this.agentBarText, this.agentBarUndo, this.agentBarAccept);
+  private menuSheet: Sheet | null = null;
+  private morePop: { el: HTMLElement; close: (refocus?: boolean) => void } | null = null;
+  private drawerScrim: HTMLElement | null = null;
   private readonly menuOpeners = new Map<HTMLElement, (focus: 'first' | 'last' | null) => void>();
   private tabFocusId: string | undefined;
   private logSignature = '';
@@ -121,6 +151,13 @@ export class Shell {
     this.el = h('div', { id: 'app' }, this.menubar, this.tabs, this.transport, this.banner, h('div', { class: 'workspace' }, main, this.mcp), this.toasts);
 
     onLocaleChange(() => this.relabel());
+    this.menuBtn.addEventListener('click', () => this.openMenuSheet());
+    this.agentsBtn.addEventListener('click', () => (this.mcp.classList.contains('open') ? this.closeDrawer(true) : this.openDrawer()));
+    this.moreBtn.addEventListener('click', () => this.toggleMore());
+    this.agentBarUndo.addEventListener('click', () => void app.undoAgent());
+    this.agentBarAccept.addEventListener('click', () => void app.acceptAgent());
+    watchMedia(NARROW_QUERY, () => this.onMode());
+    watchMedia(PHONE_QUERY, () => this.onMode());
     app.changed.on(() => this.schedule());
     app.audio.onChange(() => this.schedule());
     // the worklet reports ~30 times a second: that touches only the audio button, never the whole shell
@@ -144,11 +181,117 @@ export class Shell {
     this.snapBtn.setAttribute('aria-label', t('a11y.snap'));
     this.gridSel.setAttribute('aria-label', t('a11y.grid'));
     this.acceptBtn.textContent = t('mcp.accept');
+    this.agentsLabel.textContent = t('narrow.agents');
+    this.menuBtn.setAttribute('aria-label', t('narrow.menu'));
+    this.menuBtn.title = t('narrow.menu');
+    this.moreBtn.setAttribute('aria-label', t('narrow.more'));
+    this.moreBtn.title = t('narrow.moreTitle');
+    this.agentBarUndo.textContent = t('narrow.agentUndo');
+    this.agentBarAccept.textContent = t('narrow.agentAccept');
+  }
+
+  /** A breakpoint was crossed: the menubar, transport and MCP header are rebuilt for the new layout; open sheets, popovers and the drawer close. */
+  private onMode(): void {
+    const narrow = isNarrow();
+    const phone = isPhone();
+    if (narrow === this.narrow && phone === this.phone) return;
+    this.narrow = narrow;
+    this.phone = phone;
+    this.closeMenus();
+    this.menuSheet?.close();
+    this.closeMore();
+    this.closeDrawer(false);
+    this.menuOpeners.clear();
+    clear(this.menubar);
+    this.buildMenubar();
+    this.buildTransport();
+    this.buildMcpPanel();
+    this.tabsSignature = '';
+    this.render();
+  }
+
+  //==========================================================================
+  // the MCP panel as a right drawer below 960 px
+  private openDrawer(): void {
+    if (!this.narrow || this.mcp.classList.contains('open')) return;
+    this.drawerScrim = h('div', { class: 'drawer-scrim', on: { pointerdown: () => this.closeDrawer(true) } });
+    this.mcp.before(this.drawerScrim);
+    this.mcp.classList.add('open');
+    this.mcp.setAttribute('role', 'dialog');
+    this.mcp.tabIndex = -1;
+    this.agentsBtn.setAttribute('aria-expanded', 'true');
+    const first = this.mcp.querySelector<HTMLElement>('.drawer-close, [tabindex="0"], button:not(:disabled)');
+    (first ?? this.mcp).focus();
+  }
+
+  /** Closes the drawer; `refocus` returns the focus to the agents button. */
+  private closeDrawer(refocus: boolean): void {
+    this.drawerScrim?.remove();
+    this.drawerScrim = null;
+    const wasOpen = this.mcp.classList.contains('open');
+    this.mcp.classList.remove('open');
+    this.mcp.removeAttribute('role');
+    this.mcp.removeAttribute('tabindex');
+    this.agentsBtn.setAttribute('aria-expanded', 'false');
+    if (wasOpen && refocus) this.agentsBtn.focus();
+  }
+
+  //==========================================================================
+  // phone: the popover of the transport's more button (Render, grid, snap)
+  private closeMore(refocus = false): void {
+    this.morePop?.close(refocus);
+  }
+
+  private toggleMore(): void {
+    if (this.morePop) {
+      this.closeMore(true);
+      return;
+    }
+    const render = h('button', { class: 'tbtn wide', text: t('transport.render') });
+    const pop = h(
+      'div',
+      { class: 'popover more-pop', attrs: { role: 'dialog', 'aria-label': t('narrow.moreTitle') } },
+      h('div', { class: 'row' }, render),
+      h('div', { class: 'row' }, h('span', { class: 'label', text: t('transport.grid') }), this.gridSel),
+      h('div', { class: 'row' }, h('span', { class: 'label', text: t('transport.snap') }), this.snapBtn),
+    );
+    const r = this.moreBtn.getBoundingClientRect();
+    pop.style.top = `${r.bottom + 4}px`;
+    pop.style.left = `${Math.max(8, r.right - 260)}px`;
+    document.body.append(pop);
+    this.moreBtn.setAttribute('aria-expanded', 'true');
+    const onDown = (ev: Event) => {
+      if (!pop.contains(ev.target as Node) && ev.target !== this.moreBtn) close(false);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Escape') return;
+      ev.stopPropagation();
+      close(true);
+    };
+    const timer = setTimeout(() => document.addEventListener('pointerdown', onDown, true), 0);
+    document.addEventListener('keydown', onKey, true);
+    const close = (refocus = false) => {
+      clearTimeout(timer);
+      document.removeEventListener('pointerdown', onDown, true);
+      document.removeEventListener('keydown', onKey, true);
+      pop.remove();
+      this.morePop = null;
+      this.moreBtn.setAttribute('aria-expanded', 'false');
+      if (refocus) this.moreBtn.focus();
+    };
+    render.addEventListener('click', () => {
+      close(false);
+      openRenderDialog(this.app);
+    });
+    this.morePop = { el: pop, close };
+    render.focus();
   }
 
   /** After a language switch: rebuilds every static label of the shell and its views, then renders. */
   relabel(): void {
     this.closeMenus();
+    this.menuSheet?.close();
+    this.closeMore();
     this.applyLabels();
     clear(this.menubar);
     this.menuOpeners.clear();
@@ -165,6 +308,7 @@ export class Shell {
   //==========================================================================
   private buildMenubar(): void {
     const app = this.app;
+    this.menuModels.length = 0;
     const menu = (title: string, entries: () => MenuEntry[]) => {
       const dropdown = h('div', { class: 'dropdown', attrs: { role: 'menu', 'aria-label': title } });
       const trigger = h('button', { text: title, attrs: { 'aria-haspopup': 'menu', 'aria-expanded': 'false' } });
@@ -172,20 +316,7 @@ export class Shell {
       const open = (focus: 'first' | 'last' | null) => {
         this.closeMenus();
         clear(dropdown);
-        for (const e of entries()) {
-          if (e.separator) dropdown.append(h('div', { class: 'sep', attrs: { role: 'separator' } }));
-          else if (e.heading) dropdown.append(h('div', { class: 'heading', text: e.label, attrs: { role: 'presentation' } }));
-          else {
-            const radio = e.checked !== undefined;
-            const item = h('button', { class: 'item', attrs: { role: radio ? 'menuitemradio' : 'menuitem', ...(radio ? { 'aria-checked': String(e.checked) } : {}) } }, h('span', { text: e.label }), h('span', { class: 'key', text: radio ? (e.checked ? '✓' : '') : (e.key ?? '') }));
-            item.disabled = !!e.disabled;
-            item.addEventListener('click', () => {
-              this.closeMenus(true);
-              e.action?.();
-            });
-            dropdown.append(item);
-          }
-        }
+        for (const e of entries()) dropdown.append(menuEntryEl(e, () => this.closeMenus(true)));
         root.classList.add('open');
         trigger.setAttribute('aria-expanded', 'true');
         this.openMenu = root;
@@ -193,6 +324,7 @@ export class Shell {
         (focus === 'first' ? items[0] : focus === 'last' ? items[items.length - 1] : undefined)?.focus();
       };
       this.menuOpeners.set(root, open);
+      this.menuModels.push({ title, entries });
       trigger.addEventListener('click', (e) => {
         if (root.classList.contains('open')) this.closeMenus();
         else open(e.detail === 0 ? 'first' : null); // Enter / Space on the button (no pointer): focus goes into the menu
@@ -279,6 +411,51 @@ export class Shell {
       h('span', { class: 'spacer' }),
       this.status,
     );
+    this.adaptMenubar();
+  }
+
+  /** Below 960 px the menubar gains the agents button; on a phone the menus move into the sheet of the menu button and the status text goes. */
+  private adaptMenubar(): void {
+    if (this.phone) {
+      for (const m of [...this.menubar.children]) if (m.classList.contains('menu')) m.remove();
+      this.status.remove();
+      this.menubar.querySelector('.logo')?.after(this.menuBtn);
+    }
+    if (this.narrow) this.menubar.append(this.agentsBtn);
+  }
+
+  /** The menu sheet: the menus of the menubar as sections (same entries, same markup); arrows / Home / End move between the items. */
+  private openMenuSheet(): void {
+    this.closeMenus();
+    this.closeMore();
+    if (this.menuSheet) {
+      this.menuSheet.close();
+      return;
+    }
+    const root = h('div', { class: 'menu open menu-sheet' });
+    let sheet: Sheet | null = null;
+    for (const m of this.menuModels) {
+      const dropdown = h('div', { class: 'dropdown', attrs: { role: 'menu', 'aria-label': m.title } }, h('div', { class: 'heading', text: m.title, attrs: { role: 'presentation' } }));
+      for (const e of m.entries()) dropdown.append(menuEntryEl(e, () => sheet?.close()));
+      root.append(dropdown);
+    }
+    root.addEventListener('keydown', (e) => {
+      const items = this.menuItems(root);
+      const at = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (e.key === 'ArrowDown') items[(at + 1) % items.length]?.focus();
+      else if (e.key === 'ArrowUp') items[(at <= 0 ? items.length : at) - 1]?.focus();
+      else if (e.key === 'Home') items[0]?.focus();
+      else if (e.key === 'End') items[items.length - 1]?.focus();
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    this.menuBtn.setAttribute('aria-expanded', 'true');
+    sheet = openSheet(t('narrow.menu'), root, () => {
+      this.menuSheet = null;
+      this.menuBtn.setAttribute('aria-expanded', 'false');
+    });
+    this.menuSheet = sheet;
   }
 
   /** Closes the open menu; `refocus` returns focus to its button (Escape, after an item was chosen). */
@@ -321,6 +498,10 @@ export class Shell {
       this.audioBtn.addEventListener('click', () => void app.enableAudio());
     }
     clear(this.transport);
+    if (this.phone) {
+      this.buildTransportPhone(mk);
+      return;
+    }
     this.transport.append(
       mk('start', ICONS.start, t('transport.start'), '', () => void app.toStart()),
       mk('stop', ICONS.stop, t('transport.stop'), '', () => void this.stop()),
@@ -341,6 +522,22 @@ export class Shell {
       this.snapBtn,
     );
     this.btn['rec']!.disabled = true;
+  }
+
+  /** Two rows: transport buttons and the clock, then tempo, the sound button and the more button (Render, grid and snap sit in its popover). */
+  private buildTransportPhone(mk: (key: string, svg: string, label: string, cls: string, fn: () => void) => HTMLButtonElement): void {
+    const app = this.app;
+    const start = mk('start', ICONS.start, t('transport.start'), '', () => void app.toStart());
+    const stop = mk('stop', ICONS.stop, t('transport.stop'), '', () => void this.stop());
+    const play = mk('play', ICONS.play, t('transport.play'), 'play', () => void this.play());
+    mk('pause', ICONS.pause, t('transport.pause'), '', () => void this.stop());
+    const rec = mk('rec', ICONS.rec, t('transport.rec'), 'rec', () => undefined);
+    const loop = mk('loop', ICONS.loop, t('transport.loop'), 'loop', () => app.toggleLoop());
+    rec.disabled = true;
+    this.transport.append(
+      h('div', { class: 'trow' }, start, play, stop, loop, h('div', { class: 'clock' }, this.clockBig, this.clockSmall)),
+      h('div', { class: 'trow' }, h('span', { class: 'readout muted', text: t('transport.bpm') }), this.bpmEl, this.sigEl, h('span', { class: 'spacer' }), this.audioBtn, this.moreBtn),
+    );
   }
 
   /** The --audio none preview player: one element at most, so repeated Play never stacks previews. */
@@ -416,7 +613,13 @@ export class Shell {
     }
     clear(this.mcp);
     this.mcp.append(
-      h('div', { class: 'mcp-head' }, h('span', { class: 'label', text: t('mcp.head') }), this.connEl),
+      h(
+        'div',
+        { class: 'mcp-head' },
+        h('span', { class: 'label', text: t('mcp.head') }),
+        this.connEl,
+        this.narrow ? h('button', { class: 'drawer-close', text: '×', title: t('narrow.agentsClose'), attrs: { 'aria-label': t('narrow.agentsClose') }, on: { click: () => this.closeDrawer(true) } }) : null,
+      ),
       this.agentsBox,
       this.activityTitle,
       this.logBox,
@@ -427,7 +630,12 @@ export class Shell {
   //==========================================================================
   private onKey(e: KeyboardEvent): void {
     const target = e.target as HTMLElement;
-    if (target.closest('input, textarea, select') || document.querySelector('.scrim')) return;
+    if (e.key === 'Escape' && this.mcp.classList.contains('open') && !document.querySelector('.scrim, .sheet-scrim')) {
+      e.preventDefault();
+      this.closeDrawer(true);
+      return;
+    }
+    if (target.closest('input, textarea, select') || document.querySelector('.scrim, .sheet-scrim')) return;
     // a menu button or item takes its own keys; only the Ctrl/Cmd shortcuts stay global there
     if (!(e.ctrlKey || e.metaKey) && target.closest('.menubar')) return;
     // Space / Enter activate a focused button (tab mute, FX panel) or move a slider: not the global play shortcut then
@@ -583,6 +791,17 @@ export class Shell {
     this.tabs.append(h('button', { class: 'add', text: '+', title: t('tabs.new'), attrs: { 'aria-label': t('tabs.new'), 'data-tab-focus': 'add' }, on: { click: () => void this.promptNewProject() } }));
     // the tabs are rebuilt on every change: keep the keyboard focus on the same control
     if (focusKey) this.tabs.querySelector<HTMLElement>(`[data-tab-focus="${focusKey}"]`)?.focus();
+    if (this.phone) this.revealActiveTab();
+  }
+
+  /** On a phone the tabs scroll sideways: the active one is kept in view. */
+  private revealActiveTab(): void {
+    const active = this.tabs.querySelector<HTMLElement>('.tabitem.active');
+    if (!active) return;
+    const a = active.getBoundingClientRect();
+    const box = this.tabs.getBoundingClientRect();
+    if (a.left < box.left) this.tabs.scrollLeft += a.left - box.left - 8;
+    else if (a.right > box.right) this.tabs.scrollLeft += a.right - box.right + 8;
   }
 
   private async promptNewProject(): Promise<void> {
@@ -655,6 +874,11 @@ export class Shell {
       this.agentsBox.append(h('div', { class: `agent-row${active ? ' active' : ''}` }, h('i'), h('b', { text: a.label }), h('span', { text: [...a.projects].join(' · '), title: [...a.projects].join(', ') })));
     }
 
+    const anyActive = live.some((a) => Date.now() - a.at < 20000);
+    this.agentsBtn.classList.toggle('active', anyActive);
+    this.agentsBtn.title = anyActive ? t('narrow.agentsActive') : t('narrow.agents');
+    this.agentsBtn.setAttribute('aria-label', anyActive ? t('narrow.agentsActive') : t('narrow.agents'));
+
     this.activityTitle.textContent = p ? t('mcp.activity', { name: p.name }) : t('mcp.activityEmpty');
     const sig = p ? `${p.id}|${p.log.length}|${p.log[0]?.revision ?? 0}|${p.log[0]?.at ?? 0}` : '';
     if (sig !== this.logSignature) {
@@ -685,6 +909,26 @@ export class Shell {
     this.undoAgentBtn.title = u.count > 0 ? t('mcp.undoHint') : u.blockedByPerson ? t('mcp.undoBlocked') : t('mcp.undoNone');
     this.acceptBtn.disabled = !p || p.marks.size === 0;
     this.acceptBtn.title = t('mcp.acceptHint');
+    this.renderAgentBar(p, u.count);
+  }
+
+  /** Phone: a bar above the sheets while the agent has changes the person has not accepted: «Агент змінив N доріжок · Скасувати / Прийняти». */
+  private renderAgentBar(p: ReturnType<App['projects']['get']>, undoable: number): void {
+    const root = document.documentElement.style;
+    if (!this.phone || !p || p.marks.size === 0) {
+      if (this.agentBar.isConnected) this.agentBar.remove();
+      root.removeProperty('--rx-bar-h');
+      return;
+    }
+    const tracks = new Set<string>();
+    for (const tr of p.tracks) if (p.trackMark(tr.track_id)) tracks.add(tr.track_id);
+    for (const it of p.items.values()) if (p.marks.has(it.item_id)) tracks.add(it.track_id);
+    setText(this.agentBarText, plural(Math.max(1, tracks.size), 'narrow.agentChanged'));
+    this.agentBarUndo.disabled = undoable === 0;
+    this.agentBarUndo.title = undoable > 0 ? t('mcp.undoHint') : t('mcp.undoNone');
+    this.agentBarAccept.title = t('mcp.acceptHint');
+    if (!this.agentBar.isConnected) this.el.append(this.agentBar);
+    root.setProperty('--rx-bar-h', '48px');
   }
 
   private renderToasts(): void {

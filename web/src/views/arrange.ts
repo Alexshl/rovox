@@ -16,9 +16,11 @@ import { textDialog } from './dialog';
 import { FxPluginSection } from './fxpanel';
 import { PeakCache } from './peaks';
 import { projectPicker } from './projects';
+import { NARROW_QUERY, PHONE_QUERY, mediaMatches, openSheet, watchMedia } from './sheet';
 
 export const TRACK_H = 64;
-export const TCP_W = 248;
+/** The track control column when the page gives no --rx-tcp-w (the desktop width); the live value is read from the .arrange element. */
+const TCP_W_DEFAULT = 248;
 const ITEM_TOP = 3;
 const ITEM_H = 58;
 const STRIP_H = 14;
@@ -63,7 +65,7 @@ type Drag =
   | { kind: 'ruler-seek' }
   | { kind: 'ruler-loop'; from: number }
   | { kind: 'marker'; id: string; startX: number; orig: number; moved: boolean }
-  | { kind: 'pan'; lastX: number };
+  | { kind: 'pan'; lastX: number; lastY: number; moved: boolean; onTap: () => void };
 
 export class ArrangeView {
   readonly el: HTMLElement;
@@ -99,6 +101,8 @@ export class ArrangeView {
   private frameStart = performance.now();
   private lastStoppedPlayhead = Number.NaN;
   fps = 0;
+  /** Width of the track control column in px: the --rx-tcp-w of .arrange (248 / 176 / 112 by breakpoint), read again on resize and on a breakpoint change. */
+  private tcpW = TCP_W_DEFAULT;
 
   constructor(private readonly app: App) {
     this.peaks = new PeakCache(() => this.draw());
@@ -124,7 +128,12 @@ export class ArrangeView {
       if (this.store) this.store.view.scrollY = this.scroller.scrollTop;
       this.draw();
     });
-    new ResizeObserver(() => this.draw()).observe(this.el);
+    new ResizeObserver(() => {
+      this.readTcpW();
+      this.draw();
+    }).observe(this.el);
+    watchMedia(NARROW_QUERY, () => this.readTcpW());
+    watchMedia(PHONE_QUERY, () => this.readTcpW());
     this.lanesCanvas.addEventListener('pointerdown', (e) => this.onLanesDown(e));
     this.lanesCanvas.addEventListener('pointermove', (e) => this.onLanesMove(e));
     this.lanesCanvas.addEventListener('pointerup', (e) => this.onUp(e));
@@ -164,6 +173,7 @@ export class ArrangeView {
   //==========================================================================
   /** Called when the app state changed (tabs, theme, store updates). */
   sync(): void {
+    this.readTcpW();
     const s = this.app.active;
 
     if (s !== this.store) {
@@ -254,6 +264,35 @@ export class ArrangeView {
       laneAlt: mix(t('panel-800'), t('panel-900'), 0.4),
       shade: alpha(t('panel-900'), 0.55),
     };
+  }
+
+  //==========================================================================
+  // track control column
+  /** Reads --rx-tcp-w from the computed style of .arrange (the inline value, then 248, where styles are not computed); a change redraws. */
+  private readTcpW(): number {
+    let w = Number.NaN;
+    try {
+      w = Number.parseFloat(getComputedStyle(this.el).getPropertyValue('--rx-tcp-w'));
+    } catch {
+      // no computed style: fall through to the inline value
+    }
+    if (!(w > 0)) w = Number.parseFloat(this.el.style.getPropertyValue('--rx-tcp-w'));
+    if (!(w > 0)) w = TCP_W_DEFAULT;
+    if (w !== this.tcpW) {
+      this.tcpW = w;
+      this.draw();
+    }
+    return this.tcpW;
+  }
+
+  /** The live width of the track control column (px). */
+  get tcpWidth(): number {
+    return this.readTcpW();
+  }
+
+  /** Which column of the arrange view a client x falls in: the track controls (left of --rx-tcp-w) or the lanes. */
+  regionAt(clientX: number): 'tcp' | 'lanes' {
+    return clientX - this.el.getBoundingClientRect().left < this.readTcpW() ? 'tcp' : 'lanes';
   }
 
   //==========================================================================
@@ -806,9 +845,14 @@ export class ArrangeView {
     if (row) s.selectedTrack = row.track.track_id;
 
     if (!hit) {
-      if (!e.shiftKey) s.selection.clear();
-      this.app.seek(this.snappedTime(x, e));
-      s.state.emit();
+      const tap = () => {
+        if (!e.shiftKey) s.selection.clear();
+        this.app.seek(this.snappedTime(x, e));
+        s.state.emit();
+      };
+      // a finger on empty lane scrolls (sideways: time, up and down: tracks); a tap without movement is the click above
+      if (e.pointerType === 'touch') this.drag = { kind: 'pan', lastX: x, lastY: y, moved: false, onTap: tap };
+      else tap();
       return;
     }
 
@@ -857,6 +901,10 @@ export class ArrangeView {
       return;
     }
 
+    if (d.kind === 'pan') {
+      this.panBy(d, x, y);
+      return;
+    }
     if (d.kind !== 'item') return;
     if (!d.moved && Math.abs(x - d.startX) < 3 && Math.abs(y - d.startY) < 3) return;
     d.moved = true;
@@ -892,6 +940,19 @@ export class ArrangeView {
     this.draw();
   }
 
+  /** One step of a one-finger pan: sideways moves the view window in time, up and down scroll the tracks. */
+  private panBy(d: Extract<Drag, { kind: 'pan' }>, x: number, y: number): void {
+    const dx = x - d.lastX;
+    const dy = y - d.lastY;
+    if (!d.moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+    d.moved = true;
+    d.lastX = x;
+    d.lastY = y;
+    this.hideTip();
+    if (dx) this.scrollBy(-dx);
+    if (dy) this.scroller.scrollTop -= dy;
+  }
+
   /** The browser took the pointer away (touch scroll, window blur): finish the gesture with what it has. */
   private onCancel(e: PointerEvent): void {
     if (this.drag?.kind === 'ruler-loop') {
@@ -916,7 +977,9 @@ export class ArrangeView {
     if (d?.kind === 'ruler-seek') this.flushSeek();
     if (!s || !d) return;
 
-    if (d.kind === 'item') {
+    if (d.kind === 'pan') {
+      if (!d.moved && e.type === 'pointerup') d.onTap();
+    } else if (d.kind === 'item') {
       if (d.moved && d.delta) void this.commitItemDrag(d, s);
       this.draw();
     } else if (d.kind === 'marker') {
@@ -1066,6 +1129,11 @@ export class ArrangeView {
       this.drag = { kind: 'ruler-loop', from: this.snappedTime(x, e) };
       return;
     }
+    // a finger on the ruler pans the view window; a tap without movement seeks
+    if (e.pointerType === 'touch') {
+      this.drag = { kind: 'pan', lastX: x, lastY: y, moved: false, onTap: () => this.app.seek(this.snappedTime(x, e)) };
+      return;
+    }
     this.drag = { kind: 'ruler-seek' };
     this.app.seek(this.snappedTime(x, e));
   }
@@ -1073,7 +1141,9 @@ export class ArrangeView {
   private onRulerMove(e: PointerEvent): void {
     const d = this.drag;
     const { x } = this.local(e, this.rulerCanvas);
-    if (d?.kind === 'ruler-seek') {
+    if (d?.kind === 'pan') {
+      this.panBy(d, x, d.lastY); // the ruler pans sideways only
+    } else if (d?.kind === 'ruler-seek') {
       this.seekPending = this.snappedTime(x, e);
       if (!this.seekRaf)
         this.seekRaf = requestAnimationFrame(() => {
@@ -1230,6 +1300,10 @@ class TcpRow {
       this.store.state.emit();
     });
     this.nameEl.addEventListener('dblclick', () => this.rename());
+    // on a phone the FX button is hidden: a tap on the name opens the track's effects as a bottom sheet
+    this.nameEl.addEventListener('click', () => {
+      if (mediaMatches(PHONE_QUERY)) this.showFx();
+    });
     this.mute.addEventListener('click', () => this.toggle('mute'));
     this.solo.addEventListener('click', () => this.toggle('solo'));
     this.fx.addEventListener('click', () => this.showFx());
@@ -1352,6 +1426,16 @@ class TcpRow {
     const list = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
     const sections: FxPluginSection[] = list.map((p) => new FxPluginSection(this.app, p, (self) => sections.forEach((o) => o !== self && o.collapse())));
     const rows = sections.map((x) => x.el);
+    if (mediaMatches(PHONE_QUERY)) {
+      const trackName = this.store.track(this.id)?.name ?? '';
+      const body = h('div', { class: 'popover in-sheet' }, h('div', { class: 'head label', text: t('tracks.fxHead', { name: trackName }) }), ...(rows.length ? rows : [h('div', { class: 'row', text: t('tracks.noPlugins') })]));
+      const sheet = openSheet(t('narrow.trackFx', { name: trackName }), body, () => {
+        if (this.popoverCleanup === close) this.popoverCleanup = null;
+      });
+      const close = () => sheet.close();
+      this.popoverCleanup = close;
+      return;
+    }
     const r = this.fx.getBoundingClientRect();
     const pop = h(
       'div',

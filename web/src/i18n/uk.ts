@@ -4,6 +4,8 @@
 // The source catalog: Ukrainian. Its keys are the typed MessageKey set; every other language is a Record<MessageKey, string>.
 // Placeholders are {name}; a plural group `x` is the four keys `x.one|few|many|other` (picked by Intl.PluralRules).
 // FX, MIDI, BPM, dB, dBFS, LUFS, Hz and the M / S button letters stay as they are (glossary: docs/research/ui-spec-2026-11.md, B).
+import { ukNarrow } from './parts/uk.narrow';
+
 export const uk = {
   // ---- menus -------------------------------------------------------------
   'menu.file': 'Файл',
@@ -269,6 +271,7 @@ export const uk = {
   'errors.MCP_ERROR': 'Сервер повернув помилку MCP. Спробуйте ще раз.',
   'errors.BAD_RESPONSE': 'Сервер відповів у незрозумілому форматі. Оновіть сторінку.',
   'errors.UNKNOWN': 'Не вдалося виконати дію. Спробуйте ще раз.',
+  ...ukNarrow,
 } as const;
 
 export type MessageKey = keyof typeof uk;
