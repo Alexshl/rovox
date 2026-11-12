@@ -66,7 +66,7 @@ json scanPlugins (EngineHost& host, const std::vector<std::string>& formats, con
 
         const auto searchPath = defaultSearchPath (name, extraPath);
         const auto before = known.getNumTypes();
-        juce::PluginDirectoryScanner scanner (known, *format, juce::FileSearchPath (toJuce (searchPath)), true,
+        juce::PluginDirectoryScanner scanner (known, *format, toSearchPath (searchPath), true,
                                               toFile (host.dataDir() / "cache" / ("scan-deadman-" + name + ".txt")), false);
         juce::String scanned;
 

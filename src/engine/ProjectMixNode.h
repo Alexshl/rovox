@@ -7,6 +7,8 @@
 
 #include "Project.h"
 
+#include <tracktion_graph/tracktion_graph.h>
+
 namespace rovox
 {
 

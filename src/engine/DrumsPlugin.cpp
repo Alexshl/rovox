@@ -74,7 +74,7 @@ std::string kitFingerprint (const fs::path& dir, const std::string& kitText, std
             cache[key] = fileHash;
         }
 
-        const auto line = "\n" + rel + "|" + std::to_string (ec ? 0 : size) + "|" + fileHash;
+        const auto line = "\n" + rel + "|" + std::to_string (sizeEc ? 0 : size) + "|" + fileHash;
         h.update (line.data(), line.size());
     }
 

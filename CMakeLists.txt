@@ -65,6 +65,8 @@ find_package(CLI11 REQUIRED)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(HTTPLIB REQUIRED IMPORTED_TARGET cpp-httplib)
+# cpp-httplib's header calls OpenSSL directly (HTTPS client/server); its .pc lists openssl only as Requires.private, so link it explicitly
+find_package(OpenSSL REQUIRED)
 pkg_check_modules(EBUR128 REQUIRED IMPORTED_TARGET libebur128)
 pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 pkg_check_modules(TOMLPP REQUIRED IMPORTED_TARGET tomlplusplus)

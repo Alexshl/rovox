@@ -421,7 +421,7 @@ json PluginCatalog::rescan (bool force)
         }
 
         const auto before = known.getNumTypes();
-        juce::PluginDirectoryScanner scanner (known, *format, juce::FileSearchPath (toJuce (searchPathFor (name))), true,
+        juce::PluginDirectoryScanner scanner (known, *format, toSearchPath (searchPathFor (name)), true,
                                               toFile (host_.dataDir() / "cache" / ("scan-deadman-" + name + ".txt")), false);
         juce::String scanned;
 

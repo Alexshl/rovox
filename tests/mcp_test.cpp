@@ -12,6 +12,7 @@
 #include "Loudness.h"
 #include "McpHttp.h"
 #include "McpStdio.h"
+#include "PluginCatalog.h"
 #include "RenderJobs.h"
 #include "TestFramework.h"
 #include "TestSupport.h"

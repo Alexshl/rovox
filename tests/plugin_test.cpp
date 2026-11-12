@@ -954,7 +954,7 @@ ROVOX_TEST (fx, lv2_parameters_come_with_a_display_text)
 {
     test::Env env;
     scanOnce (env);
-    const char* const queries[] = { "LSP Compressor", "LSP Parametric", "Calf Reverb", "Calf Compressor", "Calf Filter", "x42-eq", "x42-dpl", "ZynAddSubFX", "ZynReverb", "AVLDrums" };
+    const char* const queries[] = { "LSP Compressor", "LSP Parametric", "Calf Reverb", "Calf Compressor", "Calf Filter", "x42-eq", "x42-dpl", "ZynAddSubFX", "ZynReverb", "Calf Flanger" };
     const auto id = env.newProject ("param-text");
     const auto track = env.ok (id, "track.create", { { "name", "FX" } })["track_id"].get<std::string>();
     int checked = 0;
