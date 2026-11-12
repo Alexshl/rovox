@@ -97,6 +97,16 @@ describe('t and plural', () => {
     expect(plural(2, 'picker.tracks')).toBe('2 tracks');
   });
 
+  it('picks the Russian plural form (one / few / many)', () => {
+    setLocale('ru');
+    const f = (n: number) => plural(n, 'picker.tracks');
+    expect(f(1)).toBe('1 дорожка');
+    expect(f(2)).toBe('2 дорожки');
+    expect(f(5)).toBe('5 дорожек');
+    expect(f(11)).toBe('11 дорожек');
+    expect(f(21)).toBe('21 дорожка');
+  });
+
   it('formats numbers and sizes with the active language', () => {
     expect(fmtNumber(-14, { minimumFractionDigits: 1, maximumFractionDigits: 1 })).toMatch(/^[-−]14,0$/);
     expect(fmtBytes(4.8 * 1024 ** 3)).toBe('4,8 ГБ');
