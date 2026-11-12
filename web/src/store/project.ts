@@ -148,6 +148,8 @@ export class ProjectStore {
     this.acceptedRevision = msg.accepted_revision;
     this.pruneMarks();
     this.applyProjectGet(msg.state);
+    // marks above the revision the server now reports belong to work it lost (a restart): drop them
+    for (const [id, m] of this.marks) if (m.revision > this.revision) this.marks.delete(id);
     this.transportChanged.emit();
   }
 

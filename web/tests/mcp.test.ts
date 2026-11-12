@@ -43,4 +43,24 @@ describe('MCP client of the render dialog', () => {
     expect(out.ok).toBe(false);
     expect(out.error!.code).toBe('PREFLIGHT_FAILED');
   });
+
+  it('caps the re-initialize retries when the server keeps answering 404', async () => {
+    let inits = 0;
+    let toolCalls = 0;
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (body.method === 'initialize') {
+        inits++;
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: {} }), { headers: { 'Mcp-Session-Id': `s${inits}` } });
+      }
+      if (body.method === 'notifications/initialized') return new Response('', { status: 202 });
+      toolCalls++;
+      return new Response('', { status: 404 });
+    }) as unknown as typeof fetch;
+    const out = await new McpClient('/mcp', fetchImpl).call('job.get', {});
+    expect(out.ok).toBe(false);
+    expect(out.error!.code).toBe('MCP_SESSION');
+    expect(toolCalls).toBe(3); // the first try and two retries
+    expect(inits).toBe(3); // each retry opens a fresh session, then it gives up
+  });
 });

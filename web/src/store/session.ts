@@ -66,6 +66,7 @@ function readRemembered(): string[] {
 
 export class App {
   readonly changed = new Emitter(); // tabs, connection, prefs, toasts
+  readonly welcomed = new Emitter(); // the server said `welcome` (first connect or reconnect)
   readonly projects = new Map<string, ProjectStore>();
   order: string[] = [];
   activeId: string | undefined;
@@ -451,7 +452,8 @@ export class App {
   private onStatus(s: SocketStatus): void {
     this.status = s;
     if (s === 'closed') {
-      for (const p of this.projects.values()) p.loaded = p.loaded; // keep the last state on screen, banner says "offline"
+      // keep the last state on screen, banner says "offline"; the server may restart, so the old pidx must not match anything
+      for (const p of this.projects.values()) p.pidx = -1;
     }
     this.changed.emit();
   }
@@ -470,6 +472,7 @@ export class App {
           this.socket.send({ t: 'audio', on: true });
         }
         void this.listProjects().then(() => this.restoreRemembered());
+        this.welcomed.emit();
         this.changed.emit();
         break;
       case 'snapshot': {
