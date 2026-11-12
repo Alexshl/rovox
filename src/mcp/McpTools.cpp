@@ -8,6 +8,7 @@
 
 #include "JsonSchema.h"
 #include "McpExtras.h"
+#include "Review.h"
 #include "Sha1.h"
 
 #include <algorithm>
@@ -873,6 +874,160 @@ void McpServer::buildTools()
                 return ToolOutput::failure (r.error(), std::nullopt, c.args["project_id"]);
 
             return ToolOutput::success (r.value(), std::nullopt, c.args["project_id"]);
+        };
+        add (std::move (t));
+    }
+
+    // ---- review: clip -> confirmation (E7-03) --------------------------------------------------------------------
+    auto reviewOf = [] (ToolCall& c)
+    {
+        return Review (c.server.projects(), c.server.jobs(), c.server.delivery(),
+                       [&c] (const std::string& projectId, const std::string& command, const json& params)
+                       {
+                           return c.server.runCommand (command, params, c.server.contextFor (c.session, projectId), c.rc.cancelled.get());
+                       });
+    };
+
+    {
+        ToolDef t;
+        t.name = "review.request";
+        t.title = "Ask for confirmation";
+        t.description = "Renders a short clip of a range (render.preview) or reuses preview_job_id, delivers it with deliver_to (an adapter from delivery.list_adapters; the project's delivery_hold is respected: "
+                        "delivery.status is then held) with message as the caption and records a pending review. The person answers in the web panel or in chat and you pass the answer on with review.resolve; "
+                        "review.wait long-polls for it. checkpoint=true remembers the last accepted revision: a rejection then undoes the agent's steps after it (only suggested if a person edited in between). "
+                        "A pending review expires after ttl_s (default 24 h). approved accepts the agent's changes, changes_requested carries the person's comment.";
+        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "range", rangeSchema() },
+                                  { "scope", schema ({ { "kind", { { "type", "string" }, { "enum", { "master", "tracks" } } } }, { "track_ids", strings() } }) },
+                                  { "format", { { "type", "string" }, { "enum", { "mp3", "wav", "flac" } }, { "description", "default mp3 (128 kbps)" } } },
+                                  { "preview_job_id", str ("A succeeded render.preview job of this project to deliver instead of rendering a new clip") },
+                                  { "deliver_to", str ("Delivery adapter id, e.g. telegram.me") }, { "message", str ("Caption: what changed") },
+                                  { "checkpoint", boolean ("Remember the last accepted revision so that a rejection can roll the agent's changes back") },
+                                  { "force", boolean ("Deliver although the project is on hold") },
+                                  { "ttl_s", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 604800 } } },
+                                  { "client_request_id", str() }, { "wait_s", { { "type", "number" }, { "minimum", 0 }, { "maximum", 60 }, { "description", "How long to wait for the preview (default 30)" } } } },
+                                { "project_id", "deliver_to" });
+        t.annotations = { { "readOnlyHint", false }, { "destructiveHint", false }, { "openWorldHint", true } };
+        t.mayBlock = true;
+        t.defaultWaitS = 30;
+        t.handler = [waitForJob, jobWait, jobContext, reviewOf] (ToolCall& c) -> ToolOutput
+        {
+            const std::string projectId = c.args["project_id"];
+            json source;
+
+            if (c.args.contains ("preview_job_id"))
+            {
+                source = { { "job_id", c.args["preview_job_id"] } };
+            }
+            else
+            {
+                json preview { { "project_id", projectId } };
+
+                for (auto* key : { "range", "format" })
+                    if (c.args.contains (key))
+                        preview[key] = c.args[key];
+
+                if (c.args.contains ("scope") && c.args["scope"].value ("kind", "master") == "tracks" && c.args["scope"].contains ("track_ids"))
+                    preview["track_ids"] = c.args["scope"]["track_ids"];
+
+                auto started = c.server.jobService().startPreview (jobContext (c, projectId), preview);
+
+                if (! started.ok())
+                    return ToolOutput::failure (started.error(), std::nullopt, projectId);
+
+                auto out = waitForJob (c, started.value().jobId, started.value().created, jobWait (c.args, 30, 60), projectId, true);
+
+                if (! out.ok)
+                    return out;
+
+                if (out.data.value ("state", "") != "succeeded")
+                    return ToolOutput::success ({ { "status", "preview_running" }, { "preview_job_id", started.value().jobId },
+                                                  { "note", "the clip is not ready yet: call review.request again with preview_job_id" } }, std::nullopt, projectId);
+
+                source = { { "job_id", started.value().jobId } };
+            }
+
+            Review::RequestArgs a;
+            a.tenant = c.session.tenant;
+            a.projectId = projectId;
+            a.adapter = c.args.value ("deliver_to", "");
+            a.message = c.args.value ("message", "");
+            a.clientRequestId = c.args.value ("client_request_id", "");
+            a.checkpoint = c.args.value ("checkpoint", false);
+            a.force = c.args.value ("force", false);
+            a.ttlS = c.args.value ("ttl_s", 24 * 3600);
+            a.deliveryWaitMs = 30000;
+            a.abort = c.rc.cancelled.get();
+            a.source = source;
+            a.origin = c.session.origin().toJson();
+            auto r = reviewOf (c).request (a);
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error(), std::nullopt, projectId);
+
+            return ToolOutput::success (r.value(), std::nullopt, projectId);
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "review.resolve";
+        t.title = "Answer a review";
+        t.description = "Records the person's answer to a pending review: verdict approved (the agent's changes are accepted, the highlight goes), rejected (with checkpoint the agent's steps after it are undone, "
+                        "unless a person edited in between: then the result only suggests the undo steps) or changes_requested (comment says what to change). Only a pending review can be answered; "
+                        "the same verdict again is harmless. Publishes the event review.resolved.";
+        t.inputSchema = schema ({ { "review_id", str() }, { "verdict", { { "type", "string" }, { "enum", { "approved", "rejected", "changes_requested" } } } },
+                                  { "comment", str ("What the person said (at most 2000 characters)") } }, { "review_id", "verdict" });
+        t.annotations = { { "readOnlyHint", false }, { "destructiveHint", true } };
+        t.handler = [reviewOf] (ToolCall& c) -> ToolOutput
+        {
+            auto r = reviewOf (c).resolve (c.session.tenant, c.args["review_id"], c.args["verdict"], c.args.value ("comment", ""), c.session.origin().toJson());
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error());
+
+            const auto projectId = r.value().value ("project_id", "");
+            return ToolOutput::success (r.value(), c.server.projects().revisionOf (projectId), projectId);
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "review.wait";
+        t.title = "Wait for a review answer";
+        t.description = "The review record (status pending | approved | rejected | changes_requested | expired, comment, delivery status, rollback). wait_s (0..30) long-polls: returns as soon as the review is "
+                        "no longer pending or the time is up; call again while status is pending.";
+        t.inputSchema = schema ({ { "review_id", str() }, { "wait_s", { { "type", "number" }, { "minimum", 0 }, { "maximum", 30 } } } }, { "review_id" });
+        t.annotations = { { "readOnlyHint", true } };
+        t.mayBlock = true;
+        t.handler = [jobWait, reviewOf] (ToolCall& c) -> ToolOutput
+        {
+            auto r = reviewOf (c).wait (c.session.tenant, c.args["review_id"], jobWait (c.args, 0, 30), c.rc.cancelled.get());
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error());
+
+            return ToolOutput::success (r.value(), std::nullopt, r.value().value ("project_id", ""));
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
+        t.name = "review.list";
+        t.title = "List reviews";
+        t.description = "Reviews of this tenant, newest first, optionally of one project or one status (pending | approved | rejected | changes_requested | expired).";
+        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "status", { { "type", "string" }, { "enum", { "pending", "approved", "rejected", "changes_requested", "expired" } } } } });
+        t.annotations = { { "readOnlyHint", true } };
+        t.handler = [reviewOf] (ToolCall& c) -> ToolOutput
+        {
+            auto r = reviewOf (c).list (c.session.tenant, c.args.value ("project_id", ""), c.args.value ("status", ""));
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error());
+
+            return ToolOutput::success (r.value());
         };
         add (std::move (t));
     }
