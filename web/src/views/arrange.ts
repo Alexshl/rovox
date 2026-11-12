@@ -6,6 +6,7 @@
 import { fmtDate, t } from '../i18n';
 import { alpha, mix } from '../lib/color';
 import { clear, h, rafThrottle, sliderKeyDb, token } from '../lib/dom';
+import { folderPickerSupported } from '../lib/dropfiles';
 import { type Grid, snapTime } from '../lib/snap';
 import { barQn, barToSeconds, beatQn, formatClock, qnToSeconds, secondsToBar, secondsToQn } from '../lib/time';
 import { SILENCE_DB, clamp, dbToFader, dbToLinear, faderToDb, formatDb } from '../lib/units';
@@ -15,6 +16,7 @@ import type { AgentMark, ProjectStore } from '../store/project';
 import { textDialog } from './dialog';
 import { FxPluginSection } from './fxpanel';
 import { PeakCache } from './peaks';
+import { importController } from './importwizard';
 import { projectPicker } from './projects';
 import { NARROW_QUERY, PHONE_QUERY, mediaMatches, openSheet, watchMedia } from './sheet';
 
@@ -81,6 +83,7 @@ export class ArrangeView {
   private readonly empty = h('div', { class: 'empty-state' });
   private pickerOnline = false;
   private pickerShown = false;
+  private emptyProjectShown = false;
   private readonly tip = h('div', { class: 'tip', style: { display: 'none' } });
   private readonly tcpRows = new Map<string, TcpRow>();
   private readonly peaks: PeakCache;
@@ -148,6 +151,7 @@ export class ArrangeView {
     this.rulerCanvas.addEventListener('pointercancel', (e) => this.onCancel(e));
     this.rulerCanvas.addEventListener('dblclick', (e) => this.onRulerDouble(e));
     this.rulerCanvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    importController(app).attachArea(this.el);
     this.applyLabels();
     this.refreshPalette();
     void document.fonts?.ready.then(() => this.draw());
@@ -166,6 +170,7 @@ export class ArrangeView {
   relabel(): void {
     this.applyLabels();
     this.pickerShown = false;
+    this.emptyProjectShown = false;
     this.trackSignature = '';
     this.onStoreChanged();
   }
@@ -207,7 +212,7 @@ export class ArrangeView {
 
     this.headLabel.textContent = t('tracks.headN', { n: s.tracks.length });
 
-    if (s.tracks.length === 0) this.showEmpty(t('tracks.empty'));
+    if (s.tracks.length === 0) this.showEmptyProject();
 
     const signature = s.tracks.map((t) => t.track_id).join(',');
     this.inner.style.height = `${s.tracks.length * TRACK_H}px`;
@@ -232,6 +237,7 @@ export class ArrangeView {
       return;
     }
     this.pickerShown = true;
+    this.emptyProjectShown = false;
     this.pickerOnline = this.app.status === 'open';
     clear(this.empty);
     const picker = projectPicker(this.app);
@@ -239,8 +245,35 @@ export class ArrangeView {
     this.empty.style.display = 'flex';
   }
 
+  /** An empty project: where to drop audio, with buttons for the file and folder pickers. Built once (a rebuild would drop the focus). */
+  private showEmptyProject(): void {
+    this.pickerShown = false;
+    if (this.emptyProjectShown) {
+      this.empty.style.display = 'flex';
+      return;
+    }
+    this.emptyProjectShown = true;
+    clear(this.empty);
+    const imp = importController(this.app);
+    this.empty.append(
+      h(
+        'div',
+        { class: 'card' },
+        h('div', { text: t('import.empty') }),
+        h(
+          'div',
+          { class: 'empty-actions' },
+          h('button', { class: 'btn primary', text: t('import.pickFiles'), attrs: { type: 'button' }, on: { click: () => imp.pickFiles() } }),
+          folderPickerSupported() ? h('button', { class: 'btn', text: t('import.pickFolder'), attrs: { type: 'button' }, on: { click: () => imp.pickFolder() } }) : null,
+        ),
+      ),
+    );
+    this.empty.style.display = 'flex';
+  }
+
   private showEmpty(text: string): void {
     this.pickerShown = false;
+    this.emptyProjectShown = false;
     clear(this.empty);
     this.empty.append(h('div', { class: 'card', text }));
     this.empty.style.display = 'flex';
@@ -1287,7 +1320,7 @@ class TcpRow {
   ) {
     this.el = h(
       'div',
-      { class: 'tcp', style: { top: `${index * TRACK_H}px` } },
+      { class: 'tcp', style: { top: `${index * TRACK_H}px` }, attrs: { 'data-track-id': id } },
       this.color,
       this.num,
       h('div', { class: 'body' }, this.nameEl, this.vol),
