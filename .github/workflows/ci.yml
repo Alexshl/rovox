@@ -6,11 +6,12 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # superseded PR runs are cancelled; main and tag runs finish
 
 permissions:
   contents: read
@@ -27,6 +28,8 @@ jobs:
         run: tools/check-notice.sh
       - name: tools tests (plugin licence reader)
         run: python3 -m unittest discover -s tools/tests
+      - name: rovox-skills sidecar tests
+        run: python3 -m unittest discover -s skills/tests
       - name: docs/ must not be tracked (private design documents)
         run: |
           if git ls-files | grep -q '^docs/'; then
@@ -34,6 +37,26 @@ jobs:
             git ls-files | grep '^docs/'
             exit 1
           fi
+
+  # The sidecar image alone (python:3.13-slim; its unit tests run during the image build). No submodules needed.
+  skills-image:
+    needs: license
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the skills image target
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: skills
+          load: true
+          tags: rovox-skills:ci
+          cache-from: type=gha,scope=skills
+          cache-to: type=gha,scope=skills,mode=max
+      - name: Smoke test
+        run: docker run --rm rovox-skills:ci list
 
   # Native runners for both architectures (no QEMU). The Docker `runtime` target configures, compiles and runs ctest
   # inside the image build (see docker/Dockerfile), so a failing test fails this job.
@@ -93,3 +116,135 @@ jobs:
           docker run --rm --entrypoint sh rovox:ci -c 'ldd /usr/local/bin/rovox' | tee /tmp/ldd.txt
           if grep -q "not found" /tmp/ldd.txt; then echo "missing shared libraries"; exit 1; fi
           docker image inspect rovox:ci --format 'size={{.Size}}'
+
+      # Integration smoke on the image that was just built: a plain `docker run` (no --device /dev/snd, no X11), the offline engine only.
+      - name: Integration smoke (serve, /healthz, MCP project -> preview -> delete)
+        run: |
+          token="ci-$(openssl rand -hex 16)"
+          docker run -d --name rovox-it -e ROVOX_TOKEN="$token" -p 127.0.0.1:4810:4810 rovox:ci serve --bind 0.0.0.0
+          trap 'docker logs rovox-it || true; docker rm -f rovox-it || true' EXIT
+          python3 tools/smoke_e2e.py --http http://127.0.0.1:4810 --token "$token" --wait-health-s 90
+          # the image HEALTHCHECK must turn healthy too
+          for i in $(seq 1 30); do
+            st="$(docker inspect -f '{{.State.Health.Status}}' rovox-it)"
+            [ "$st" = healthy ] && break
+            sleep 2
+          done
+          echo "container health: $st"
+          [ "$st" = healthy ]
+
+  # Release: on a v* tag each architecture is built natively and pushed by digest; the merge job joins the digests into one multi-arch manifest.
+  publish:
+    name: publish-${{ matrix.arch }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, skills-image]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Submodules (shallow, ssh -> https rewrite for nested JUCE)
+        run: tools/init-submodules.sh
+      - name: Image name (registry paths must be lower case)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rovox" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache@v4
+        with:
+          path: ccache-mount
+          key: ccache-trixie-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-trixie-${{ matrix.arch }}-
+      - name: Inject ccache into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: |
+            {"ccache-mount": {"target": "/ccache"}}
+          skip-extraction: ${{ steps.ccache.outputs.cache-hit }}
+      - name: Labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+      - name: Build and push by digest
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ROVOX_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=build-trixie-${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.push.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifest:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Image name (registry paths must be lower case)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rovox" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+      - name: Create the multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+      - name: Both platforms must be present
+        run: |
+          out="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}")"
+          echo "$out"
+          grep -q 'linux/amd64' <<< "$out"
+          grep -q 'linux/arm64' <<< "$out"
