@@ -52,6 +52,14 @@ python3 tools/web_e2e.py --token T stream --project "My song" --seconds 20     #
 python3 tools/web_e2e.py --token T agent  --project "My song"                  # change things like Claude Code would, while the UI is open
 ```
 
+### End-to-end tests
+
+`web/e2e/` holds Playwright tests (screenshots, a 5000-item frame-rate check, the browser audio stream with its underrun counter, tab mute, playhead against
+audible clicks, the `--audio none` preview, keyboard and axe-core checks). They run in the pinned Playwright image against the built Rovox image:
+`ROVOX_TOKEN=x docker compose -f docker/compose.e2e.yml up --abort-on-container-exit --exit-code-from runner runner` (details and the reference-screenshot
+workflow in `web/e2e/README.md`). CI also runs the MCP Inspector CLI against the image (stdio and HTTP) and `tools/skills_e2e.py` (core + sidecar:
+`analysis.tempo_map` on a generated 120 BPM click).
+
 ## Using it
 
 ```

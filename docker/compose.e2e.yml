@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Rovox contributors
+#
+# End-to-end browser tests (web/e2e): the built runtime image, a second server with `--audio none`, and the Playwright runner in its pinned image.
+#   export ROVOX_TOKEN=<any random string>          # no default, no secret in this file
+#   docker build -f docker/Dockerfile --target runtime -t rovox:ci .        # or: E2E_IMAGE=<an image you already have>
+#   docker compose -f docker/compose.e2e.yml up --abort-on-container-exit --exit-code-from runner runner
+# Reference screenshots (once, then the owner approves them):   ... run --rm runner npx playwright test --update-snapshots visual
+# Ten minutes of stream:                                          E2E_LONG=1 ... up ... runner
+# Packet loss (40 +- 10 ms delay, 2 % loss on the server's egress): E2E_NETEM=1 docker compose -f docker/compose.e2e.yml --profile netem up --abort-on-container-exit --exit-code-from runner
+#   (the sidecar and the runner start together; the netem test is only meaningful once `tc qdisc show` has printed in the netem log)
+# The runner reaches the servers by service name, which is not a secure context, so E2E_SECURE_ORIGINS allow-lists them for WebCodecs / AudioWorklet.
+services:
+  rovox:
+    image: ${E2E_IMAGE:-rovox:ci}
+    command: ["serve", "--bind", "0.0.0.0", "--audio", "browser"]
+    environment:
+      ROVOX_TOKEN: ${ROVOX_TOKEN:?set ROVOX_TOKEN}
+    volumes:
+      - e2e-data:/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4810/healthz', timeout=4).status == 200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      start_period: 20s
+      retries: 20
+  rovox-noaudio:
+    image: ${E2E_IMAGE:-rovox:ci}
+    command: ["serve", "--bind", "0.0.0.0", "--audio", "none"]
+    environment:
+      ROVOX_TOKEN: ${ROVOX_TOKEN:?set ROVOX_TOKEN}
+    volumes:
+      - e2e-data-noaudio:/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4810/healthz', timeout=4).status == 200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      start_period: 20s
+      retries: 20
+  runner:
+    image: mcr.microsoft.com/playwright:v1.64.1-noble
+    init: true
+    ipc: host
+    working_dir: /work
+    depends_on:
+      rovox:
+        condition: service_healthy
+      rovox-noaudio:
+        condition: service_healthy
+    environment:
+      CI: ${CI:-}
+      E2E_URL: http://rovox:4810
+      E2E_NOAUDIO_URL: http://rovox-noaudio:4810
+      E2E_SECURE_ORIGINS: http://rovox:4810,http://rovox-noaudio:4810
+      E2E_TOKEN: ${ROVOX_TOKEN:?set ROVOX_TOKEN}
+      E2E_LONG: ${E2E_LONG:-0}
+      E2E_NETEM: ${E2E_NETEM:-0}
+    volumes:
+      - ../web/e2e:/work
+      - e2e-node-modules:/work/node_modules
+    entrypoint: ["sh", "-c", "npm install --no-audit --no-fund && exec \"$$@\"", "--"]
+    command: ["npx", "playwright", "test"]
+  # Shares the network namespace of `rovox` and shapes its egress (server -> browser). NET_ADMIN is needed only here.
+  netem:
+    profiles: ["netem"]
+    image: alpine:3.20
+    network_mode: "service:rovox"
+    cap_add: ["NET_ADMIN"]
+    depends_on:
+      rovox:
+        condition: service_healthy
+    command: ["sh", "-c", "apk add --no-cache iproute2-tc && tc qdisc replace dev eth0 root netem delay 40ms 10ms loss 2% && tc qdisc show dev eth0 && sleep infinity"]
+volumes:
+  e2e-data:
+  e2e-data-noaudio:
+  e2e-node-modules:
