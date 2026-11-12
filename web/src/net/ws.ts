@@ -25,6 +25,15 @@ export interface SocketHandlers {
   onStatus(status: SocketStatus): void;
   onMessage(msg: ServerMessage): void;
   onBinary(buf: ArrayBuffer): void;
+  /** The socket closed `failures` times in a row before the server said `welcome` (a rejected token looks like this). */
+  onHandshakeFailed?(failures: number): void;
+}
+
+export interface Heartbeat {
+  /** How often a `ping` is sent. */
+  pingMs: number;
+  /** No frame at all for this long: the connection is dead (sleep, dropped network) and is closed by force. */
+  deadMs: number;
 }
 
 export function socketUrl(loc: Pick<Location, 'protocol' | 'host'> = location): string {
@@ -39,11 +48,17 @@ export class RovoxSocket {
   private backoff = 500;
   private closedByUser = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private beatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastRx = 0;
+  private pingN = 1;
+  private welcomed = false;
+  private handshakeFailures = 0;
 
   constructor(
     private readonly url: string,
     private readonly handlers: SocketHandlers,
     private readonly makeSocket: (url: string) => WebSocket = (u) => new WebSocket(u),
+    private readonly heartbeat: Heartbeat = { pingMs: 10000, deadMs: 25000 },
   ) {}
 
   connect(): void {
@@ -53,12 +68,15 @@ export class RovoxSocket {
     const ws = this.makeSocket(this.url);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    this.welcomed = false;
     ws.onopen = () => {
       this.backoff = 500;
+      this.startHeartbeat(ws);
       this.setStatus('open');
       this.send({ t: 'hello', client: 'web/0.1' });
     };
     ws.onmessage = (ev: MessageEvent) => {
+      this.lastRx = Date.now();
       if (typeof ev.data === 'string') {
         let msg: ServerMessage;
         try {
@@ -75,26 +93,63 @@ export class RovoxSocket {
           }
           return;
         }
+        if (msg.t === 'welcome') {
+          this.welcomed = true;
+          this.handshakeFailures = 0;
+        }
         this.handlers.onMessage(msg);
       } else {
         this.handlers.onBinary(ev.data as ArrayBuffer);
       }
     };
-    ws.onclose = () => {
-      this.ws = null;
-      this.failPending();
-      this.setStatus('closed');
-      if (!this.closedByUser) {
-        this.retryTimer = setTimeout(() => this.connect(), this.backoff);
-        this.backoff = Math.min(5000, this.backoff * 2);
-      }
-    };
+    ws.onclose = () => this.handleClose(ws);
     ws.onerror = () => ws.close();
+  }
+
+  private handleClose(ws: WebSocket): void {
+    if (this.ws !== ws) return;
+    this.stopHeartbeat();
+    this.ws = null;
+    this.failPending();
+    this.setStatus('closed');
+    if (!this.welcomed) this.handshakeFailures++;
+    if (!this.closedByUser) {
+      this.retryTimer = setTimeout(() => this.connect(), this.backoff);
+      this.backoff = Math.min(5000, this.backoff * 2);
+      if (this.handshakeFailures >= 2) this.handlers.onHandshakeFailed?.(this.handshakeFailures);
+    }
+  }
+
+  /** App-level ping / pong: a half-open socket (laptop woke up, network dropped) never fires `close`, so silence is the signal. */
+  private startHeartbeat(ws: WebSocket): void {
+    this.stopHeartbeat();
+    this.lastRx = Date.now();
+    this.beatTimer = setInterval(() => {
+      if (Date.now() - this.lastRx > this.heartbeat.deadMs) {
+        ws.onclose = null;
+        ws.onmessage = null;
+        try {
+          ws.close();
+        } catch {
+          /* already gone */
+        }
+        this.handleClose(ws);
+        return;
+      }
+      this.send({ t: 'ping', n: this.pingN++ });
+    }, this.heartbeat.pingMs);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.beatTimer) clearInterval(this.beatTimer);
+    this.beatTimer = null;
   }
 
   close(): void {
     this.closedByUser = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.stopHeartbeat();
+    this.handshakeFailures = 0;
     this.ws?.close();
   }
 

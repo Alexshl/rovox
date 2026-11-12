@@ -222,6 +222,8 @@ describe('the window', () => {
     [...document.querySelectorAll<HTMLButtonElement>('.mcp-actions button')].find((b) => b.textContent!.startsWith('Undo агента'))!.click();
     await tick(200);
     expect(ws.sent.filter((m) => m.name === 'undo').length - before).toBe(2);
+    const undos = ws.sent.filter((m) => m.name === 'undo');
+    expect(undos.every((m) => m.project_id === 'p_1' && m.if_revision !== undefined)).toBe(true);
   });
 
   it('a fader move by the person is sent as one coalesced gesture with the ui origin implied by the session', async () => {

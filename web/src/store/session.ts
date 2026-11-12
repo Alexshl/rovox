@@ -88,23 +88,45 @@ export class App {
       onStatus: (s) => this.onStatus(s),
       onMessage: (m) => this.onMessage(m),
       onBinary: (b) => this.onBinary(b),
+      onHandshakeFailed: () => void this.recheckLogin(),
     });
     document.documentElement.dataset.theme = this.prefs.theme;
   }
 
-  async start(): Promise<void> {
+  /** Asks the server whether this browser still has to log in (true) — false when it does not or the server cannot be reached. */
+  private async queryLogin(): Promise<boolean> {
     const res = await fetch('/api/session', { credentials: 'same-origin' }).catch(() => null);
-    if (res?.ok) {
-      const s = (await res.json()) as { token_required: boolean; authenticated: boolean; source_url: string; version: string };
-      this.serverInfo.source_url = s.source_url;
-      this.serverInfo.version = s.version;
-      if (s.token_required && !s.authenticated) {
-        this.needsLogin = true;
-        this.changed.emit();
-        return;
-      }
+    if (!res?.ok) return false;
+    const s = (await res.json()) as { token_required: boolean; authenticated: boolean; source_url: string; version: string };
+    this.serverInfo.source_url = s.source_url;
+    this.serverInfo.version = s.version;
+    return s.token_required && !s.authenticated;
+  }
+
+  async start(): Promise<void> {
+    if (await this.queryLogin()) {
+      this.needsLogin = true;
+      this.changed.emit();
+      return;
     }
     this.socket.connect();
+  }
+
+  private recheckingLogin = false;
+
+  /** The socket keeps closing before `welcome`: after a server restart with a new token that is a 401 — show the login screen instead of retrying forever. */
+  private async recheckLogin(): Promise<void> {
+    if (this.recheckingLogin || this.needsLogin) return;
+    this.recheckingLogin = true;
+    try {
+      if (await this.queryLogin()) {
+        this.socket.close();
+        this.needsLogin = true;
+        this.changed.emit();
+      }
+    } finally {
+      this.recheckingLogin = false;
+    }
   }
 
   async login(token: string): Promise<boolean> {
@@ -389,16 +411,33 @@ export class App {
     await this.edit('redo', {}, { refetch: true });
   }
 
+  /** Undoes the newest run of agent steps of the active project, no further than a step by a person: every undo is pinned to the
+   *  project and to the revision the previous answer reported, so a step made in between stops the loop. */
   async undoAgent(): Promise<void> {
     const p = this.active;
     if (!p) return;
-    const { count } = p.agentUndo();
-    for (let i = 0; i < count; i++) {
-      const r = await this.cmd('undo', {});
-      if (!r.ok) break;
+    const id = p.id;
+    const hist = await this.socket.cmd<{ undo: HistoryStep[]; redo: HistoryStep[] }>('history.list', {}, { projectId: id });
+    if (!hist.ok || !hist.data) {
+      this.toast(hist.error?.message ?? 'не вдалося отримати історію', 'error');
+      return;
     }
-    this.refetchSoon(p.id, 0);
-    this.refreshHistorySoon(p.id);
+    p.setHistory(hist.data);
+    const { count } = p.agentUndo();
+    let revision = hist.revision;
+    let done = 0;
+    for (let i = 0; i < count; i++) {
+      const r = await this.socket.cmd('undo', {}, { projectId: id, ifRevision: revision });
+      if (!r.ok) {
+        if (r.error?.code === 'REVISION_CONFLICT') this.toast(`Проект змінився під час відкату (скасовано кроків: ${done}) — решту не чіпаю`, 'error');
+        else if (r.error?.code !== 'DISCONNECTED') this.toast(`undo: ${r.error?.message ?? 'error'}`, 'error');
+        break;
+      }
+      done++;
+      revision = r.revision;
+    }
+    this.refetchSoon(id, 0);
+    this.refreshHistorySoon(id);
   }
 
   async acceptAgent(): Promise<void> {
@@ -422,9 +461,9 @@ export class App {
       case 'welcome':
         this.sessionId = m.session;
         this.serverInfo = { version: m.server_version, source_url: m.source_url ?? this.serverInfo.source_url, audio: m.audio };
-        // after a reconnect the old subscriptions are gone: forget the stores and let the list rebuild them with fresh snapshots
-        this.projects.clear();
-        this.order = [];
+        // after a reconnect the old subscriptions are gone: keep the stores (zoom, scroll, selection, marks) and subscribe again,
+        // the fresh snapshots refresh them; the list reconciles by id
+        for (const id of this.projects.keys()) this.socket.send({ t: 'sub', project_id: id, channels: ['state', 'transport', 'meters'] });
         // the server forgot that this client listens: ask for the stream again, the old buffer is from before the gap
         if (this.audio.stats.enabled) {
           this.audio.flush();
