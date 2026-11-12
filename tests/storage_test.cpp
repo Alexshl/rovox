@@ -4,6 +4,7 @@
 // Object storage as the source of truth: key layout, HEAD, the writer lease, push order (media, then snapshot, then HEAD), pull into an empty cache,
 // background upload with retries, the S3 client against a local mock server (SigV4, path-style, retries, list, multipart) and a project that survives
 // the loss of its cache. All against an in-memory fake store or a local HTTP server: no real network.
+#include "FsObjectStore.h"
 #include "Hmac.h"
 #include "Ids.h"
 #include "RemoteStorage.h"
@@ -1291,4 +1292,291 @@ ROVOX_TEST (storage, a_second_server_cannot_open_a_project_for_writing)
     REQUIRE (a->flush (std::chrono::seconds (10)));
     a->shutdown (std::chrono::seconds (5));
     b->shutdown (std::chrono::seconds (5));
+}
+
+//==============================================================================
+// FsObjectStore: the same RemoteStorage scenarios over a directory (a store factory per backend), plus what is specific to files.
+namespace
+{
+using StoreFactory = std::function<std::shared_ptr<ObjectStore>()>;
+
+std::string readFile (const fs::path& f)
+{
+    std::ifstream in (f, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+std::vector<std::pair<std::string, StoreFactory>> backends (const std::string& tag)
+{
+    auto fake = std::make_shared<FakeStore>();
+    const auto dir = test::makeTempDir (tag);
+    return { { "fake", [fake] { return std::static_pointer_cast<ObjectStore> (fake); } },
+             { "fs", [dir] { return makeFsObjectStore (dir); } } };      // every call is another "process" on the same root
+}
+
+void leaseScenario (const StoreFactory& make, const std::string& id, bool conditional)
+{
+    auto store = make();
+    std::int64_t now = 1000;
+    const ProjectLease::Clock clock = [&] { return now; };
+    const std::string key = "rovox/tenants/local/projects/" + id + "/LEASE";
+
+    REQUIRE (ProjectLease::acquire (*store, key, "server-a", 60, clock, conditional).ok());
+    CHECK (ProjectLease::acquire (*store, key, "server-a", 60, clock, conditional).ok());
+    auto other = ProjectLease::acquire (*make(), key, "server-b", 60, clock, conditional);
+    REQUIRE (! other.ok());
+    CHECK (other.error().code == errc::busy);
+    CHECK (other.error().details.value ("lease_owner", "") == "server-a");
+
+    now = 1030;
+    CHECK (ProjectLease::renew (*store, key, "server-a", 60, clock, conditional).ok());
+    CHECK (ProjectLease::read (*store, key).value()->expires == 1090);
+
+    now = 1100;                                                         // expired: take-over
+    CHECK (ProjectLease::acquire (*make(), key, "server-b", 60, clock, conditional).ok());
+    auto lost = ProjectLease::renew (*store, key, "server-a", 60, clock, conditional);
+    REQUIRE (! lost.ok());
+    CHECK (lost.error().details.contains ("lease_owner"));
+
+    ProjectLease::release (*store, key, "server-a");                    // not the owner: no effect
+    CHECK (ProjectLease::read (*store, key).value().has_value());
+    ProjectLease::release (*store, key, "server-b");
+    CHECK (! ProjectLease::read (*store, key).value().has_value());
+}
+
+void conditionalScenario (const StoreFactory& make, const std::string& id)
+{
+    auto store = make();
+    const auto key = "rovox/" + id + "/lease";
+
+    REQUIRE (store->putIf (key, "a", "application/json", { "*", "" }).ok());
+    auto again = make()->putIf (key, "b", "application/json", { "*", "" });
+    REQUIRE (! again.ok());
+    CHECK (again.error().code == putConditionFailed);
+    CHECK (store->get (key).value() == "a");
+
+    auto meta = store->head (key);
+    REQUIRE (meta.ok());
+    CHECK (meta.value().size == 1);
+    REQUIRE (store->putIf (key, "c", "application/json", { "", meta.value().etag }).ok());
+
+    auto stale = store->putIf (key, "d", "application/json", { "", meta.value().etag });      // the ETag moved on
+    REQUIRE (! stale.ok());
+    CHECK (stale.error().code == putConditionFailed);
+    CHECK (store->get (key).value() == "c");
+
+    auto missing = store->putIf (key + "-none", "x", "application/json", { "", "\"nothing\"" });
+    REQUIRE (! missing.ok());
+    CHECK (missing.error().code == putConditionFailed);
+    CHECK (! store->head (key + "-none").ok());
+}
+
+void pushPullScenario (const StoreFactory& make)
+{
+    auto rs = std::make_shared<RemoteStorage> (make(), StorageKeys { "rovox/" }, "test", "server-a", 60);
+    auto c = makeCache ("local", 4);
+    REQUIRE (rs->push (jobFor (c)).ok());
+    REQUIRE (rs->push (jobFor (c)).ok());                               // same revision: idempotent
+    auto head = rs->fetchHead ("local", c.id);
+    REQUIRE (head.ok());
+    CHECK (head.value().revision == 4);
+
+    auto fresh = std::make_shared<RemoteStorage> (make(), StorageKeys { "rovox/" }, "test", "server-b", 60);
+    const auto target = test::makeTempDir ("fspull") / "project.rvx";
+    auto rev = fresh->pull ("local", c.id, target);
+    REQUIRE (rev.ok());
+    CHECK (rev.value() == 4);
+    CHECK (readFile (target / "edit.xml") == readFile (c.dir / "edit.xml"));
+    CHECK (readFile (target / "media" / (shaA + ".wav")) == "RIFFfakewave");
+
+    REQUIRE (rs->acquireLease ("local", c.id).ok());
+    auto refused = fresh->acquireLease ("local", c.id);
+    REQUIRE (! refused.ok());
+    CHECK (refused.error().code == errc::busy);
+}
+} // namespace
+
+ROVOX_TEST (storage, fs_store_runs_the_remote_storage_scenarios)
+{
+    for (auto& [name, make] : backends ("fsstore"))
+    {
+        leaseScenario (make, "p_lease_a_" + name, false);
+        leaseScenario (make, "p_lease_b_" + name, true);
+        conditionalScenario (make, "cond_" + name);
+        pushPullScenario (make);
+    }
+}
+
+ROVOX_TEST (storage, fs_store_two_concurrent_acquirers_exactly_one_wins)
+{
+    const auto dir = test::makeTempDir ("fsrace");
+
+    for (int round = 0; round < 8; ++round)
+    {
+        // two servers = two store objects on one root; the lease object is created by whoever takes the directory lock first
+        auto b = std::make_shared<RemoteStorage> (makeFsObjectStore (dir), StorageKeys { "rovox/" }, "fs", "server-b", 60);
+        auto c = std::make_shared<RemoteStorage> (makeFsObjectStore (dir), StorageKeys { "rovox/" }, "fs", "server-c", 60);
+        REQUIRE (b->conditionalWritesActive());
+        REQUIRE (c->conditionalWritesActive());
+
+        const auto project = "p_fsrace_" + std::to_string (round);
+        std::atomic<bool> go { false };
+        std::atomic<int> winners { 0 }, busy { 0 };
+        const auto race = [&] (const std::shared_ptr<RemoteStorage>& rs)
+        {
+            while (! go)
+                std::this_thread::yield();
+
+            auto r = rs->acquireLease ("local", project);
+
+            if (r.ok())
+                ++winners;
+            else if (r.error().code == errc::busy && r.error().details.contains ("lease_owner"))
+                ++busy;
+        };
+        std::thread t1 ([&] { race (b); }), t2 ([&] { race (c); });
+        go = true;
+        t1.join();
+        t2.join();
+        CHECK (winners == 1);
+        CHECK (busy == 1);
+    }
+
+    // eight raw If-None-Match puts of one key: one winner
+    std::atomic<bool> go { false };
+    std::atomic<int> won { 0 }, lost { 0 };
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < 8; ++i)
+        threads.emplace_back ([&, i]
+        {
+            auto store = makeFsObjectStore (dir);
+
+            while (! go)
+                std::this_thread::yield();
+
+            auto r = store->putIf ("raw/key", "writer-" + std::to_string (i), "text/plain", { "*", "" });
+
+            if (r.ok())
+                ++won;
+            else if (r.error().code == putConditionFailed)
+                ++lost;
+        });
+
+    go = true;
+
+    for (auto& t : threads)
+        t.join();
+
+    CHECK (won == 1);
+    CHECK (lost == 7);
+}
+
+ROVOX_TEST (storage, fs_store_keys_etag_list_and_files)
+{
+    const auto dir = test::makeTempDir ("fskeys");
+    auto store = makeFsObjectStore (dir / "root");
+
+    for (const char* bad : { "../escape", "a/../../escape", "/abs/key", "a//b", "a/", "", "./x", "a/./b", "..", ".rovox-lock", "a/.rovox-tmp-1", "k.etag" })
+    {
+        const auto put = store->put (bad, "x");
+        REQUIRE (! put.ok());
+        CHECK (put.error().code == errc::invalidParams);
+        CHECK (store->get (bad).error().code == errc::invalidParams);
+        CHECK (store->head (bad).error().code == errc::invalidParams);
+        CHECK (store->remove (bad).error().code == errc::invalidParams);
+    }
+
+    CHECK (! fs::exists (dir / "escape"));
+    CHECK (store->list ("../").error().code == errc::invalidParams);
+
+    CHECK (store->head ("missing").error().code == errc::notFound);
+    CHECK (store->get ("missing").error().code == errc::notFound);
+
+    // ETag = quoted sha256 of the content
+    REQUIRE (store->put ("b/two", "hello").ok());
+    CHECK (store->head ("b/two").value().etag == "\"" + sha256Hex ("hello") + "\"");
+    REQUIRE (store->put ("b/two", "hello world").ok());
+    CHECK (store->head ("b/two").value().etag == "\"" + sha256Hex ("hello world") + "\"");
+
+    // a sidecar that no longer matches the file (a crash between the two renames) is ignored
+    std::ofstream (dir / "root" / "b" / "two", std::ios::binary | std::ios::trunc) << "changed behind the back!";
+    CHECK (store->head ("b/two").value().etag == "\"" + sha256Hex ("changed behind the back!") + "\"");
+
+    REQUIRE (store->put ("a/one", "1").ok());
+    REQUIRE (store->put ("b/one", "22").ok());
+    REQUIRE (store->put ("a/sub/z", "3").ok());
+    REQUIRE (store->put ("a/sub/a", "4").ok());
+    REQUIRE (store->put ("top", "5").ok());
+
+    auto all = store->list ("");
+    REQUIRE (all.ok());
+    std::vector<std::string> keys;
+
+    for (auto& o : all.value().objects)
+        keys.push_back (o.key);
+
+    CHECK ((keys == std::vector<std::string> { "a/one", "a/sub/a", "a/sub/z", "b/one", "b/two", "top" }));   // lexicographic like S3, no lock / sidecar / temp files
+    CHECK (all.value().prefixes.empty());
+
+    auto under = store->list ("a/");
+    REQUIRE (under.ok());
+    CHECK (under.value().objects.size() == 3);
+
+    auto folded = store->list ("a/", "/");
+    REQUIRE (folded.ok());
+    REQUIRE (folded.value().objects.size() == 1);
+    CHECK (folded.value().objects[0].key == "a/one");
+    CHECK ((folded.value().prefixes == std::vector<std::string> { "a/sub/" }));
+
+    auto partial = store->list ("b/o");
+    REQUIRE (partial.ok());
+    CHECK (partial.value().objects.size() == 1);
+    CHECK (partial.value().objects[0].size == 2);
+
+    // files in and out
+    const auto src = dir / "source.bin";
+    std::ofstream (src, std::ios::binary) << std::string (3 * 1024 * 1024 + 5, 'q');
+    REQUIRE (store->putFile ("big/blob", src).ok());
+    CHECK (store->head ("big/blob").value().size == 3 * 1024 * 1024 + 5);
+    CHECK (store->head ("big/blob").value().etag == "\"" + *sha256File (src) + "\"");
+    REQUIRE (store->getFile ("big/blob", dir / "out" / "copy.bin").ok());
+    CHECK (readFile (dir / "out" / "copy.bin") == readFile (src));
+    CHECK (! fs::exists (dir / "out" / "copy.bin.part"));
+
+    REQUIRE (store->remove ("b/two").ok());
+    CHECK (store->head ("b/two").error().code == errc::notFound);
+    CHECK (! fs::exists (dir / "root" / "b" / "two.etag"));
+    CHECK (store->remove ("b/two").ok());                               // removing a missing key is not an error
+}
+
+ROVOX_TEST (storage, fs_store_put_interrupted_before_the_rename_leaves_nothing_visible)
+{
+    const auto dir = test::makeTempDir ("fscrash");
+    FsObjectStore store (dir);
+
+    store.setBeforeCommitHook ([] { return true; });                    // "crash" with the temporary file complete
+    CHECK (! store.put ("new/object", "payload").ok());
+    CHECK (store.head ("new/object").error().code == errc::notFound);
+    CHECK (store.list ("").value().objects.empty());
+
+    store.setBeforeCommitHook (nullptr);
+    REQUIRE (store.put ("new/object", "old").ok());
+    store.setBeforeCommitHook ([] { return true; });
+    CHECK (! store.put ("new/object", "newer").ok());
+    CHECK (store.get ("new/object").value() == "old");                  // the previous version is intact
+    CHECK (store.head ("new/object").value().etag == "\"" + sha256Hex ("old") + "\"");
+
+    // a stray temporary file (the process died) is neither listed nor readable as an object
+    std::ofstream (dir / "new" / ".rovox-tmp-999-1-1") << "half";
+    CHECK (store.list ("").value().objects.size() == 1);
+    CHECK (store.head (".rovox-tmp-999-1-1").error().code == errc::invalidParams);
+
+    // a failed source read leaves nothing either
+    store.setBeforeCommitHook (nullptr);
+    CHECK (! store.putFile ("from/missing", dir / "no-such-file").ok());
+    CHECK (store.head ("from/missing").error().code == errc::notFound);
+    CHECK (store.list ("from/").value().objects.empty());
 }
