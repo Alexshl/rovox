@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "Auth.h"
 #include "ChangeCollector.h"
 #include "Origin.h"
 #include "Project.h"
@@ -21,12 +22,22 @@ class ProjectManager;
 struct CommandContext
 {
     std::string projectId;                      // ignored by global commands
-    std::string tenant = "local";               // comes from the authenticated session, never from tool params
+    std::string tenant = "local";               // comes from the authenticated session, never from tool params; setPrincipal keeps it equal to principal.tenant
+    Principal principal = Principal::local();   // who is calling: scopes are enforced against it by the CommandBus
     Origin origin = Origin::cli();
     std::optional<std::uint64_t> ifRevision;    // optimistic concurrency: REVISION_CONFLICT if the project moved on
     std::string undoLabel;                      // empty = generated from the command name
     bool dryRun = false;                        // validate only, apply nothing
     bool coalesce = false;                      // continue the previous undo step if it is the latest of this session (gestures: dragging a fader)
+
+    /** Authenticated caller: sets the principal, the tenant derived from it, and the subject and client of the origin. */
+    void setPrincipal (Principal p)
+    {
+        tenant = p.tenant;
+        origin.subject = p.subject;
+        origin.client = p.client;
+        principal = std::move (p);
+    }
 };
 
 struct CommandResult

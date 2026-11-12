@@ -42,9 +42,11 @@ struct McpConfig
 class Session
 {
 public:
-    Session (std::string id, std::string shortId, std::string tenant);
+    Session (std::string id, std::string shortId, Principal principal);
 
-    const std::string id, shortId, tenant;
+    const std::string id, shortId;
+    const Principal principal;                  // who the session belongs to; scopes are checked per call
+    const std::string tenant;                   // == principal.tenant
     json clientInfo = json::object(), clientCapabilities = json::object();
     std::string protocolVersion = latestProtocolVersion;
     std::atomic<bool> initialized { false };
@@ -128,7 +130,9 @@ public:
     McpServer (ProjectManager&, CommandBus&, EventHub&, JobManager&, JobService&, McpConfig = {});
     ~McpServer();
 
+    /** The local operator's session in `tenant` (all scopes). */
     std::shared_ptr<Session> createSession (const std::string& tenant = "local");
+    std::shared_ptr<Session> createSession (const Principal&);
     std::shared_ptr<Session> findSession (const std::string& id);
     void closeSession (const std::string& id);
     int sweepSessions();                    // idle HTTP sessions; returns how many were closed

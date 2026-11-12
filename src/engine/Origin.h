@@ -17,6 +17,8 @@ struct Origin
     Kind kind = Kind::cli;
     std::string session;        // e.g. "ws_12", "mcp_3"
     std::string label;          // human readable: "Claude", "alex@browser"
+    std::string subject;        // the end user behind an authenticated key (platform user id); empty = not known
+    std::string client;         // the calling application behind an authenticated key; empty = not known
 
     static const char* kindName (Kind k)
     {
@@ -32,7 +34,18 @@ struct Origin
         return "system";
     }
 
-    json toJson() const     { return { { "kind", kindName (kind) }, { "session", session }, { "label", label } }; }
+    json toJson() const
+    {
+        json j { { "kind", kindName (kind) }, { "session", session }, { "label", label } };
+
+        if (! subject.empty())
+            j["subject"] = subject;
+
+        if (! client.empty())
+            j["client"] = client;
+
+        return j;
+    }
 
     static Origin system()                  { return { Kind::system, "", "system" }; }
     static Origin cli()                     { return { Kind::cli, "cli", "cli" }; }

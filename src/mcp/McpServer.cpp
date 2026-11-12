@@ -5,6 +5,7 @@
 
 #include "Ids.h"
 #include "JsonSchema.h"
+#include "Scopes.h"
 #include "Sha1.h"
 #include "Version.h"
 
@@ -60,7 +61,7 @@ json rpcResult (const json& id, json result)
 }
 
 //==============================================================================
-Session::Session (std::string i, std::string s, std::string t) : id (std::move (i)), shortId (std::move (s)), tenant (std::move (t)) {}
+Session::Session (std::string i, std::string s, Principal p) : id (std::move (i)), shortId (std::move (s)), principal (std::move (p)), tenant (principal.tenant) {}
 
 Origin Session::origin() const
 {
@@ -72,7 +73,10 @@ Origin Session::origin() const
             label = name;
 
     // the rovox-skills sidecar names itself "skill:<name>": its steps show in the journal as origin skill:<name> and are undoable like any agent step
-    return { label.rfind ("skill:", 0) == 0 ? Origin::Kind::skill : Origin::Kind::mcp, shortId, label };
+    Origin o { label.rfind ("skill:", 0) == 0 ? Origin::Kind::skill : Origin::Kind::mcp, shortId, label };
+    o.subject = principal.subject;
+    o.client = principal.client;
+    return o;
 }
 
 std::uint64_t Session::push (json message)
@@ -206,8 +210,15 @@ McpServer::~McpServer()
 
 std::shared_ptr<Session> McpServer::createSession (const std::string& tenant)
 {
+    auto p = Principal::local();
+    p.tenant = tenant;
+    return createSession (p);
+}
+
+std::shared_ptr<Session> McpServer::createSession (const Principal& principal)
+{
     std::lock_guard<std::mutex> lock (sessionsMutex_);
-    auto s = std::make_shared<Session> (randomHex (16), "s" + std::to_string (nextShortId_++), tenant);
+    auto s = std::make_shared<Session> (randomHex (16), "s" + std::to_string (nextShortId_++), principal);
     sessions_[s->id] = s;
     return s;
 }
@@ -261,8 +272,8 @@ CommandContext McpServer::contextFor (Session& s, const std::string& projectId) 
 {
     CommandContext ctx;
     ctx.projectId = projectId;
-    ctx.tenant = s.tenant;
     ctx.origin = s.origin();
+    ctx.setPrincipal (s.principal);
     return ctx;
 }
 
@@ -431,7 +442,12 @@ json McpServer::handleRequest (Session& s, const json& req, RequestContext& rc)
 
         if (method == "tools/list")
         {
-            std::vector<const ToolDef*> all = tools();
+            std::vector<const ToolDef*> all;
+
+            for (auto* t : tools())
+                if (allowed (s.principal, t->name))         // tools the principal cannot call are not shown
+                    all.push_back (t);
+
             size_t offset = 0;
 
             if (params.contains ("cursor"))
@@ -596,10 +612,20 @@ json McpServer::handleToolsCall (Session& s, const json& params, RequestContext&
         return { { "error", { { "code", -32602 }, { "message", "unknown tool: " + name } } } };
     }
 
+    // scopes first, before any work or bookkeeping (commands are checked again by the CommandBus, tools that are not commands only here)
+    if (auto missing = missingScope (s.principal, tool->name))
+        return toolResult (ToolOutput::failure (forbiddenScopeError (*missing, tool->name)));
+
     json args = params.contains ("arguments") ? params["arguments"] : json::object();
 
     if (! args.is_object())
         return { { "error", { { "code", -32602 }, { "message", "arguments must be an object" } } } };
+
+    // job.cancel needs the scope of the job's kind
+    if ((tool->name == "job.cancel" || tool->name == "cancel_render") && args.contains ("job_id") && args["job_id"].is_string())
+        if (auto info = jobs_.get (args["job_id"].get<std::string>()); info && info->tenant == s.tenant)
+            if (const auto need = scopeForJobKind (info->kind); ! s.principal.has (need))
+                return toolResult (ToolOutput::failure (forbiddenScopeError (need, tool->name)));
 
     std::string projectId = args.value ("project_id", "");
 

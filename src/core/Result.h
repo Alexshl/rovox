@@ -36,6 +36,10 @@ inline constexpr const char* pluginBlacklisted   = "PLUGIN_BLACKLISTED";
 inline constexpr const char* pluginLoadFailed    = "PLUGIN_LOAD_FAILED";
 inline constexpr const char* fileTooLarge        = "FILE_TOO_LARGE";
 inline constexpr const char* forbiddenLicense    = "FORBIDDEN_LICENSE";
+inline constexpr const char* unauthorized        = "UNAUTHORIZED";
+inline constexpr const char* forbiddenScope      = "FORBIDDEN_SCOPE";
+inline constexpr const char* quotaExceeded       = "QUOTA_EXCEEDED";
+inline constexpr const char* rateLimited         = "RATE_LIMITED";
 } // namespace errc
 
 struct Error

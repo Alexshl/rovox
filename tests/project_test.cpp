@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Rovox contributors
 
 #include "Ids.h"
+#include "Scopes.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 
@@ -1078,4 +1079,77 @@ ROVOX_TEST (project, ttl_has_a_maximum_and_an_unparseable_created_at_is_never_sw
     env.project (temp).manifest().createdAt = "garbage";
     CHECK (env.pm.sweepExpired (std::time (nullptr) + 100000).empty());
     CHECK (env.pm.find (temp) != nullptr);
+}
+
+//==============================================================================
+// scopes (E11-03)
+
+ROVOX_TEST (project, every_registered_command_has_a_scope_entry)
+{
+    test::Env env;
+    std::string missing;
+
+    for (auto* cmd : env.registry.all())
+        if (! hasScopeEntry (std::string (cmd->name())))
+            missing += std::string (cmd->name()) + " ";
+
+    if (! missing.empty())
+        std::cerr << "    commands without a scope entry: " << missing << "\n";
+
+    CHECK (missing.empty());
+}
+
+ROVOX_TEST (project, a_principal_without_the_scope_gets_forbidden_scope_before_any_work)
+{
+    test::Env env;
+    const auto id = env.newProject ("scoped");
+    const auto before = env.project (id).revision();
+
+    CommandContext ctx;
+    ctx.projectId = id;
+    Principal reader = Principal::local();
+    reader.scopes = ScopeSet::of ({ Scope::catalogRead, Scope::projectsRead });
+    ctx.setPrincipal (reader);
+
+    auto denied = env.bus.runNow ("track.create", { { "name", "x" } }, ctx);
+    REQUIRE (! denied.ok);
+    CHECK (denied.error->code == errc::forbiddenScope);
+    CHECK (denied.error->message.find ("projects:write") != std::string::npos);
+    CHECK (env.project (id).revision() == before);
+
+    CHECK (env.bus.runNow ("track.list", json::object(), ctx).ok);
+
+    // the local principal (the default) may do everything
+    CommandContext local;
+    local.projectId = id;
+    CHECK (env.bus.runNow ("track.create", { { "name", "x" } }, local).ok);
+
+    // a global admin command is refused to a non-admin principal
+    auto rescan = env.bus.runNow ("plugin.rescan", json::object(), ctx);
+    REQUIRE (! rescan.ok);
+    CHECK (rescan.error->code == errc::forbiddenScope);
+}
+
+ROVOX_TEST (project, a_batch_with_one_forbidden_op_is_rejected_as_a_whole)
+{
+    test::Env env;
+    const auto id = env.newProject ("scoped-batch");
+    const auto before = env.project (id).revision();
+    const auto tracksBefore = env.ok (id, "track.list")["tracks"].size();
+
+    CommandContext ctx;
+    ctx.projectId = id;
+    Principal reader = Principal::local();
+    reader.scopes = ScopeSet::of ({ Scope::projectsRead });
+    ctx.setPrincipal (reader);
+
+    auto r = env.bus.runBatchNow ({ Op { "track.list", json::object() }, Op { "track.create", { { "name", "nope" } } } }, ctx);
+    REQUIRE (! r.ok);
+    CHECK (r.error->code == errc::forbiddenScope);
+    CHECK (env.project (id).revision() == before);
+    CHECK (env.ok (id, "track.list")["tracks"].size() == tracksBefore);
+
+    reader.scopes.add (Scope::projectsWrite);
+    ctx.setPrincipal (reader);
+    CHECK (env.bus.runBatchNow ({ Op { "track.list", json::object() }, Op { "track.create", { { "name", "yes" } } } }, ctx).ok);
 }
