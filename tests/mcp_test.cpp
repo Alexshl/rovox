@@ -340,7 +340,7 @@ ROVOX_TEST (mcp, tools_list_has_schemas_unique_names_and_pagination)
         CHECK (! t["description"].get<std::string>().empty());
 
         // every project tool takes project_id; only these may go without
-        static const std::set<std::string> global = { "project.list", "project.new", "project.open", "job.get", "job.cancel", "job.list", "events.poll", "upload.status",
+        static const std::set<std::string> global = { "project.list", "project.new", "project.open", "job.get", "job.cancel", "job.list", "events.poll", "upload.status", "upload.finish",
                                                       "project.catalog", "plugin.catalog", "plugin.rescan", "plugin.probe", "plugin.tag", "plugin.unblacklist",
                                                       "template.list", "template.get", "template.delete", "delivery.list_adapters",
                                                       "recipe.list", "recipe.get", "recipe.save", "recipe.delete" };

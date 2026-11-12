@@ -11,6 +11,8 @@
 
 #include <atomic>
 #include <fstream>
+#include <iterator>
+#include <set>
 #include <thread>
 
 using namespace rovox;
@@ -281,7 +283,7 @@ ROVOX_TEST (upload, memory_does_not_grow_with_a_large_streamed_upload)
     fs::remove (f.server->uploads().completedPath (loc.substr (loc.rfind ('/') + 1)), ec);
 }
 
-ROVOX_TEST (upload, cleanup_removes_stale_unfinished_uploads_only)
+ROVOX_TEST (upload, cleanup_removes_stale_unfinished_uploads_and_finished_ones_after_the_ttl)
 {
     UploadLimits limits;
     limits.ttl = std::chrono::seconds (60);
@@ -292,9 +294,10 @@ ROVOX_TEST (upload, cleanup_removes_stale_unfinished_uploads_only)
     REQUIRE (done.ok());
     REQUIRE (store.append (done.value().id, 0, "abcd", 4).ok());
     CHECK (store.cleanup (std::time (nullptr)) == 0);
-    CHECK (store.cleanup (std::time (nullptr) + 3600) == 1);
-    CHECK (! store.info (stale.value().id).ok());
     CHECK (store.info (done.value().id).ok());
+    CHECK (store.cleanup (std::time (nullptr) + 3600) == 2);
+    CHECK (! store.info (stale.value().id).ok());
+    CHECK (! store.info (done.value().id).ok());
 }
 
 ROVOX_TEST (upload, sha1_and_base64_known_vectors)
@@ -469,4 +472,178 @@ ROVOX_TEST (upload, hashing_a_finished_upload_does_not_block_other_uploads)
     CHECK (seen.ok());
     CHECK (stillHashing);               // the answer came while the big upload was being hashed
     finisher.join();
+}
+
+namespace
+{
+const std::string testBatch = "bt_0123456789abcdef0123456789abcdef";
+
+std::string slurp (const fs::path& p)
+{
+    std::ifstream in (p, std::ios::binary);
+    return { std::istreambuf_iterator<char> (in), std::istreambuf_iterator<char>() };
+}
+
+/** Uploads every {relpath, bytes} into the store as one batch (relpaths go in unchecked, like a hostile tus client's metadata). */
+void uploadFiles (UploadStore& store, const std::string& batch, const std::vector<std::pair<std::string, std::string>>& files)
+{
+    for (auto& [rel, data] : files)
+    {
+        auto u = store.create (data.size(), { { "filename", fs::path (rel).filename().string() }, { "relpath", rel }, { "batch_id", batch } });
+        REQUIRE (u.ok());
+        REQUIRE (store.append (u.value().id, 0, data.data(), data.size()).ok());
+    }
+}
+
+std::string wavBytes (double hz, double seconds)
+{
+    const auto p = test::makeTempDir ("upwav") / "x.wav";
+    test::writeWav (p, { test::sine (hz, -18.0, seconds, 44100.0) }, 44100.0, 24);
+    return slurp (p);
+}
+} // namespace
+
+ROVOX_TEST (upload, finish_materialises_a_batch_that_import_plan_can_read)
+{
+    Fixture f;
+    auto& store = f.server->uploads();
+    uploadFiles (store, testBatch, { { "gtr.wav", wavBytes (220, 1.0) }, { "bass.wav", wavBytes (110, 1.2) }, { "vox.wav", wavBytes (440, 0.9) } });
+
+    auto status = store.batchStatus (testBatch);
+    REQUIRE (status.ok());
+    CHECK (! status.value().contains ("materialised_path"));
+
+    auto r = store.finish (testBatch);
+    REQUIRE (r.ok());
+    const auto path = fs::path (r.value()["path"].get<std::string>());
+    CHECK (r.value()["detected"] == "audio");
+    CHECK (r.value()["files"].size() == 3);
+    CHECK (fs::exists (path / "gtr.wav"));
+    CHECK (fs::is_regular_file (path / "bass.wav"));
+    CHECK (r.value()["files"][0]["sha256"].get<std::string>() == sha256Hex (slurp (path / r.value()["files"][0]["relpath"].get<std::string>())));
+
+    status = store.batchStatus (testBatch);
+    REQUIRE (status.ok());
+    CHECK (status.value()["materialised_path"].get<std::string>() == path.string());
+
+    const auto id = f.env.newProject ("up");
+    auto plan = f.env.ok (id, "import.plan", { { "paths", { path.string() } } });
+    REQUIRE (plan["tracks"].size() == 3);
+    std::set<std::string> names;
+
+    for (auto& t : plan["tracks"])
+        names.insert (t["clips"][0]["file"].get<std::string>());
+
+    CHECK (names == std::set<std::string> { "gtr.wav", "bass.wav", "vox.wav" });
+}
+
+ROVOX_TEST (upload, finish_is_idempotent_and_refuses_unfinished_batches)
+{
+    Fixture f;
+    auto& store = f.server->uploads();
+    auto pending = store.create (10, { { "filename", "a.wav" }, { "relpath", "a.wav" }, { "batch_id", testBatch } });
+    REQUIRE (pending.ok());
+    CHECK (! store.finish (testBatch).ok());
+
+    REQUIRE (store.append (pending.value().id, 0, "0123456789", 10).ok());
+    auto first = store.finish (testBatch);
+    auto second = store.finish (testBatch);
+    REQUIRE (first.ok());
+    REQUIRE (second.ok());
+    CHECK (first.value() == second.value());
+    CHECK (! store.finish ("bt_zz").ok());
+}
+
+ROVOX_TEST (upload, finish_detects_a_zoom_r20_project_folder)
+{
+    Fixture f;
+    auto& store = f.server->uploads();
+    const auto folder = test::makeR20Folder (test::makeTempDir ("r20up"), "ZOOM0001.zprj", 3, 1.0);
+    std::vector<std::pair<std::string, std::string>> files;
+
+    for (auto& e : fs::recursive_directory_iterator (folder))
+        if (e.is_regular_file())
+            files.push_back ({ "ZOOM0001.zprj/" + fs::relative (e.path(), folder).generic_string(), slurp (e.path()) });
+
+    uploadFiles (store, testBatch, files);
+    auto r = store.finish (testBatch);
+    REQUIRE (r.ok());
+    CHECK (r.value()["detected"] == "zoom_r20");
+    const auto path = fs::path (r.value()["path"].get<std::string>());
+    CHECK (path.filename() == "ZOOM0001.zprj");
+    CHECK (fs::exists (path / "R20PRJDATA.r20prj"));
+
+    const auto id = f.env.newProject ("r20up");
+    auto plan = f.env.ok (id, "import.plan", { { "paths", { path.string() } } });
+    CHECK (plan["detected_source"] == "zoom_r20");
+    CHECK (plan["tracks"].size() == 3);
+    CHECK (plan["tracks"][0]["name"] == "REC01");
+
+    const auto dir = store.materialisedDir (testBatch);
+    f.env.ok (id, "import.apply", { { "plan_id", plan["plan_id"] } });
+    CHECK (! fs::exists (dir));                     // the media is in the project now; the upload copy is gone
+}
+
+ROVOX_TEST (upload, finish_neutralises_hostile_relpaths_and_resolves_collisions)
+{
+    Fixture f;
+    auto& store = f.server->uploads();
+    const std::string withControl = std::string ("ctl") + '\x01' + '\n' + "x.wav";
+    uploadFiles (store, testBatch, { { "../../evil.wav", "1" }, { "/etc/passwd", "2" }, { "a//b/./../c.wav", "3" }, { "dup.wav", "4" }, { "dup.wav", "5" },
+                                     { withControl, "6" }, { std::string (400, 'n') + ".wav", "7" } });
+    auto r = store.finish (testBatch);
+    REQUIRE (r.ok());
+    const auto dir = store.materialisedDir (testBatch);
+    std::set<std::string> rels;
+
+    for (auto& file : r.value()["files"])
+    {
+        const auto rel = file["relpath"].get<std::string>();
+        rels.insert (rel);
+        CHECK (rel.find ("..") == std::string::npos);
+        CHECK (rel[0] != '/');
+        CHECK (fs::weakly_canonical (dir / rel).string().rfind (fs::weakly_canonical (dir).string(), 0) == 0);
+
+        for (auto& seg : fs::path (rel))
+            CHECK (seg.string().size() <= 255);
+    }
+
+    CHECK (rels.count ("evil.wav") == 1);
+    CHECK (rels.count ("etc/passwd") == 1);
+    CHECK (rels.count ("a/b/c.wav") == 1);
+    CHECK (rels.count ("dup.wav") == 1);
+    CHECK (rels.count ("dup (2).wav") == 1);
+    CHECK (rels.count ("ctlx.wav") == 1);
+    CHECK (! fs::exists (dir.parent_path() / "evil.wav"));
+    CHECK (! fs::exists (dir.parent_path().parent_path() / "evil.wav"));
+}
+
+ROVOX_TEST (upload, a_single_upload_without_a_batch_finishes_to_its_filename)
+{
+    Fixture f;
+    auto& store = f.server->uploads();
+    auto u = store.create (3, { { "filename", "take 1.wav" } });
+    REQUIRE (u.ok());
+    REQUIRE (store.append (u.value().id, 0, "abc", 3).ok());
+    auto r = store.finish (u.value().id);
+    REQUIRE (r.ok());
+    CHECK (r.value()["files"][0]["relpath"] == "take 1.wav");
+    CHECK (r.value()["files"][0]["sha256"].get<std::string>() == sha256Hex ("abc"));
+    CHECK (slurp (store.materialisedDir (u.value().id) / "take 1.wav") == "abc");
+}
+
+ROVOX_TEST (upload, materialised_batches_expire_after_the_ttl_from_completion)
+{
+    UploadLimits limits;
+    limits.ttl = std::chrono::seconds (60);
+    UploadStore store (test::makeTempDir ("store"), limits);
+    uploadFiles (store, testBatch, { { "x/a.wav", "aaaa" }, { "x/b.wav", "bbbb" } });
+    REQUIRE (store.finish (testBatch).ok());
+    const auto dir = store.materialisedDir (testBatch);
+    REQUIRE (fs::exists (dir));
+
+    CHECK (store.cleanup (std::time (nullptr)) == 0);
+    CHECK (fs::exists (dir));
+    CHECK (store.cleanup (std::time (nullptr) + 3600) == 2);
+    CHECK (! fs::exists (dir));
 }

@@ -16,6 +16,8 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string>
+#include <vector>
 
 namespace rovox
 {
@@ -32,7 +34,8 @@ struct UploadInfo
 {
     std::string id, filename, relpath, batchId, sha256;     // sha256: expected hash of the whole file, optional
     std::uint64_t length = 0, offset = 0;
-    std::int64_t createdAt = 0;                              // unix seconds
+    std::int64_t createdAt = 0, completedAt = 0;             // unix seconds
+    std::string placed;                                      // sanitised relpath inside the materialised directory, empty until finish()
     bool complete = false;
 
     json toJson() const;
@@ -88,7 +91,14 @@ public:
     Result<json> createBatch (const json& files);
     Result<json> batchStatus (const std::string& batchId);
 
-    /** Removes unfinished uploads older than the TTL. Returns how many. */
+    /** Materialises a finished batch (`bt_...`) or single upload (`up_...`) as `<root>/<batch_id or upload_id>/<relpath>` by moving the
+        .done files (no copy); idempotent. Returns {path, files:[{relpath, bytes, sha256}], detected: zoom_r20|rpp|audio}. */
+    Result<json> finish (const std::string& batchOrUploadId);
+
+    /** Where the files of a batch / upload are materialised (the directory exists only after finish). */
+    std::filesystem::path materialisedDir (const std::string& batchOrUploadId) const;
+
+    /** Removes unfinished uploads older than the TTL, and finished ones (with their materialised files) older than the TTL after completion. Returns how many. */
     int cleanup (std::int64_t now);
 
     std::filesystem::path completedPath (const std::string& id) const;
@@ -101,6 +111,7 @@ private:
     Result<void> save (const UploadInfo&);
     void releaseWriter (const std::string& id);
     static bool validId (const std::string&);
+    std::vector<UploadInfo> membersOf (const std::string& batchOrUploadId);
 
     std::filesystem::path root_;
     UploadLimits limits_;

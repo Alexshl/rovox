@@ -633,7 +633,13 @@ void registerImportCommands (CommandRegistry& r)
                 return plan.error();
 
             auto j = plan.value().toJson();
-            p.importPlans()[plan.value().planId] = j;
+            auto stored = j;
+            stored["_sources"] = json::array();
+
+            for (auto& source : sources)
+                stored["_sources"].push_back (source.string());
+
+            p.importPlans()[plan.value().planId] = std::move (stored);
             return j;
         }));
 
@@ -671,6 +677,27 @@ void registerImportCommands (CommandRegistry& r)
 
             auto out = applyImportPlan (p, plan.value(), rename);
             out["warnings"] = plan.value().toJson()["warnings"];
+
+            // the media is content-addressed in the project now: drop the materialised upload it was read from
+            if (it->second.contains ("_sources") && it->second["_sources"].is_array())
+            {
+                std::error_code ec;
+                const auto uploads = fs::weakly_canonical (p.host().dataDir() / "uploads", ec);
+
+                for (auto& s : it->second["_sources"])
+                {
+                    const auto rel = fs::weakly_canonical (fs::path (s.get<std::string>()), ec).lexically_relative (uploads);
+
+                    if (rel.empty() || rel.is_absolute() || *rel.begin() == "..")
+                        continue;
+
+                    const auto top = rel.begin()->string();
+
+                    if ((top.rfind ("bt_", 0) == 0 || top.rfind ("up_", 0) == 0) && fs::is_directory (uploads / top, ec))
+                        fs::remove_all (uploads / top, ec);
+                }
+            }
+
             p.importPlans().erase (it);
             return out;
         }));

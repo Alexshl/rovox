@@ -744,6 +744,33 @@ void McpServer::buildTools()
         add (std::move (t));
     }
 
+    if (config_.uploadFinish)
+    {
+        ToolDef t;
+        t.name = "upload.finish";
+        t.title = "Finish upload";
+        t.description = "Makes finished uploads usable: lays the files of a completed batch (or a single upload) out as a folder under the data dir with sanitised names. "
+                        "Returns {path, files:[{relpath, bytes, sha256}], detected: zoom_r20|rpp|audio}; pass path to import.plan (or import.rpp for rpp). Idempotent.";
+        t.inputSchema = schema ({ { "batch_id", str() }, { "upload_id", str() } });
+        t.annotations = { { "idempotentHint", true } };
+        t.handler = [fn = config_.uploadFinish] (ToolCall& c) -> ToolOutput
+        {
+            const auto batch = c.args.value ("batch_id", "");
+            const auto upload = c.args.value ("upload_id", "");
+
+            if (batch.empty() == upload.empty())
+                return ToolOutput::failure (makeError (errc::invalidParams, "pass exactly one of batch_id or upload_id"));
+
+            auto r = fn (batch.empty() ? upload : batch);
+
+            if (! r.ok())
+                return ToolOutput::failure (r.error());
+
+            return ToolOutput::success (r.value());
+        };
+        add (std::move (t));
+    }
+
     // ---- delivery (task 510) -------------------------------------------------------------------------------------
     {
         ToolDef t;
