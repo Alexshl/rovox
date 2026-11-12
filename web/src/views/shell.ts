@@ -11,6 +11,7 @@ import { type ProjectStore, isAgent } from '../store/project';
 import { ArrangeView } from './arrange';
 import { MixerView } from './mixer';
 import { textDialog } from './dialog';
+import { importController } from './importwizard';
 import { openProjectDialog } from './projects';
 import { openRenderDialog } from './render';
 
@@ -121,6 +122,7 @@ export class Shell {
     this.el = h('div', { id: 'app' }, this.menubar, this.tabs, this.transport, this.banner, h('div', { class: 'workspace' }, main, this.mcp), this.toasts);
 
     onLocaleChange(() => this.relabel());
+    app.welcomed.on(() => importController(app).checkResume());
     app.changed.on(() => this.schedule());
     app.audio.onChange(() => this.schedule());
     // the worklet reports ~30 times a second: that touches only the audio button, never the whole shell
@@ -240,6 +242,7 @@ export class Shell {
       menu(t('menu.file'), () => [
         { label: t('menu.file.new'), action: () => void this.promptNewProject() },
         { label: t('menu.file.open'), action: () => openProjectDialog(app) },
+        { label: t('import.menu'), key: 'Ctrl+I', action: () => importController(app).openDialog() },
         { label: t('menu.file.save'), key: 'Ctrl+S', disabled: !p(), action: () => void app.cmd('project.save') },
         { separator: true, label: '' },
         { label: t('menu.file.render'), disabled: !p(), action: () => openRenderDialog(app) },
@@ -444,6 +447,9 @@ export class Shell {
     } else if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();
       void app.cmd('project.save');
+    } else if (mod && e.key.toLowerCase() === 'i') {
+      e.preventDefault();
+      importController(app).openDialog();
     } else if (mod && e.key.toLowerCase() === 'm') {
       e.preventDefault();
       app.updatePrefs({ mixerOpen: !app.prefs.mixerOpen });

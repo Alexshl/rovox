@@ -4,6 +4,7 @@
 // English UI. Written as the product's English wording (pro-audio terms), not a back-translation of the Ukrainian text.
 // English has only `one` and `other`, but the catalog must carry every key of the source, so `few` / `many` repeat `other`.
 import type { MessageKey } from './uk';
+import { enImport } from './parts/en.import';
 
 export const en: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -270,4 +271,5 @@ export const en: Record<MessageKey, string> = {
   'errors.MCP_ERROR': 'The server returned an MCP error. Try again.',
   'errors.BAD_RESPONSE': 'The server answered in an unexpected format. Reload the page.',
   'errors.UNKNOWN': 'The action failed. Try again.',
+  ...enImport,
 };

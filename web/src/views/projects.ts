@@ -6,6 +6,7 @@ import { clear, h } from '../lib/dom';
 import { fmtDuration, fmtShortDateTime, plural, t } from '../i18n';
 import type { App } from '../store/session';
 import { openModal } from './dialog';
+import { importController } from './importwizard';
 
 export interface ServerProject {
   project_id: string;
@@ -136,5 +137,7 @@ export function openProjectDialog(app: App): void {
   const modal = openModal(t('picker.title'), dialog);
   close = modal.close;
   closeBtn.addEventListener('click', close);
+  // files dropped on the picker go into a new project named after the folder or the first file
+  importController(app).attachArea(dialog, { forceNew: true, overlay: false, onDropped: () => close() });
   void picker.refresh().then(() => picker.focus());
 }

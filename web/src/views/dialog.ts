@@ -12,8 +12,15 @@ export interface Modal {
   close: () => void;
 }
 
-/** Shows `dialog` (an element with class "dialog") on a scrim. Esc and a click on the scrim close it; Tab stays inside. */
-export function openModal(title: string, dialog: HTMLElement, onClose?: () => void): Modal {
+export interface ModalOptions {
+  /** Replaces the default "Esc closes" (the upload wizard collapses into a pill instead). */
+  onEscape?: () => void;
+  /** Replaces the default "a click on the scrim closes"; falls back to `onEscape`. */
+  onScrim?: () => void;
+}
+
+/** Shows `dialog` (an element with class "dialog") on a scrim. Esc and a click on the scrim close it (unless `opts` overrides that); Tab stays inside. */
+export function openModal(title: string, dialog: HTMLElement, onClose?: () => void, opts: ModalOptions = {}): Modal {
   const previous = document.activeElement as HTMLElement | null;
   const scrim = h('div', { class: 'scrim', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title } }, dialog);
   let closed = false;
@@ -28,7 +35,7 @@ export function openModal(title: string, dialog: HTMLElement, onClose?: () => vo
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      close();
+      (opts.onEscape ?? close)();
     } else if (e.key === 'Tab') {
       const items = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => !el.hidden);
       if (!items.length) {
@@ -48,7 +55,7 @@ export function openModal(title: string, dialog: HTMLElement, onClose?: () => vo
     }
   });
   scrim.addEventListener('pointerdown', (e) => {
-    if (e.target === scrim) close();
+    if (e.target === scrim) (opts.onScrim ?? opts.onEscape ?? close)();
   });
   document.body.append(scrim);
   return { scrim, close };
