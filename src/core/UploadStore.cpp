@@ -6,6 +6,9 @@
 #include "Sha256.h"
 
 #include <algorithm>
+#include <cctype>
+#include <tuple>
+#include <vector>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -76,6 +79,8 @@ Result<void> UploadStore::save (const UploadInfo& u)
 {
     json j = u.toJson();
     j["created_at"] = u.createdAt;
+    j["completed_at"] = u.completedAt;
+    j["placed"] = u.placed;
     auto tmp = jsonPath (u.id);
     tmp += ".tmp";
 
@@ -116,6 +121,8 @@ Result<UploadInfo> UploadStore::load (const std::string& id)
     u.length = j.value ("length", (std::uint64_t) 0);
     u.complete = j.value ("complete", false);
     u.createdAt = j.value ("created_at", (std::int64_t) 0);
+    u.completedAt = j.value ("completed_at", (std::int64_t) 0);
+    u.placed = j.value ("placed", "");
 
     // the file is the truth about the offset: a crash between write and state update must not lose or duplicate bytes
     const auto part = partPath (id);
@@ -314,6 +321,7 @@ Result<UploadInfo> UploadStore::finishPatch (Writer& w)
                 return makeError (errc::io, "cannot finalise the upload: " + ec.message());
 
             info.complete = true;
+            info.completedAt = std::time (nullptr);
             completed = true;
         }
 
@@ -406,6 +414,7 @@ Result<json> UploadStore::batchStatus (const std::string& batchId)
     json files = json::array();
     std::uint64_t total = 0, done = 0;
     int complete = 0;
+    bool placedAll = true;
     std::error_code ec;
 
     for (auto& e : fs::directory_iterator (root_, ec))
@@ -415,6 +424,7 @@ Result<json> UploadStore::batchStatus (const std::string& batchId)
 
             if (u.ok() && u.value().batchId == batchId)
             {
+                placedAll = placedAll && ! u.value().placed.empty();
                 files.push_back (u.value().toJson());
                 total += u.value().length;
                 done += u.value().offset;
@@ -425,8 +435,278 @@ Result<json> UploadStore::batchStatus (const std::string& batchId)
     if (files.empty())
         return makeError (errc::notFound, "no such batch");
 
-    return json { { "batch_id", batchId }, { "files", files }, { "total_bytes", total }, { "received_bytes", done },
-                  { "completed_files", complete }, { "complete", complete == (int) files.size() } };
+    json out { { "batch_id", batchId }, { "files", files }, { "total_bytes", total }, { "received_bytes", done },
+               { "completed_files", complete }, { "complete", complete == (int) files.size() } };
+
+    if (complete == (int) files.size() && placedAll)
+        out["materialised_path"] = materialisedDir (batchId).string();
+
+    return out;
+}
+
+namespace
+{
+/** Cuts at a UTF-8 boundary so the name stays valid text. */
+std::string cutUtf8 (std::string s, size_t maxBytes)
+{
+    if (s.size() <= maxBytes)
+        return s;
+
+    size_t n = maxBytes;
+
+    while (n > 0 && ((unsigned char) s[n] & 0xC0) == 0x80)
+        --n;
+
+    s.resize (n);
+    return s;
+}
+
+std::string sanitiseSegment (const std::string& in)
+{
+    std::string s;
+
+    for (unsigned char c : in)
+        if (c >= 0x20 && c != 0x7f)
+            s += (char) c;
+
+    const auto b = s.find_first_not_of (' ');
+
+    if (b == std::string::npos)
+        return {};
+
+    s = s.substr (b);
+
+    while (! s.empty() && (s.back() == ' ' || s.back() == '.'))
+        s.pop_back();
+
+    if (s.size() > 255)
+    {
+        const auto ext = fs::path (s).extension().string();
+        s = ext.size() <= 16 ? cutUtf8 (s.substr (0, s.size() - ext.size()), 255 - ext.size()) + ext : cutUtf8 (s, 255);
+    }
+
+    return s;
+}
+
+/** Segments of a client-supplied relative path with everything dangerous dropped: "..", ".", empty parts, control characters, leading slashes. */
+std::vector<std::string> sanitisePath (const std::string& rel)
+{
+    std::vector<std::string> out;
+    std::string cur;
+
+    auto flush = [&]
+    {
+        auto seg = sanitiseSegment (cur);
+        cur.clear();
+
+        if (! seg.empty() && seg != "." && seg != "..")
+            out.push_back (std::move (seg));
+    };
+
+    for (char c : rel)
+    {
+        if (c == '/' || c == '\\')
+            flush();
+        else
+            cur += c;
+    }
+
+    flush();
+
+    if (out.size() > 16)
+        out.erase (out.begin(), out.end() - 16);       // keep the deepest part: the file name matters most
+
+    return out;
+}
+
+std::string lowerAscii (std::string s)
+{
+    std::transform (s.begin(), s.end(), s.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
+    return s;
+}
+
+bool validBatchId (const std::string& id)
+{
+    return id.size() == 35 && id.rfind ("bt_", 0) == 0
+        && std::all_of (id.begin() + 3, id.end(), [] (char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
+} // namespace
+
+fs::path UploadStore::materialisedDir (const std::string& id) const
+{
+    return root_ / id;
+}
+
+std::vector<UploadInfo> UploadStore::membersOf (const std::string& id)      // call with mutex_ held
+{
+    std::vector<UploadInfo> out;
+
+    if (id.rfind ("bt_", 0) == 0)
+    {
+        std::error_code ec;
+
+        for (auto& e : fs::directory_iterator (root_, ec))
+            if (e.path().extension() == ".json" && e.path().filename().string().rfind ("up_", 0) == 0)
+                if (auto u = load (e.path().stem().string()); u.ok() && u.value().batchId == id)
+                    out.push_back (u.value());
+
+        std::sort (out.begin(), out.end(), [] (const UploadInfo& a, const UploadInfo& b) { return std::tie (a.relpath, a.id) < std::tie (b.relpath, b.id); });
+    }
+    else if (auto u = load (id); u.ok())
+    {
+        out.push_back (u.value());
+    }
+
+    return out;
+}
+
+Result<json> UploadStore::finish (const std::string& id)
+{
+    if (! validId (id) && ! validBatchId (id))
+        return makeError (errc::notFound, "no such upload or batch");
+
+    std::vector<UploadInfo> members;
+
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        members = membersOf (id);
+
+        if (members.empty())
+            return makeError (errc::notFound, "no such upload or batch");
+
+        for (auto& m : members)
+            if (! m.complete)
+                return makeError (errc::preconditionFailed, "upload " + m.id + " is not complete yet", json { { "upload_id", m.id }, { "offset", m.offset }, { "length", m.length } });
+
+        const auto dir = materialisedDir (id);
+        std::error_code ec;
+        std::set<std::string> used;
+
+        for (auto& m : members)
+            if (! m.placed.empty())
+                used.insert (lowerAscii (m.placed));
+
+        for (auto& m : members)
+        {
+            if (! m.placed.empty())
+            {
+                if (! fs::exists (dir / fs::path (m.placed), ec))
+                    return makeError (errc::preconditionFailed, "the materialised files were removed (after an import or by expiry)");
+
+                continue;
+            }
+
+            auto segs = id.rfind ("bt_", 0) == 0 ? sanitisePath (m.relpath.empty() ? m.filename : m.relpath) : sanitisePath (m.filename);
+
+            if (segs.empty())
+                segs = { "file" };
+
+            auto build = [] (const std::vector<std::string>& s) { std::string r; for (auto& x : s) r += (r.empty() ? "" : "/") + x; return r; };
+            auto rel = build (segs);
+
+            for (int n = 2; used.count (lowerAscii (rel)) != 0 || fs::exists (dir / fs::path (rel), ec); ++n)
+            {
+                auto s2 = segs;
+                const auto name = fs::path (s2.back());
+                const auto ext = name.extension().string();
+                const auto stem = ext.empty() ? name.string() : name.string().substr (0, name.string().size() - ext.size());
+                s2.back() = cutUtf8 (stem, 255 - ext.size() - 8) + " (" + std::to_string (n) + ")" + ext;
+                rel = build (s2);
+            }
+
+            const auto dest = dir / fs::path (rel);
+            fs::create_directories (dest.parent_path(), ec);
+
+            if (ec)
+                return makeError (errc::io, "cannot create " + dest.parent_path().string() + ": " + ec.message());
+
+            fs::rename (completedPath (m.id), dest, ec);
+
+            if (ec)
+                return makeError (errc::io, "cannot materialise the upload: " + ec.message());
+
+            m.placed = rel;
+            used.insert (lowerAscii (rel));
+
+            if (auto r = save (m); ! r.ok())
+                return r.error();
+        }
+    }
+
+    // hashes are computed outside the lock (multi-GB files) and cached in the state file
+    const auto dir = materialisedDir (id);
+    json files = json::array();
+    std::vector<std::string> rels;
+
+    for (auto& m : members)
+    {
+        const auto file = dir / fs::path (m.placed);
+        std::error_code ec;
+        auto hash = m.sha256;
+
+        if (hash.empty())
+        {
+            hash = sha256File (file).value_or ("");
+
+            if (! hash.empty())
+            {
+                std::lock_guard<std::mutex> lock (mutex_);
+
+                if (auto u = load (m.id); u.ok())
+                {
+                    auto upd = u.value();
+                    upd.sha256 = hash;
+                    save (upd);
+                }
+            }
+        }
+
+        files.push_back ({ { "relpath", m.placed }, { "bytes", (std::uint64_t) fs::file_size (file, ec) }, { "sha256", hash } });
+        rels.push_back (m.placed);
+    }
+
+    // a batch that is one folder (ZOOM0001.zprj/...) is addressed by that folder, so import.plan sees a project, not a parent of folders
+    fs::path path = dir;
+    std::string top;
+    bool oneTop = ! rels.empty();
+
+    for (auto& r : rels)
+    {
+        const auto slash = r.find ('/');
+
+        if (slash == std::string::npos || (! top.empty() && r.substr (0, slash) != top))
+        {
+            oneTop = false;
+            break;
+        }
+
+        top = r.substr (0, slash);
+    }
+
+    if (oneTop)
+        path = dir / fs::path (top);
+
+    std::string detected = "audio";
+    std::error_code ec;
+    std::vector<std::string> rpps;
+
+    for (auto& r : rels)
+        if (lowerAscii (fs::path (r).extension().string()) == ".rpp")
+            rpps.push_back (r);
+
+    if (lowerAscii (path.extension().string()) == ".zprj" || fs::exists (path / "R20PRJDATA.r20prj", ec))
+    {
+        detected = "zoom_r20";
+    }
+    else if (! rpps.empty())
+    {
+        detected = "rpp";
+
+        if (rpps.size() == 1)
+            path = dir / fs::path (rpps.front());     // import.rpp takes the .RPP file; media beside it is found by relative path
+    }
+
+    return json { { "path", path.string() }, { "files", files }, { "detected", detected } };
 }
 
 int UploadStore::cleanup (std::int64_t now)
@@ -440,14 +720,42 @@ int UploadStore::cleanup (std::int64_t now)
         if (e.path().extension() == ".json" && e.path().filename().string().rfind ("up_", 0) == 0)
             ids.push_back (e.path().stem().string());
 
-    for (auto& id : ids)
-    {
-        auto u = load (id);
+    std::vector<UploadInfo> infos;
+    std::map<std::string, std::int64_t> newest;         // materialised directory -> latest completion in it
 
-        if (u.ok() && ! u.value().complete && now - u.value().createdAt > limits_.ttl.count())
+    for (auto& id : ids)
+        if (auto u = load (id); u.ok())
         {
-            fs::remove (partPath (id), ec);
-            fs::remove (jsonPath (id), ec);
+            infos.push_back (u.value());
+            auto& n = newest[u.value().batchId.empty() ? id : u.value().batchId];
+            n = std::max (n, u.value().complete ? (u.value().completedAt != 0 ? u.value().completedAt : u.value().createdAt) : now);     // an unfinished member keeps the batch alive
+        }
+
+    std::set<std::string> dirsGone;
+
+    for (auto& u : infos)
+    {
+        if (! u.complete)
+        {
+            if (now - u.createdAt > limits_.ttl.count())
+            {
+                fs::remove (partPath (u.id), ec);
+                fs::remove (jsonPath (u.id), ec);
+                ++removed;
+            }
+
+            continue;
+        }
+
+        const auto key = u.batchId.empty() ? u.id : u.batchId;
+
+        if (now - newest[key] > limits_.ttl.count())
+        {
+            if (dirsGone.insert (key).second)
+                fs::remove_all (materialisedDir (key), ec);
+
+            fs::remove (completedPath (u.id), ec);
+            fs::remove (jsonPath (u.id), ec);
             ++removed;
         }
     }

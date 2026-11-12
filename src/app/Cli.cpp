@@ -705,6 +705,7 @@ int runServe (const Options& o)
 
     auto mcpCfg = mcpConfig (o);
     mcpCfg.uploadBatchStatus = [&server] (const std::string& id) { return server.uploads().batchStatus (id); };
+    mcpCfg.uploadFinish = [&server] (const std::string& id) { return server.uploads().finish (id); };
     McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
     server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .allowedOrigins = o.allowOrigins, .loopbackBind = loopback }); });
 

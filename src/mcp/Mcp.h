@@ -34,6 +34,7 @@ struct McpConfig
     std::vector<std::string> allowedOrigins;    // HTTP: Origin values accepted besides loopback
     int sessionTtlS = 1800;                 // idle HTTP sessions expire
     std::function<Result<json> (const std::string&)> uploadBatchStatus;     // set by `serve`; enables upload.status
+    std::function<Result<json> (const std::string&)> uploadFinish;          // set by `serve`; enables upload.finish
     std::function<bool()> audioActive;      // optional
     std::string configFile;                 // TOML with [delivery.*] adapters; empty = $ROVOX_CONFIG, else <data>/config/rovox.toml
 };
