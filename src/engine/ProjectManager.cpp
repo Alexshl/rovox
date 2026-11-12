@@ -11,6 +11,7 @@
 #include <ctime>
 #include <set>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 
 #include <fcntl.h>
@@ -33,7 +34,7 @@ ProjectManager::ProjectManager (EngineHost& host, EventHub& hub) : host_ (host),
 
 ProjectManager::~ProjectManager()
 {
-    closeAll (SaveMode::discard);
+    closeAll (SaveMode::abandon);
 
     if (storage_)
         storage_->setListener ({});         // the storage may outlive us; its uploader thread must not publish into a dead hub
@@ -426,6 +427,8 @@ Result<void> ProjectManager::close (const std::string& id, SaveMode mode)
         result = it->second->save();
     else if (mode == SaveMode::autosave && it->second->dirty())
         result = it->second->autosave();
+    else if (mode == SaveMode::discard)
+        removeAutosavesNewerThanSaved (it->second->dir());
 
     const auto tenant = it->second->tenant();
     projects_.erase (it);
@@ -469,7 +472,7 @@ Result<void> ProjectManager::remove (const std::string& id, const std::string& t
 
     const auto dir = p->dir();
     const bool mirrored = storage_ != nullptr && ! p->manifest().ephemeral;
-    close (id, SaveMode::discard);
+    close (id, SaveMode::abandon);
 
     if (mirrored)
         storage_->forget (tenant, id);
@@ -702,7 +705,7 @@ std::time_t parseIso (const std::string& s)
     std::tm tm {};
 
     if (strptime (s.c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm) == nullptr)
-        return 0;
+        return -1;                          // unparseable: the caller must not treat it as "created in 1970"
 
     return timegm (&tm);
 }
@@ -725,7 +728,18 @@ std::vector<std::string> ProjectManager::sweepExpired (std::time_t now)
     {
         const auto& m = p->manifest();
 
-        if (m.ephemeral && m.ttlS.has_value() && parseIso (m.createdAt) + *m.ttlS < now && p->activeJobs() == 0)
+        if (! m.ephemeral || ! m.ttlS.has_value() || p->activeJobs() != 0)
+            continue;
+
+        const auto created = parseIso (m.createdAt);
+
+        if (created < 0)
+        {
+            std::cerr << "ttl sweep: project " << id << " has an unparseable created_at, skipped\n";
+            continue;
+        }
+
+        if (created + *m.ttlS < now)
             openExpired.push_back (id);
     }
 
@@ -761,7 +775,15 @@ std::vector<std::string> ProjectManager::sweepExpired (std::time_t now)
             if (doc.is_discarded() || ! doc.value ("ephemeral", false) || ! doc.contains ("ttl_s") || ! doc["ttl_s"].is_number_integer())
                 continue;
 
-            if (parseIso (doc.value ("created_at", "")) + doc["ttl_s"].get<int>() >= now)
+            const auto created = parseIso (doc.value ("created_at", ""));
+
+            if (created < 0)
+            {
+                std::cerr << "ttl sweep: project " << entry.path().filename().string() << " has an unparseable created_at, skipped\n";
+                continue;
+            }
+
+            if (created + doc["ttl_s"].get<long long>() >= now)
                 continue;
 
             // a process that has the project open holds its flock: leave it alone

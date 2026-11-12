@@ -560,18 +560,20 @@ ROVOX_TEST (project, interrupted_save_recovers_old_or_new_revision)
     }
 
     fs::remove (dir / "rovox.json.tmp");
-    REQUIRE (env.pm.close (id, SaveMode::discard).ok());
+    REQUIRE (env.pm.close (id, SaveMode::abandon).ok());
     auto reopened = env.pm.open (dir.string());
     REQUIRE (reopened.ok());
     CHECK (te::getAudioTracks (env.project (reopened.value()).edit()).size() == 2);
 
     // a corrupted edit.xml falls back to the newest autosave
     REQUIRE (env.project (id).autosave().ok());
-    REQUIRE (env.pm.close (id, SaveMode::discard).ok());
+    REQUIRE (env.pm.close (id, SaveMode::abandon).ok());
     std::ofstream (dir / "edit.xml", std::ios::trunc) << "<<< not xml";
     auto r = readProject (dir);
     REQUIRE (r.ok());
     CHECK (! r.value().warnings.empty());
+    CHECK (r.value().editState.getChildWithName (te::IDs::TRACK).isValid());
+    CHECK (r.value().manifest.revision == listAutosaves (dir).back());      // the autosave content was restored, not just flagged
 }
 
 ROVOX_TEST (project, autosave_rotates_and_is_offered_for_recovery)
@@ -592,7 +594,7 @@ ROVOX_TEST (project, autosave_rotates_and_is_offered_for_recovery)
     CHECK ((int) all.size() == autosaveKeep);
     CHECK (all.back() == p.revision());
 
-    REQUIRE (env.pm.close (id, SaveMode::discard).ok());     // crash: newer state only in autosave
+    REQUIRE (env.pm.close (id, SaveMode::abandon).ok());     // crash: newer state only in autosave
     auto plain = readProject (dir);
     REQUIRE (plain.ok());
     REQUIRE (plain.value().newerAutosave.has_value());
@@ -600,6 +602,36 @@ ROVOX_TEST (project, autosave_rotates_and_is_offered_for_recovery)
     auto recovered = env.pm.open (dir.string(), { .preferAutosave = true });
     REQUIRE (recovered.ok());
     CHECK (te::getAudioTracks (env.project (recovered.value()).edit()).size() == 25);
+}
+
+ROVOX_TEST (project, close_discard_drops_unsaved_work_and_the_next_open_shows_the_saved_state)
+{
+    test::Env env;
+    const auto id = env.newProject ("discard");
+    auto& p = env.project (id);
+    const auto dir = p.dir();
+    env.ok (id, "track.create", { { "name", "Saved" } });
+    REQUIRE (p.save().ok());
+    env.ok (id, "track.create", { { "name", "Unsaved 1" } });
+    env.ok (id, "track.create", { { "name", "Unsaved 2" } });
+    REQUIRE (p.autosave().ok());
+    REQUIRE (listAutosaves (dir).back() > readProject (dir).value().manifest.revision);
+
+    REQUIRE (env.pm.close (id, SaveMode::discard).ok());
+
+    const auto projects = env.pm.catalog ("local");
+    const auto it = std::find_if (projects.begin(), projects.end(), [&] (const json& j) { return j["project_id"] == id; });
+    REQUIRE (it != projects.end());
+    CHECK ((*it)["unsaved"] == false);
+    CHECK ((*it)["tracks"] == 1);
+
+    auto plain = readProject (dir);
+    REQUIRE (plain.ok());
+    CHECK (! plain.value().newerAutosave.has_value());
+
+    auto reopened = env.pm.open (dir.string());
+    REQUIRE (reopened.ok());
+    CHECK (te::getAudioTracks (env.project (reopened.value()).edit()).size() == 1);
 }
 
 ROVOX_TEST (project, catalog_counts_tracks_of_a_closed_project_from_the_newest_autosave_including_folder_children)
@@ -619,7 +651,7 @@ ROVOX_TEST (project, catalog_counts_tracks_of_a_closed_project_from_the_newest_a
         REQUIRE (edit.insertNewAudioTrack (te::TrackInsertPoint (folder.get(), nullptr), nullptr) != nullptr);
     }
     REQUIRE (p.autosave().ok());                            // the content exists only in autosave/<rev>.rvx
-    REQUIRE (env.pm.close (id, SaveMode::discard).ok());
+    REQUIRE (env.pm.close (id, SaveMode::abandon).ok());
 
     const auto projects = env.pm.catalog ("local");
     const auto it = std::find_if (projects.begin(), projects.end(), [&] (const json& j) { return j["project_id"] == id; });
@@ -998,4 +1030,52 @@ ROVOX_TEST (project, every_mutating_command_is_exactly_one_step)
 
         CHECK (redone == after);
     }
+}
+
+ROVOX_TEST (project, if_revision_from_the_response_survives_delayed_follow_up_writes_and_a_gesture_stays_one_undo_step)
+{
+    test::Env env;
+    const auto id = env.newProject ("followup");
+    const auto track = env.ok (id, "track.create", { { "name", "T" } })["track_id"].get<std::string>();
+
+    auto added = env.run (id, "fx.add", { { "track_id", track }, { "builtin", "reverb" } });
+    REQUIRE (added.ok);
+    const auto plugin = added.data["plugin_id"].get<std::string>();
+    test::pumpMessages (600);                               // Tracktion's delayed writes land as system revisions
+
+    auto next = env.run (id, "fx.update", { { "plugin_id", plugin }, { "enabled", true } }, added.revision);
+    CHECK (next.ok);
+
+    // a genuinely newer user revision still conflicts
+    env.ok (id, "track.update", { { "track_id", track }, { "pan", 0.1 } });
+    CHECK (! env.run (id, "track.update", { { "track_id", track }, { "pan", 0.2 } }, added.revision).ok);
+
+    // gesture after fx.add: 20 coalesced updates are one undo step
+    auto added2 = env.run (id, "fx.add", { { "track_id", track }, { "builtin", "delay" } });
+    REQUIRE (added2.ok);
+    const auto plugin2 = added2.data["plugin_id"].get<std::string>();
+    const auto steps = env.ok (id, "history.list")["undo"].size();
+    test::pumpMessages (600);
+
+    for (int i = 0; i < 20; ++i)
+    {
+        CommandContext ctx;
+        ctx.projectId = id;
+        ctx.origin = { Origin::Kind::ui, "ws_9", "ui" };
+        ctx.coalesce = i > 0;
+        REQUIRE (env.bus.runNow ("fx.update", { { "plugin_id", plugin2 }, { "enabled", i % 2 == 0 } }, ctx).ok);
+    }
+
+    CHECK (env.ok (id, "history.list")["undo"].size() == steps + 1);
+}
+
+ROVOX_TEST (project, ttl_has_a_maximum_and_an_unparseable_created_at_is_never_swept)
+{
+    test::Env env;
+    CHECK (! env.run ("", "project.new", { { "name", "x" }, { "ephemeral", true }, { "ttl_s", 99999999999LL } }).ok);
+
+    const auto temp = env.newProject ("bad-date", true, 1);
+    env.project (temp).manifest().createdAt = "garbage";
+    CHECK (env.pm.sweepExpired (std::time (nullptr) + 100000).empty());
+    CHECK (env.pm.find (temp) != nullptr);
 }

@@ -1009,3 +1009,11 @@ ROVOX_TEST (fx, lv2_parameters_come_with_a_display_text)
     if (requireImagePlugins())
         CHECK (checked >= 10);
 }
+
+ROVOX_TEST (templates, a_template_id_with_path_segments_is_refused)
+{
+    test::Env env;
+    auto r = env.run ("", "template.get", { { "template_id", "../other" } });
+    CHECK (! r.ok);
+    CHECK (r.error.has_value() && r.error->code == errc::invalidParams);
+}

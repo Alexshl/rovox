@@ -51,6 +51,7 @@ std::unique_ptr<te::Edit> createEditForProject (te::Engine& engine, const fs::pa
 Project::Project (EngineHost& host, fs::path dir, Manifest manifest, juce::ValueTree editState, PublishFn publish)
     : host_ (host), dir_ (std::move (dir)), manifest_ (std::move (manifest)), publish_ (std::move (publish)), strip_ (manifest_.tenantId), revision_ (manifest_.revision)
 {
+    lastUserRevision_ = revision_.load();
     std::error_code ec;
 
     for (const char* sub : { "media", "renders", "peaks", "autosave" })
@@ -157,6 +158,9 @@ std::uint64_t Project::commit (const Origin& origin, const std::string& undoLabe
     const auto rev = ++revision_;
     manifest_.revision = rev;
     dirty_ = true;
+
+    if (origin.kind != Origin::Kind::system)
+        lastUserRevision_ = rev;
 
     if (publish_)
         publish_ (*this, { rev, origin, undoLabel, std::move (changes) });

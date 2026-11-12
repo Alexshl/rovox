@@ -226,7 +226,8 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
     const auto t0 = std::chrono::steady_clock::now();
 
     // 1. optimistic concurrency
-    if (ctx.ifRevision.has_value() && *ctx.ifRevision != project.revision())
+    // (a revision that only trails Tracktion's delayed follow-up writes of the last command is still current)
+    if (ctx.ifRevision.has_value() && *ctx.ifRevision != project.revision() && *ctx.ifRevision < project.lastUserRevision())
         return CommandResult::fail (makeError (errc::revisionConflict, "project revision is " + std::to_string (project.revision()) + ", expected "
                                                                           + std::to_string (*ctx.ifRevision),
                                                json { { "current_revision", project.revision() }, { "expected_revision", *ctx.ifRevision } }),
@@ -261,12 +262,13 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
     // a gesture (fader drag) continues the previous undo step when that step is the newest one, was made by the same session
     // and nothing else changed the project since
     const bool coalesce = ctx.coalesce && mutating && ! manual && ! isBatch && ! project.undoSteps().empty()
-                          && project.undoSteps().back().revision == project.revision() && project.undoSteps().back().origin.session == ctx.origin.session;
+                          && project.undoSteps().back().revision >= project.lastUserRevision() && project.undoSteps().back().origin.session == ctx.origin.session;
 
     // 3. transaction + change scope
     if (mutating && ! manual && ! coalesce)
         undo.beginNewTransaction (toJuce (label));
 
+    const auto actionsBefore = undo.getNumActionsInCurrentTransaction();
     project.collector().beginScope();
 
     CommandResult result;
@@ -302,7 +304,25 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
     if (failure.has_value() && mutating && ! manual && ! coalesce)
         undo.undoCurrentTransactionOnly();      // inside the scope: the rollback itself is not reported as a change
 
+    // a failed command of a gesture left partial changes in the step it was merged into. The UndoManager cannot take back only the tail of a
+    // transaction, so the whole gesture step goes (redoable); its removal is reported as a change of its own
+    bool gestureRolledBack = false;
+
+    if (failure.has_value() && coalesce && undo.getNumActionsInCurrentTransaction() > actionsBefore && undo.undoCurrentTransactionOnly())
+    {
+        gestureRolledBack = true;
+
+        if (! project.undoSteps().empty())
+        {
+            project.redoSteps().push_back (project.undoSteps().back());
+            project.undoSteps().pop_back();
+        }
+    }
+
     auto changes = project.collector().endScope();
+
+    if (gestureRolledBack && ! changes.empty())
+        project.commit (ctx.origin, "rollback: " + label, changes);
     const auto ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
 
     json logEntry { { "t", nowIso8601() }, { "origin", ctx.origin.toJson() }, { "name", isBatch ? "batch" : ops[0].name },

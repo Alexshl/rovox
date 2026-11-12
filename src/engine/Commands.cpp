@@ -110,7 +110,7 @@ te::AudioTrack* audioTrack (Project& p, const std::string& id)
 void registerProjectCommands (CommandRegistry& r)
 {
     r.add (makeGlobalCommand ("project.new",
-        obj ({ { "name", str() }, { "ephemeral", boolean() }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 } } }, { "sample_rate", numRange (8000, 192000) } }),
+        obj ({ { "name", str() }, { "ephemeral", boolean() }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 2592000 } } }, { "sample_rate", numRange (8000, 192000) } }),
         obj ({ { "project_id", str() } }), false,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {
@@ -191,7 +191,7 @@ void registerProjectCommands (CommandRegistry& r)
             return json::object();
         }));
 
-    r.add (makeGlobalCommand ("project.set_ttl", obj ({ { "project_id", strMin (1) }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 } } }, { "ephemeral", boolean() } }, { "project_id", "ttl_s" }),
+    r.add (makeGlobalCommand ("project.set_ttl", obj ({ { "project_id", strMin (1) }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 2592000 } } }, { "ephemeral", boolean() } }, { "project_id", "ttl_s" }),
         obj ({ { "ttl_s", integer() } }), true,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {

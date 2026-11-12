@@ -91,6 +91,9 @@ public:
     ProjectMixerStrip& strip()                  { return strip_; }
 
     std::uint64_t revision() const noexcept     { return revision_.load(); }
+    /** Revision of the newest commit that did not come from Tracktion's own delayed housekeeping (origin system). A client that holds a revision at or
+        after it is only behind such follow-up writes (e.g. a plugin reordered after fx.add) and has missed nothing it needs to see. */
+    std::uint64_t lastUserRevision() const noexcept     { return lastUserRevision_.load(); }
     bool dirty() const noexcept                 { return dirty_.load(); }
     std::atomic<int>& activeJobs()              { return activeJobs_; }              // the TTL sweeper never deletes while > 0
     std::vector<HistoryStep>& undoSteps()       { return undoSteps_; }
@@ -141,6 +144,7 @@ private:
     ActivityLog activity_;
     ProjectMixerStrip strip_;
     std::atomic<std::uint64_t> revision_ { 0 };
+    std::atomic<std::uint64_t> lastUserRevision_ { 0 };
     std::atomic<bool> dirty_ { false };
     std::atomic<int> activeJobs_ { 0 };
     std::atomic<std::uint64_t> acceptedRevision_ { 0 };

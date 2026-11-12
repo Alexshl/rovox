@@ -31,7 +31,9 @@ struct OpenOptions
     bool preferAutosave = false;    // crash recovery: open the newest autosave instead of the main files
 };
 
-enum class SaveMode { save, autosave, discard };
+/** discard drops unsaved work for good (autosaves newer than the saved revision are deleted); abandon just stops, leaving the disk as it is
+    (what a crash leaves behind: the next open offers the autosave). */
+enum class SaveMode { save, autosave, discard, abandon };
 
 struct ProjectSummary
 {

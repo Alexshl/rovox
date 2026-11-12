@@ -414,6 +414,20 @@ Result<void> writeAutosave (const fs::path& dir, const juce::ValueTree& editStat
     return {};
 }
 
+void removeAutosavesNewerThanSaved (const fs::path& dir)
+{
+    const auto saved = readProject (dir);
+
+    if (! saved.ok())
+        return;                                         // unreadable main files: the autosaves may be all that is left
+
+    std::error_code ec;
+
+    for (auto rev : listAutosaves (dir))
+        if (rev > saved.value().manifest.revision)
+            fs::remove_all (dir / "autosave" / (std::to_string (rev) + ".rvx"), ec);
+}
+
 Result<LoadedProject> readAutosave (const fs::path& dir, std::uint64_t revision)
 {
     return readProject (dir / "autosave" / (std::to_string (revision) + ".rvx"));

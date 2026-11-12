@@ -501,8 +501,13 @@ json applyImportPlan (Project& p, const ImportPlan& plan, const std::map<std::st
     if (empty && ! plan.tracks.empty() && ! plan.tracks[0].clips.empty())
         p.manifest().sampleRate = plan.tracks[0].clips[0].info.sampleRate;      // an empty project adopts the rate of its first file
 
+    // a failure part-way is rolled back by the command bus for the tree; the manifest lives outside it, so undo its additions here
+    const auto mediaBefore = p.manifest().media.size();
+    const auto rateBefore = p.manifest().sampleRate;
     json tracksOut = json::array();
 
+    try
+    {
     for (auto& tp : plan.tracks)
     {
         auto track = edit.insertNewAudioTrack (te::TrackInsertPoint::getEndOfTracks (edit), nullptr);
@@ -542,6 +547,17 @@ json applyImportPlan (Project& p, const ImportPlan& plan, const std::map<std::st
 
         ChangeCollector::assignMissingIds (track->state);
         tracksOut.push_back ({ { "track_id", Project::idOf (track->state) }, { "name", name }, { "item_ids", items } });
+    }
+    }
+    catch (...)
+    {
+        auto& media = p.manifest().media;
+
+        if (media.size() > mediaBefore)
+            media.erase (media.begin() + (std::ptrdiff_t) mediaBefore, media.end());
+
+        p.manifest().sampleRate = rateBefore;
+        throw;
     }
 
     return { { "tracks", tracksOut } };

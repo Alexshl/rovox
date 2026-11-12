@@ -121,6 +121,11 @@ std::string RppNode::toText (int indent) const
     return out.str();
 }
 
+namespace
+{
+constexpr int maxRppDepth = 64;
+}
+
 Result<RppNode> parseRpp (const std::string& text)
 {
     std::istringstream in (text);
@@ -150,6 +155,10 @@ Result<RppNode> parseRpp (const std::string& text)
                 node.name = tokens[0];
                 node.args.assign (tokens.begin() + 1, tokens.end());
             }
+
+            // bounded nesting also bounds the recursion of the node destructor and of toText()
+            if ((int) stack.size() >= maxRppDepth)
+                return makeError (errc::invalidParams, "RPP line " + std::to_string (lineNo) + ": blocks are nested deeper than " + std::to_string (maxRppDepth));
 
             stack.push_back (std::move (node));
         }
