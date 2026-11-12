@@ -9,7 +9,9 @@
 //   cursor = kursors          grid = režģis             snap = piesaiste          bit depth = bitu dziļums
 //   dropout (underrun) = pārtraukums   sample = sempls  loudness = skaļums (LUFS)  token = piekļuves marķieris
 // Latvian plural: `one` (1, 21, 31 ...) and `other`; `few` / `many` repeat `other`.
+import { lvImport } from './parts/lv.import';
 import type { MessageKey } from './uk';
+import { lvNarrow } from './parts/lv.narrow';
 
 export const lv: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -276,4 +278,6 @@ export const lv: Record<MessageKey, string> = {
   'errors.MCP_ERROR': 'Serveris atgrieza MCP kļūdu. Mēģiniet vēlreiz.',
   'errors.BAD_RESPONSE': 'Serveris atbildēja nesaprotamā formātā. Atsvaidziniet lapu.',
   'errors.UNKNOWN': 'Neizdevās veikt darbību. Mēģiniet vēlreiz.',
+  ...lvImport,
+  ...lvNarrow,
 };

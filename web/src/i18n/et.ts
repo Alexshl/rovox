@@ -9,7 +9,9 @@
 //   cursor = kursor           grid = ruudustik          snap = joondus            bit depth = bitisügavus
 //   dropout (underrun) = katkestus   sample = sämpel     loudness = valjusus (LUFS)  token = juurdepääsuluba
 // Estonian plural: `one` (1) and `other` (partitive singular after numerals); `few` / `many` repeat `other`.
+import { etImport } from './parts/et.import';
 import type { MessageKey } from './uk';
+import { etNarrow } from './parts/et.narrow';
 
 export const et: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -276,4 +278,6 @@ export const et: Record<MessageKey, string> = {
   'errors.MCP_ERROR': 'Server tagastas MCP vea. Proovi uuesti.',
   'errors.BAD_RESPONSE': 'Server vastas arusaamatus vormingus. Värskenda lehte.',
   'errors.UNKNOWN': 'Toimingut ei õnnestunud teha. Proovi uuesti.',
+  ...etImport,
+  ...etNarrow,
 };
