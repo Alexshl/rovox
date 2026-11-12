@@ -14,6 +14,7 @@
 #include "McpStdio.h"
 #include "PluginCatalog.h"
 #include "RenderJobs.h"
+#include "Scopes.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 #include "MockServer.h"
@@ -2391,4 +2392,124 @@ ROVOX_TEST (mcp, capabilities_match_behaviour_and_instructions_have_no_empty_sou
     });
 
     CHECK (seen);
+}
+
+//==============================================================================
+// scopes (E11-03)
+
+namespace
+{
+std::shared_ptr<mcp::Session> scopedSession (Harness& h, ScopeSet scopes)
+{
+    Principal p = Principal::local();
+    p.scopes = scopes;
+    p.authMode = "token";
+    p.keyId = "k_test";
+    auto s = h.server.createSession (p);
+    h.rpc ("initialize", { { "protocolVersion", "2025-06-18" }, { "capabilities", json::object() }, { "clientInfo", { { "name", "scoped" } } } }, 1, s.get());
+    mcp::RequestContext rc;
+    h.server.handle (*s, { { "jsonrpc", "2.0" }, { "method", "notifications/initialized" } }, rc);
+    return s;
+}
+
+std::set<std::string> listedTools (Harness& h, mcp::Session& s)
+{
+    std::set<std::string> names;
+    json params = json::object();
+
+    for (int page = 0; page < 20; ++page)
+    {
+        auto r = h.rpc ("tools/list", params, 2, &s);
+        REQUIRE (r.contains ("result"));
+
+        for (auto& t : r["result"]["tools"])
+            names.insert (t["name"].get<std::string>());
+
+        if (! r["result"].contains ("nextCursor"))
+            break;
+
+        params = { { "cursor", r["result"]["nextCursor"] } };
+    }
+
+    return names;
+}
+} // namespace
+
+ROVOX_TEST (mcp, every_tool_has_a_scope_entry)
+{
+    mcp::McpConfig cfg;
+    cfg.reaperCompat = true;
+    Harness h ({}, cfg);
+    std::string missing;
+
+    for (auto* t : h.server.tools())
+        if (! hasScopeEntry (t->name))
+            missing += t->name + " ";
+
+    if (! missing.empty())
+        std::cerr << "    tools without a scope entry: " << missing << "\n";
+
+    CHECK (missing.empty());
+}
+
+ROVOX_TEST (mcp, a_catalog_reader_cannot_call_render_start_and_does_not_see_it)
+{
+    Harness h;
+    const auto id = h.newProject ("scoped-mcp");
+    auto reader = scopedSession (h, ScopeSet::of ({ Scope::catalogRead }));
+
+    auto listed = listedTools (h, *reader);
+    CHECK (listed.count ("plugin.catalog") == 1);
+    CHECK (listed.count ("render.start") == 0);
+    CHECK (listed.count ("track.create") == 0);
+    CHECK (listed.count ("plugin.rescan") == 0);
+
+    auto denied = h.tool ("render.start", { { "project_id", id }, { "name", "mix" } }, reader.get());
+    CHECK (denied["ok"] == false);
+    CHECK (denied["error"]["code"] == errc::forbiddenScope);
+
+    // a command-backed tool is refused as well
+    auto create = h.tool ("track.create", { { "project_id", id }, { "name", "x" } }, reader.get());
+    CHECK (create["error"]["code"] == errc::forbiddenScope);
+
+    // and so is the underscore spelling
+    CHECK (h.tool ("render_start", { { "project_id", id }, { "name", "mix" } }, reader.get())["error"]["code"] == errc::forbiddenScope);
+
+    // a batch carrying a forbidden op is refused
+    auto batch = h.tool ("batch", { { "project_id", id }, { "ops", json::array ({ { { "tool", "track.create" }, { "arguments", { { "name", "y" } } } } }) } }, reader.get());
+    CHECK (batch["error"]["code"] == errc::forbiddenScope);
+
+    // what the scope allows still works
+    CHECK (h.tool ("plugin.catalog", json::object(), reader.get())["ok"] == true);
+}
+
+ROVOX_TEST (mcp, job_cancel_needs_the_scope_of_the_jobs_kind)
+{
+    Harness h;
+    const auto id = h.newProject ("scoped-cancel");
+    const auto dir = test::makeTempDir ("scoped-cancel");
+    test::writeWav (dir / "a.wav", { test::sine (330.0, -20.0, 1500.0, 8000.0) }, 8000.0, 16);
+    auto plan = h.data ("import.plan", { { "project_id", id }, { "paths", { (dir / "a.wav").string() } } });
+    h.data ("import.apply", { { "project_id", id }, { "plan_id", plan["result"]["plan_id"] } });
+    auto started = h.tool ("render.start", { { "project_id", id }, { "name", "slow" } });
+    REQUIRE (started["ok"] == true);
+    const auto jobId = started["data"]["job_id"].get<std::string>();
+
+    auto reader = scopedSession (h, ScopeSet::of ({ Scope::projectsRead, Scope::projectsWrite }));
+    auto denied = h.tool ("job.cancel", { { "job_id", jobId } }, reader.get());
+    CHECK (denied["error"]["code"] == errc::forbiddenScope);
+
+    h.tool ("job.cancel", { { "job_id", jobId } });
+    h.waitJob (jobId);
+}
+
+ROVOX_TEST (mcp, the_local_principal_sees_every_tool)
+{
+    mcp::McpConfig cfg;
+    cfg.reaperCompat = true;
+    Harness h ({}, cfg);
+    auto listed = listedTools (h, *h.session);
+    CHECK (listed.size() == h.server.tools().size());
+    CHECK (listed.count ("render.start") == 1);
+    CHECK (listed.count ("plugin.rescan") == 1);
 }

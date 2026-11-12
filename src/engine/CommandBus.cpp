@@ -5,6 +5,7 @@
 
 #include "JsonSchema.h"
 #include "ProjectManager.h"
+#include "Scopes.h"
 
 #include <chrono>
 
@@ -157,6 +158,9 @@ CommandResult CommandBus::runNow (const std::string& name, const json& params, c
     if (cmd == nullptr)
         return CommandResult::fail (makeError (errc::notFound, "unknown command " + name));
 
+    if (auto missing = missingScope (ctx.principal, name))
+        return CommandResult::fail (forbiddenScopeError (*missing, name));
+
     if (cmd->isGlobal())
     {
         if (auto v = validateJson (cmd->paramsSchema(), params); ! v.ok())
@@ -199,6 +203,12 @@ CommandResult CommandBus::runNow (const std::string& name, const json& params, c
 
 CommandResult CommandBus::runBatchNow (const std::vector<Op>& ops, const CommandContext& ctx)
 {
+    // every op is checked before anything is looked up or applied: one forbidden op rejects the whole batch
+    for (auto& op : ops)
+        if (registry_.find (op.name) != nullptr)
+            if (auto missing = missingScope (ctx.principal, op.name))
+                return CommandResult::fail (forbiddenScopeError (*missing, op.name));
+
     auto* project = projects_.find (ctx.projectId, ctx.tenant);
 
     if (project == nullptr)
