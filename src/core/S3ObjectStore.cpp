@@ -78,6 +78,7 @@ struct Req
     std::string method, key;
     std::map<std::string, std::string> query;
     std::string contentType, payloadHash;
+    std::string ifMatch, ifNoneMatch;       // conditional write headers
     const std::string* body = nullptr;
     fs::path uploadFile;            // PUT streamed from here ...
     std::uint64_t uploadLength = 0;
@@ -217,7 +218,24 @@ public:
         return r.ok() ? Result<void>() : Result<void> (r.error());
     }
 
+    Result<void> putIf (const std::string& key, const std::string& body, const std::string& contentType, const PutCondition& cond) override
+    {
+        auto req = makeReq ("PUT", key);
+        req.contentType = contentType;
+        req.payloadHash = sha256Hex (body);
+        req.body = &body;
+        req.ifMatch = cond.ifMatch;
+        req.ifNoneMatch = cond.ifNoneMatch;
+        auto r = call (req, "PUT " + key);
+        return r.ok() ? Result<void>() : Result<void> (r.error());
+    }
+
     Result<void> putFile (const std::string& key, const fs::path& file, const std::string& contentType) override
+    {
+        return putFileCancellable (key, file, contentType, {});
+    }
+
+    Result<void> putFileCancellable (const std::string& key, const fs::path& file, const std::string& contentType, const CancelCheck& cancel) override
     {
         std::error_code ec;
         const auto size = (std::uint64_t) fs::file_size (file, ec);
@@ -226,7 +244,7 @@ public:
             return makeError (errc::notFound, "cannot read " + file.filename().string() + ": " + ec.message());
 
         if (size > c_.multipartThreshold)
-            return putMultipart (key, file, size, contentType);
+            return putMultipart (key, file, size, contentType, cancel);
 
         const auto hash = sha256File (file);
 
@@ -384,6 +402,12 @@ private:
         if (! req.contentType.empty())
             sr.headers["content-type"] = req.contentType;
 
+        if (! req.ifMatch.empty())
+            sr.headers["if-match"] = req.ifMatch;
+
+        if (! req.ifNoneMatch.empty())
+            sr.headers["if-none-match"] = req.ifNoneMatch;
+
         std::map<std::string, std::string> signedHeaders;
         const auto authorization = sigv4::authorize (cred, sr, nowSeconds(), signedHeaders);
         httplib::Headers headers;
@@ -512,6 +536,9 @@ private:
         if (code == "NoSuchBucket")
             return makeError (errc::preconditionFailed, scrub (what + ": the bucket does not exist (check S3_BUCKET and S3_ENDPOINT)" + detail), details);
 
+        if (r.status == 412 || code == "ConditionalRequestConflict")
+            return makeError (putConditionFailed, scrub (what + ": the precondition of the write did not hold (the object exists or changed)" + detail), details);
+
         if (r.status == 404)
             return makeError (errc::notFound, scrub (what + ": no such object" + detail), details);
 
@@ -547,7 +574,7 @@ private:
         return failure (last, what);
     }
 
-    Result<void> putMultipart (const std::string& key, const fs::path& file, std::uint64_t size, const std::string& contentType)
+    Result<void> putMultipart (const std::string& key, const fs::path& file, std::uint64_t size, const std::string& contentType, const CancelCheck& cancel)
     {
         auto startReq = makeReq ("POST", key);
         startReq.query["uploads"] = "";
@@ -580,6 +607,12 @@ private:
 
         for (std::uint64_t offset = 0, n = 1; offset < size; offset += partSize, ++n)
         {
+            if (cancel && cancel())
+            {
+                abort();
+                return makeError (errc::cancelled, "the upload of " + key + " was cancelled between parts");
+            }
+
             std::string buf ((size_t) std::min (partSize, size - offset), '\0');
             in.seekg ((std::streamoff) offset);
             in.read (buf.data(), (std::streamsize) buf.size());
