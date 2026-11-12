@@ -363,7 +363,37 @@ ROVOX_TEST (mcp, tools_list_has_schemas_unique_names_and_pagination)
         CHECK (rr["error"]["details"]["available"].is_array());
     }
 
-    // cursor pagination: pages of 100, a cursor beyond the end is empty
+    // walking nextCursor collects every registered tool exactly once
+    {
+        std::multiset<std::string> collected;
+        json params = json::object();
+
+        for (int guard = 0; guard < 100; ++guard)
+        {
+            auto pageResult = h.rpc ("tools/list", params);
+            REQUIRE (pageResult.contains ("result"));
+
+            for (auto& t : pageResult["result"]["tools"])
+                collected.insert (t["name"].get<std::string>());
+
+            if (! pageResult["result"].contains ("nextCursor"))
+                break;
+
+            params = { { "cursor", pageResult["result"]["nextCursor"] } };
+        }
+
+        const auto registered = h.server.tools();
+        CHECK (collected.size() == registered.size());
+
+        for (auto* t : registered)
+            CHECK (collected.count (t->name) == 1);
+
+        // a client that ignores nextCursor still sees everything
+        CHECK (! r["result"].contains ("nextCursor"));
+        CHECK (tools.size() == registered.size());
+    }
+
+    // a cursor beyond the end is empty
     auto page = h.rpc ("tools/list", { { "cursor", "1000" } });
     CHECK (page["result"]["tools"].empty());
     CHECK (h.rpc ("tools/list", { { "cursor", "garbage" } }).contains ("error"));
@@ -2039,4 +2069,113 @@ ROVOX_TEST (mcp, midi_transpose_shifts_exactly_errors_or_folds_out_of_range_note
     CHECK ((pitches() == std::vector<int> { 55, 121, 8 }));
     h.data ("undo", { { "project_id", project } });
     CHECK (pitches() == original);
+}
+
+ROVOX_TEST (mcp, recipe_save_rejects_recipe_and_batch_under_any_alias)
+{
+    Harness h;
+
+    for (auto* tool : { "recipe.run", "recipe_run", "recipe.save", "recipe_save", "batch" })
+    {
+        auto r = h.tool ("recipe.save", { { "recipe", { { "id", "selfcall" }, { "steps", json::array ({ { { "tool", tool } } }) } } } });
+        CHECK (r["ok"] == false);
+        CHECK (r["error"]["code"] == "INVALID_PARAMS");
+    }
+}
+
+ROVOX_TEST (mcp, recipe_run_depth_limit_stops_a_self_calling_recipe)
+{
+    Harness h;
+    const auto dir = h.env.pm.host().dataDir() / "recipes";
+    fs::create_directories (dir);
+
+    // written straight to disk: recipe.save refuses this recipe
+    json loop { { "id", "loop" }, { "name", "Loop" }, { "steps", json::array ({ { { "tool", "recipe_run" }, { "arguments", { { "recipe_id", "loop" } } } } }) } };
+    std::ofstream (dir / "loop.json") << loop.dump();
+
+    auto r = h.tool ("recipe.run", { { "recipe_id", "loop" } });
+    CHECK (r["ok"] == false);
+    CHECK (r["error"]["message"].get<std::string>().find ("deeply") != std::string::npos);
+    CHECK (h.rpc ("ping").contains ("result"));         // the server is alive
+}
+
+ROVOX_TEST (mcp, events_poll_reports_resync_after_the_ring_overflowed)
+{
+    Harness h;
+    const auto first = h.env.hub.publish ("local", "", json { { "type", "test.noise" } });
+
+    for (int i = 0; i < 2100; ++i)
+        h.env.hub.publish ("local", "", json { { "type", "test.noise" } });
+
+    auto stale = h.data ("events.poll", { { "since_event_id", first }, { "limit", 1 } });
+    CHECK (stale["resync_required"] == true);
+
+    const auto last = h.env.hub.publish ("local", "", json { { "type", "test.noise" } });
+    auto fresh = h.data ("events.poll", { { "since_event_id", last - 1 } });
+    CHECK (fresh["resync_required"] == false);
+}
+
+ROVOX_TEST (mcp, external_changes_never_skip_user_edits_between_agent_calls)
+{
+    Harness h;
+    const auto id = sineTracks (h.env, { -20.0 }, 1.0);
+    const std::string t1 = firstTrackId (h.data ("track.list", { { "project_id", id } }));
+    const Origin ui { Origin::Kind::ui, "ws_1", "alex@browser" };
+
+    for (int i = 0; i < 5; ++i)
+    {
+        REQUIRE (h.env.runAs (ui, id, "track.update", { { "track_id", t1 }, { "pan", 0.05 * (i + 1) } }).ok);
+        auto r = h.tool ("marker.list", { { "project_id", id } });
+        REQUIRE (r.contains ("external_changes"));
+        CHECK (r["external_changes"]["count"] == 1);
+    }
+}
+
+ROVOX_TEST (mcp, skill_session_does_not_see_its_own_edits_as_external)
+{
+    Harness h;
+    const auto id = sineTracks (h.env, { -20.0 }, 1.0);
+    const std::string t1 = firstTrackId (h.data ("track.list", { { "project_id", id } }));
+
+    auto skill = h.server.createSession();
+    h.rpc ("initialize", { { "protocolVersion", "2025-06-18" }, { "capabilities", json::object() }, { "clientInfo", { { "name", "skill:mix" } } } }, 1, skill.get());
+    REQUIRE (h.tool ("marker.list", { { "project_id", id } }, skill.get()).value ("ok", false));
+
+    auto own = h.tool ("track.update", { { "project_id", id }, { "track_id", t1 }, { "pan", 0.2 } }, skill.get());
+    CHECK (own["ok"] == true);
+    CHECK (! own.contains ("external_changes"));
+    CHECK (! h.tool ("marker.list", { { "project_id", id } }, skill.get()).contains ("external_changes"));
+
+    // the other session sees the skill's edit as external
+    CHECK (h.tool ("marker.list", { { "project_id", id } }).contains ("external_changes"));
+}
+
+ROVOX_TEST (mcp, capabilities_match_behaviour_and_instructions_have_no_empty_source_line)
+{
+    mcp::McpConfig cfg;
+    cfg.sourceUrl.clear();
+    Harness h ({}, cfg);
+    auto fresh = h.server.createSession();
+    auto r = h.rpc ("initialize", { { "protocolVersion", "2025-06-18" }, { "capabilities", json::object() }, { "clientInfo", { { "name", "caps" } } } }, 1, fresh.get());
+    const auto caps = r["result"]["capabilities"];
+    CHECK (! caps.contains ("logging"));
+    CHECK (caps["resources"]["listChanged"] == true);
+    CHECK (r["result"]["instructions"].get<std::string>().find ("Source code:") == std::string::npos);
+
+    // resources/list_changed is really sent when the project list changes
+    std::uint64_t cursor = fresh->lastMessageId();
+    h.tool ("project.new", { { "name", "listchanged" } }, fresh.get());
+
+    const bool seen = h.onClient ([&]
+    {
+        json m;
+
+        for (int i = 0; i < 60; ++i)
+            if (fresh->next (cursor, m, std::chrono::milliseconds (50)) && m.value ("method", "") == "notifications/resources/list_changed")
+                return true;
+
+        return false;
+    });
+
+    CHECK (seen);
 }

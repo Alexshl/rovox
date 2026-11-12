@@ -2,13 +2,16 @@
 // Copyright (C) 2026 Rovox contributors
 
 #include "Cgroup.h"
+#include "EventHub.h"
 #include "Ids.h"
 #include "Spectrum.h"
 #include "TestFramework.h"
 
 #include <cmath>
 #include <cstdint>
+#include <atomic>
 #include <set>
+#include <thread>
 #include <vector>
 
 using namespace rovox;
@@ -113,4 +116,41 @@ ROVOX_TEST (core, spectrum_of_pink_noise_follows_band_width_in_octaves)
     CHECK_NEAR (bands.low - bands.lowMid, pinkOffsetDb (60, 250), 1.0);
     CHECK_NEAR (bands.highMid - bands.lowMid, pinkOffsetDb (2000, 6000), 1.0);
     CHECK_NEAR (bands.high - bands.lowMid, pinkOffsetDb (6000, 20000), 1.0);
+}
+
+ROVOX_TEST (core, event_hub_observers_see_strictly_increasing_ids_from_parallel_publishers)
+{
+    EventHub hub;
+    std::vector<std::uint64_t> seen;        // only the observer touches it, and publishes never run concurrently
+    const int id = hub.addObserver ([&] (const Event& e) { seen.push_back (e.id); });
+    constexpr int perThread = 2000;
+
+    auto work = [&]
+    {
+        for (int i = 0; i < perThread; ++i)
+            hub.publish ("local", "", json { { "type", "test" } });
+    };
+
+    std::thread a (work), b (work);
+    a.join();
+    b.join();
+
+    REQUIRE (seen.size() == 2 * perThread);
+
+    for (size_t i = 1; i < seen.size(); ++i)
+        CHECK (seen[i] > seen[i - 1]);
+
+    hub.removeObserver (id);
+
+    // removeObserver returns only when the observer is no longer running
+    std::atomic<bool> inside { false }, finished { false };
+    const int slow = hub.addObserver ([&] (const Event&) { inside = true; std::this_thread::sleep_for (std::chrono::milliseconds (100)); finished = true; });
+    std::thread p ([&] { hub.publish ("local", "", json { { "type", "test" } }); });
+
+    while (! inside)
+        std::this_thread::yield();
+
+    hub.removeObserver (slow);
+    CHECK (finished.load());
+    p.join();
 }

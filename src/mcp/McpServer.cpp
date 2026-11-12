@@ -18,7 +18,7 @@ namespace rovox::mcp
 namespace
 {
 constexpr size_t maxEvents = 2000, maxProjectEvents = 1000, sessionRing = 1000;
-constexpr int pageSize = 100;
+constexpr int pageSize = 250;
 
 std::string randomHex (int bytes)
 {
@@ -414,13 +414,13 @@ json McpServer::handleRequest (Session& s, const json& req, RequestContext& rc)
                 info["source_url"] = config_.sourceUrl;
 
             return rpcResult (id, { { "protocolVersion", s.protocolVersion },
-                                    { "capabilities", { { "tools", { { "listChanged", false } } }, { "resources", { { "subscribe", true }, { "listChanged", true } } }, { "logging", json::object() } } },
+                                    { "capabilities", { { "tools", { { "listChanged", false } } }, { "resources", { { "subscribe", true }, { "listChanged", true } } } } },
                                     { "serverInfo", info },
                                     { "instructions", "Rovox is a headless DAW. Every project tool takes project_id; ids (trk_, itm_, fx_, mrk_, job_) are stable GUIDs, never indexes. "
                                                       "Times: {s}, {bar,beat,tick} (1-based) or {qn}; levels in dB. One tool call is one undo step. "
                                                       "Long work (render.start, render.preview, analyze.audio, import.plan) runs as a job: pass wait_s to wait for it, or poll job.get. "
                                                       "Every project response may carry external_changes: edits made by the user since your last call. "
-                                                      "Source code: " + config_.sourceUrl } });
+                                                      + (config_.sourceUrl.empty() ? std::string() : "Source code: " + config_.sourceUrl) } });
         }
 
         if (method == "ping")
@@ -652,13 +652,16 @@ json McpServer::externalChanges (Session& s, const std::string& project, bool)
         return nullptr;
 
     const auto seen = s.lastSeen (project);
-    s.setLastSeen (project, *current);
 
-    if (! seen || *seen >= *current)
+    if (! seen)
+    {
+        s.setLastSeen (project, *current);
         return nullptr;
+    }
 
     json summary = json::array();
     int count = 0;
+    std::uint64_t recorded = *seen;
 
     {
         std::lock_guard<std::mutex> lock (eventMutex_);
@@ -667,10 +670,17 @@ json McpServer::externalChanges (Session& s, const std::string& project, bool)
         if (it != projectEvents_.end())
             for (auto& e : it->second)
             {
-                if (e.revision <= *seen || e.revision > *current)
+                // only revisions whose event is already in the ring count as seen: a user edit that bumped the revision
+                // but is still being published must show up in the next call, not be skipped
+                if (e.revision > *current)
                     continue;
 
-                if (e.origin.value ("session", "") == s.shortId && e.origin.value ("kind", "") == "mcp")
+                recorded = std::max (recorded, e.revision);
+
+                if (e.revision <= *seen)
+                    continue;
+
+                if (e.origin.value ("session", "") == s.shortId)
                     continue;
 
                 ++count;
@@ -679,6 +689,8 @@ json McpServer::externalChanges (Session& s, const std::string& project, bool)
                     summary.push_back (e.undoLabel.empty() ? e.origin.value ("label", "") + ": change" : e.undoLabel);
             }
     }
+
+    s.setLastSeen (project, recorded);
 
     if (count == 0)
         return nullptr;
@@ -735,7 +747,7 @@ json McpServer::pollEvents (const std::string& tenant, const std::string& projec
             last = eid;
         }
 
-        const bool resync = ! events_.empty() && since > 0 && events_.front().value ("event_id", (std::uint64_t) 0) > since + 1000000;
+        const bool resync = ! events_.empty() && since > 0 && events_.front().value ("event_id", (std::uint64_t) 0) > since + 1;
 
         if (! out.empty() || std::chrono::steady_clock::now() >= deadline || stopping_ || (cancelled != nullptr && cancelled->load()))
             return { { "events", out }, { "next_event_id", last }, { "resync_required", resync } };
@@ -797,7 +809,7 @@ void McpServer::onHubEvent (const Event& e)
         {
             std::lock_guard<std::mutex> lock (s.stateMutex);
             return s.tenant == e.tenant && (s.eventProjects.count ("*") || s.eventProjects.count (projectId))
-                   && ! (origin.value ("kind", "") == "mcp" && origin.value ("session", "") == s.shortId);
+                   && origin.value ("session", "") != s.shortId;
         });
     }
 }
@@ -837,6 +849,9 @@ void McpServer::markDirty (const std::string& uri, bool immediate)
 void McpServer::announceProjectsChanged()
 {
     markDirty ("rovox://projects", true);
+
+    const json n { { "jsonrpc", "2.0" }, { "method", "notifications/resources/list_changed" } };
+    notifySubscribers (n, [] (Session& s) { return s.initialized.load(); });
 }
 
 void McpServer::flusherLoop()

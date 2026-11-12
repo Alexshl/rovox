@@ -62,7 +62,7 @@ class EventHub
 public:
     std::shared_ptr<Subscription> subscribe (SubscribeOptions = {});
 
-    /** Never blocks on subscribers. Returns the event id. */
+    /** Never blocks on subscribers (publishers serialise among themselves). Returns the event id. */
     std::uint64_t publish (const std::string& tenant, const std::string& projectId, json body);
 
     /** Synchronous tap: called on the publishing thread, in publish order, before publish() returns. It must be cheap and
@@ -72,6 +72,7 @@ public:
     void removeObserver (int id);
 
 private:
+    std::recursive_mutex publishMutex_;     // serialises publish(); taken before mutex_
     std::mutex mutex_;
     std::vector<std::weak_ptr<Subscription>> subscribers_;
     std::vector<std::pair<int, Observer>> observers_;
