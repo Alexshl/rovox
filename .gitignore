@@ -8,3 +8,11 @@ CMakeUserPresets.json
 __pycache__/
 *.pyc
 *.egg-info/
+.worktrees/
+*.bak-*
+
+# local agent process (not part of the public repo)
+CLAUDE.md
+.claude/
+.myvec/
+.myvector.toml
