@@ -10,6 +10,7 @@ from . import __version__
 from . import analysis
 from .core import Core, CoreError
 from .skills import describe, run_skill
+from .notation import NOTATION_TOOLS, call_tool as call_notation, tool_specs as notation_specs
 
 TOOLS = [
     {"name": "skill.list", "description": "The skills of the rovox-skills sidecar with their parameters.", "inputSchema": {"type": "object", "properties": {}}},
@@ -18,6 +19,8 @@ TOOLS = [
     {"name": "analysis.tempo_map", "description": "Estimates the tempo of the master or a track (renders it through the core) and optionally applies it with tempo.set.",
      "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "source": {"description": "\"master\" or {track_id}"}, "range": {"type": "object"}, "apply": {"type": "boolean"}}, "required": ["project_id"]}},
 ]
+
+TOOLS += notation_specs()
 
 _SECRET_NAME = re.compile(r"(_KEY|_TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL)", re.I)
 _MIN_SECRET = 12
@@ -96,6 +99,9 @@ def _handle(message, core_factory):
                 return {"jsonrpc": "2.0", "id": mid, "result": _result(False, error={"code": e.code, "message": str(e), "details": e.details})}
             except (KeyError, ValueError, RuntimeError, OSError) as e:
                 return {"jsonrpc": "2.0", "id": mid, "result": _result(False, error={"code": "SKILL_FAILED", "message": str(e)})}
+        if p.get("name") in NOTATION_TOOLS:
+            ok, payload = call_notation(p["name"], args, core_factory)
+            return {"jsonrpc": "2.0", "id": mid, "result": _result(True, payload) if ok else _result(False, error=payload)}
         return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "unknown tool"}}
     if method == "ping":
         return {"jsonrpc": "2.0", "id": mid, "result": {}}
