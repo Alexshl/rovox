@@ -110,17 +110,17 @@ body .menu-sheet .heading { padding: 8px 12px 2px; }
   body .tcp .sbtn.fx { display: none; }
   body .sbtn { position: relative; width: 30px; height: 26px; }
   body .sbtn::after { content: ''; position: absolute; inset: -8px -3px; }
-  body .mixer.sheet {
+  body .mixer.docked-sheet {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: 60dvh; padding-bottom: env(safe-area-inset-bottom, 0px);
     border: 1px solid var(--rx-hairline); border-bottom: 0; border-radius: var(--rx-radius-md) var(--rx-radius-md) 0 0;
     box-shadow: 0 -4px 16px color-mix(in srgb, var(--rx-panel-900) 60%, transparent);
   }
-  body .mixer.sheet.peek { height: calc(32px + env(safe-area-inset-bottom, 0px)); }
-  body .mixer.sheet.peek .head, body .mixer.sheet.peek .strips { display: none; }
-  body .mixer.sheet .strips { overscroll-behavior-x: contain; }
-  body .mixer.sheet .strip { width: 72px; padding: 6px 4px; }
-  body .mixer.sheet .strip.master { position: sticky; right: 0; z-index: 1; width: 84px; margin-left: auto; }
-  body .mixer.sheet .strip .ms .sbtn { width: 32px; height: 28px; }
+  body .mixer.docked-sheet.peek { height: calc(32px + env(safe-area-inset-bottom, 0px)); }
+  body .mixer.docked-sheet.peek .head, body .mixer.docked-sheet.peek .strips { display: none; }
+  body .mixer.docked-sheet .strips { overscroll-behavior-x: contain; }
+  body .mixer.docked-sheet .strip { width: 72px; padding: 6px 4px; }
+  body .mixer.docked-sheet .strip.master { position: sticky; right: 0; z-index: 1; width: 84px; margin-left: auto; }
+  body .mixer.docked-sheet .strip .ms .sbtn { width: 32px; height: 28px; }
   body .dialog { max-height: calc(100dvh - 48px); }
 }
 

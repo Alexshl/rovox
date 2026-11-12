@@ -175,7 +175,8 @@ describe('phone layout (390 px)', () => {
     expect(sheet).not.toBeNull();
     expect(btn.getAttribute('aria-expanded')).toBe('true');
     const headings = [...sheet.querySelectorAll('.menu-sheet .dropdown > .heading')].map((x) => x.textContent);
-    expect(headings).toEqual([t('menu.file'), t('menu.edit'), t('menu.view'), t('menu.track'), t('menu.agents'), t('menu.help')]);
+    // the language list of the View menu is its own section in the sheet
+    expect(headings).toEqual([t('menu.file'), t('menu.edit'), t('menu.view'), t('menu.view.language'), t('menu.track'), t('menu.agents'), t('menu.help')]);
     const items = [...sheet.querySelectorAll<HTMLButtonElement>('button.item:not(:disabled)')];
     expect(items.length).toBeGreaterThan(6);
     expect(document.activeElement).toBe(items[0]);
@@ -299,7 +300,7 @@ describe('phone layout (390 px)', () => {
   it('the mixer is a bottom sheet that starts peeking and toggles from its handle; the closed toggle still hides it', async () => {
     const { app } = await boot();
     const mixer = q('.mixer')!;
-    expect(mixer.classList.contains('sheet')).toBe(true);
+    expect(mixer.classList.contains('docked-sheet')).toBe(true);
     expect(mixer.classList.contains('peek')).toBe(true);
     const handle = mixer.querySelector<HTMLButtonElement>('.sheet-handle')!;
     expect(handle.getAttribute('aria-expanded')).toBe('false');
@@ -341,7 +342,7 @@ describe('breakpoint change', () => {
     expect(q('.agents-btn')).toBeNull();
     expect(document.querySelectorAll('.menubar .menu')).toHaveLength(6);
     expect(q('.transport .trow')).toBeNull();
-    expect(q('.mixer')!.classList.contains('sheet')).toBe(false);
+    expect(q('.mixer')!.classList.contains('docked-sheet')).toBe(false);
     media.resize(700);
     await tick();
     expect(q('.menu-btn')).toBeNull();
@@ -361,7 +362,7 @@ describe('desktop layout (1280 px)', () => {
     expect(q('.transport .trow')).toBeNull();
     expect(q('.transport select')).not.toBeNull();
     expect(q('.more-btn')).toBeNull();
-    expect(q('.mixer')!.classList.contains('sheet')).toBe(false);
+    expect(q('.mixer')!.classList.contains('docked-sheet')).toBe(false);
     expect(q('.mixer .sheet-handle')).toBeNull();
     expect(q('.agent-bar')).toBeNull();
     expect(q('.drawer-close')).toBeNull();

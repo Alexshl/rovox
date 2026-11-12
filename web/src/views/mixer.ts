@@ -348,7 +348,7 @@ export class MixerView {
   //==========================================================================
   // phone: bottom sheet (60dvh), a handle that toggles it and drag-resizes it
   private setPhone(on: boolean): void {
-    this.el.classList.toggle('sheet', on);
+    this.el.classList.toggle('docked-sheet', on);
     this.expanded = false;
     this.el.style.height = '';
     if (!on) {
@@ -395,7 +395,7 @@ export class MixerView {
   /** The room the sheet takes at the bottom, for the page to leave free (--rx-sheet-h on the root: padding of .main, bottom of the agent bar). */
   private publishHeight(): void {
     const root = document.documentElement.style;
-    if (!this.el.classList.contains('sheet')) {
+    if (!this.el.classList.contains('docked-sheet')) {
       root.removeProperty('--rx-sheet-h');
       return;
     }
@@ -462,7 +462,7 @@ export class MixerView {
     const s = this.app.active;
     this.store = s;
     this.el.classList.toggle('closed', !this.app.prefs.mixerOpen);
-    if (this.el.classList.contains('sheet')) this.publishHeight();
+    if (this.el.classList.contains('docked-sheet')) this.publishHeight();
     if (!s || !s.loaded) {
       clear(this.strips);
       this.rows.clear();
