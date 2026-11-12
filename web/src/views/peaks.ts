@@ -37,7 +37,7 @@ export function entrySuffices(e: PeakEntry, it: ItemState, visT0: number, visT1:
 export const PEAK_CACHE_LIMIT = 500;
 export const PEAK_BACKOFF_MS = [5_000, 30_000, 300_000];
 /** Short capped retry delays after a server (5xx, 504) or network error: the server is likely busy or restarting, not refusing. */
-export const PEAK_RETRY_MS = [1_000, 2_000, 5_000];
+export const PEAK_RETRY_MS = [1_000, 2_000, 4_000];
 const MAX_PARALLEL = 6;
 
 interface Job {

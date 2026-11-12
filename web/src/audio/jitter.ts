@@ -23,6 +23,9 @@ export const DEADBAND_RELEASE_MS = 5;
  * A deadband keeps the rate exactly 1 (bit-exact playback) while the fill is within DEADBAND_MS of the target; a correction
  * starts outside it and ends once the fill is back within DEADBAND_RELEASE_MS.
  */
+/** Smallest rate deviation used while a correction is running (0.2 %). */
+export const MIN_ACTIVE_DEVIATION = 0.002;
+
 export class DriftController {
   private smooth: number | null = null;
   private correcting = false;
@@ -48,7 +51,10 @@ export class DriftController {
       if (absMs <= this.releaseMs) this.correcting = false;
     } else if (absMs >= this.deadbandMs) this.correcting = true;
     if (!this.correcting) return 1;
-    return 1 + Math.max(-this.maxDeviation, Math.min(this.maxDeviation, this.gain * errS));
+    // while correcting, move at least MIN_ACTIVE_DEVIATION: a proportional-only pull gets slower and slower near the release point
+    // and would keep the interpolator running a fifth of the time; a firmer pull finishes in seconds and goes back to bit-exact
+    const dev = Math.min(this.maxDeviation, Math.max(MIN_ACTIVE_DEVIATION, this.gain * Math.abs(errS)));
+    return 1 + Math.sign(errS) * dev;
   }
 
   reset(): void {
