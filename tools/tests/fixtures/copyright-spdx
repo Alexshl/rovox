@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: lsp-plugins
+Source: https://github.com/lsp-plugins/lsp-plugins
+
+Files: *
+Copyright: 2020 Someone
+License: LGPL-3.0-or-later
+
+License: LGPL-3.0-or-later
+ The full text is not repeated here.

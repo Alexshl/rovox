@@ -3,13 +3,17 @@
 """Contract tests against a fake core: the skills only call core tools, deterministically, and no secret is ever in a response."""
 import io
 import json
+import math
 import os
 import sys
+import struct
+import tempfile
 import unittest
+import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from rovox_skills import server, skills  # noqa: E402
+from rovox_skills import analysis, server, skills  # noqa: E402
 from rovox_skills.core import CoreError  # noqa: E402
 
 
@@ -129,7 +133,7 @@ class ServerTests(unittest.TestCase):
             r = server.handle(m, lambda name: fake)
             out.write(json.dumps(r) + "\n")
         replies = [json.loads(x) for x in out.getvalue().splitlines()]
-        self.assertEqual({t["name"] for t in replies[1]["result"]["tools"]}, {"skill.list", "skill.run"})
+        self.assertEqual({t["name"] for t in replies[1]["result"]["tools"]}, {"skill.list", "skill.run", "analysis.tempo_map"})
         self.assertIn("rhythm_section", json.dumps(replies[2]))
         self.assertTrue(replies[3]["result"]["structuredContent"]["ok"])
         self.assertEqual(replies[4]["result"]["structuredContent"]["error"]["code"], "SKILL_FAILED")
@@ -141,6 +145,175 @@ class ServerTests(unittest.TestCase):
                 raise CoreError(tool, {"code": "PRECONDITION_FAILED", "message": "nope"})
         r = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "skill.run", "arguments": {"name": "add_reverb_bus", "params": {"project_id": "p"}}}}, lambda n: Failing())
         self.assertEqual(r["result"]["structuredContent"]["error"]["code"], "PRECONDITION_FAILED")
+
+
+def click_wav(path, bpm, seconds=10, rate=22050, lead_s=0.0, per_beat=1, offbeat_gain=1.0):
+    """Clicks every beat (or `per_beat` times per beat, the ones between the beats scaled by offbeat_gain) after `lead_s` of digital silence."""
+    n = int(rate * seconds)
+    period = 60.0 / bpm * rate / per_beat
+    samples = [0] * n
+    k = 0
+    while int(lead_s * rate + k * period) < n:
+        start = int(lead_s * rate + k * period)
+        gain = 1.0 if k % per_beat == 0 else offbeat_gain
+        for i in range(min(200, n - start)):
+            samples[start + i] = int(20000 * gain * math.exp(-i / 30.0) * (1 if i % 2 == 0 else -1))
+        k += 1
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(struct.pack("<%dh" % n, *samples))
+
+
+class SecretTests(unittest.TestCase):
+    def setUp(self):
+        self._env = dict(os.environ)
+        os.environ["ROVOX_TOKEN"] = "tok-planted-12345"
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def call(self, factory, token=None):
+        r = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "skill.run", "arguments": {"name": "add_reverb_bus", "params": {"project_id": "p"}}}}, factory, token)
+        return json.dumps(r)
+
+    def test_token_in_a_core_error_body_is_redacted(self):
+        class Failing(FakeCore):
+            def call(self, tool, **args):
+                raise CoreError(tool, {"code": "X", "message": "bad Bearer tok-planted-12345", "details": {"echo": "tok-planted-12345", "other": "bearer-from-arg-777"}})
+        out = self.call(lambda n: Failing(), "bearer-from-arg-777")
+        self.assertNotIn("tok-planted-12345", out)
+        self.assertNotIn("bearer-from-arg-777", out)
+        self.assertIn("[redacted]", out)
+
+    def test_token_in_a_protocol_error_is_redacted(self):
+        class Failing(FakeCore):
+            def call(self, tool, **args):
+                raise RuntimeError("the core answered HTTP 500: Authorization: Bearer tok-planted-12345")
+        self.assertNotIn("tok-planted-12345", self.call(lambda n: Failing()))
+        os.environ["MY_API_KEY"] = "key-value-abcdef"
+        r = server.handle({"jsonrpc": "2.0", "id": 2, "method": "nope key-value-abcdef"}, lambda n: None)
+        self.assertNotIn("key-value-abcdef", json.dumps(r))
+
+
+class ServerRobustnessTests(unittest.TestCase):
+    def setUp(self):
+        self._env = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def test_short_secrets_are_kept_and_long_ones_with_more_names_are_redacted(self):
+        os.environ["MY_PASSWORD"] = "hunter2hunter2hunter2"
+        os.environ["DB_CREDENTIAL"] = "cred-value-1234567"
+        os.environ["SSH_PASS"] = "pass-value-1234567"
+        os.environ["SHORT_TOKEN"] = "abc123"
+        out = json.dumps(server.redact({"a": "hunter2hunter2hunter2 cred-value-1234567 pass-value-1234567 abc123"}))
+        self.assertNotIn("hunter2hunter2hunter2", out)
+        self.assertNotIn("cred-value-1234567", out)
+        self.assertNotIn("pass-value-1234567", out)
+        self.assertIn("abc123", out)        # below the minimum length: not treated as a secret
+
+    def test_an_uncaught_exception_becomes_a_redacted_error_result(self):
+        os.environ["MY_API_KEY"] = "key-value-abcdef-123"
+
+        class Boom(FakeCore):
+            def call(self, tool, **args):
+                raise wave.Error("bad key-value-abcdef-123")
+        message = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "skill.run", "arguments": {"name": "add_reverb_bus", "params": {"project_id": "p"}}}}
+        r = server.handle(message, lambda n: Boom())
+        self.assertEqual(r["id"], 7)
+        self.assertFalse(r["result"]["structuredContent"]["ok"])
+        self.assertEqual(r["result"]["structuredContent"]["error"]["code"], "INTERNAL_ERROR")
+        self.assertNotIn("key-value-abcdef-123", json.dumps(r))
+
+    def test_the_stdio_loop_survives_a_failing_request(self):
+        class Boom(FakeCore):
+            def call(self, tool, **args):
+                raise EOFError("truncated")
+        lines = [json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "skill.run", "arguments": {"name": "add_reverb_bus", "params": {"project_id": "p"}}}}),
+                 "not json",
+                 json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"})]
+        out = io.StringIO()
+        original = server.Core
+        server.Core = lambda url, token, name=None: Boom()
+        try:
+            server.serve(None, None, stdin=io.StringIO("\n".join(lines) + "\n"), stdout=out)
+        finally:
+            server.Core = original
+        replies = [json.loads(x) for x in out.getvalue().splitlines()]
+        self.assertEqual(len(replies), 3)
+        self.assertEqual(replies[2]["id"], 2)
+
+
+class TempoTests(unittest.TestCase):
+    def test_click_track_at_120_bpm(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "click.wav")
+            click_wav(path, 120)
+            self.assertAlmostEqual(analysis.estimate_tempo(path), 120, delta=0.5)
+            click_wav(path, 93)
+            self.assertAlmostEqual(analysis.estimate_tempo(path), 93, delta=0.5)
+
+    def test_click_track_after_a_silent_lead_in(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "click.wav")
+            click_wav(path, 100, seconds=12, lead_s=2.0)
+            self.assertAlmostEqual(analysis.estimate_tempo(path), 100, delta=0.5)
+
+    def test_accented_eighth_notes_at_90_bpm_are_not_doubled(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "eighths.wav")
+            click_wav(path, 90, seconds=16, per_beat=2, offbeat_gain=0.4)
+            self.assertAlmostEqual(analysis.estimate_tempo(path), 90, delta=0.5)
+
+    def test_tempo_map_quotes_the_download_path_and_rejects_separators(self):
+        class Core(FakeCore):
+            url, token, timeout = "http://x/mcp", "t", 5
+
+            def call(self, tool, **args):
+                if tool == "render.start":
+                    return {"state": "succeeded", "result": {"file": {"path": "renders/my tempo.wav"}}}
+                return super().call(tool, **args)
+        fetched = []
+
+        def download(core, path, dest):
+            fetched.append(path)
+            click_wav(dest, 120)
+        analysis.tempo_map(Core(), {"project_id": "p 1?x"}, download)
+        self.assertEqual(fetched, ["/api/projects/p%201%3Fx/renders/my%20tempo.wav"])
+        for bad in ("../p", "a/b", "a..b"):
+            with self.assertRaises(ValueError):
+                analysis.tempo_map(Core(), {"project_id": bad}, download)
+
+    def test_tempo_map_renders_downloads_and_applies(self):
+        class Core(FakeCore):
+            url, token, timeout = "http://x/mcp", "t", 5
+
+            def call(self, tool, **args):
+                if tool == "render.start":
+                    self.calls.append((tool, args))
+                    return {"state": "succeeded", "result": {"file": {"path": "renders/tempo_probe.wav"}}}
+                return super().call(tool, **args)
+        fetched = []
+
+        def download(core, path, dest):
+            fetched.append(path)
+            click_wav(dest, 120)
+        core = Core()
+        out = analysis.tempo_map(core, {"project_id": "p_1", "source": {"track_id": "trk_1"}, "apply": True}, download)
+        self.assertAlmostEqual(out["bpm"], 120, delta=0.5)
+        self.assertTrue(out["applied"])
+        self.assertEqual(fetched, ["/api/projects/p_1/renders/tempo_probe.wav"])
+        tools = [c[0] for c in core.calls]
+        self.assertEqual(tools, ["render.start", "tempo.set"])
+        self.assertEqual(core.calls[0][1]["track_ids"], ["trk_1"])
+        core2 = Core()
+        self.assertFalse(analysis.tempo_map(core2, {"project_id": "p_1"}, download)["applied"])
+        self.assertNotIn("tempo.set", [c[0] for c in core2.calls])
 
 
 if __name__ == "__main__":

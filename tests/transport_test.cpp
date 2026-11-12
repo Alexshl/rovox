@@ -5,11 +5,15 @@
 // Runs with ROVOX_TEST_AUDIO=browser: the engine owns the stream device (a timer thread, no sound card).
 
 #include "Peaks.h"
+#include "Render.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 #include "Transport.h"
 
+#include <opus/opus.h>
+
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <set>
 
@@ -333,4 +337,134 @@ ROVOX_TEST (transport, peaks_of_a_sine_at_coarse_and_fine_zoom)
     auto beyond = store.compute (dir / "s.wav", 5.0, 6.0, 8);
     CHECK (beyond.ok());
     CHECK (! store.compute (dir / "missing.wav", 0, 1, 8).ok());
+}
+
+namespace
+{
+/** A project with one track and a 6 s, -12 dBFS sine of `hz` at 0 s. */
+std::string makeToneProject (test::Env& env, const char* name, double hz)
+{
+    const auto id = env.newProject (name);
+    env.ok (id, "track.create", { { "name", "Tone" } });
+    const auto dir = test::makeTempDir ("mixtone");
+    test::writeWav (dir / "tone.wav", { test::sine (hz, -12, 6.0, 44100) }, 44100);
+    auto* track = te::getAudioTracks (env.project (id).edit())[0];
+    te::insertWaveClip (*track, "tone", toFile (dir / "tone.wav"), { .time = { te::TimePosition::fromSeconds (0.0), te::TimeDuration::fromSeconds (6.0) } },
+                        te::DeleteExistingClips::no);
+    test::pumpMessages (60);
+    return id;
+}
+
+/** Level in dBFS (amplitude) of `hz` in frames [from, to) of a stereo-interleaved signal, Hann windowed Goertzel on the left channel. */
+double toneDb (const std::vector<float>& pcm, size_t from, size_t to, double hz)
+{
+    const size_t n = to - from;
+    const double w = 2.0 * 3.14159265358979323846 * hz / 48000.0, coeff = 2.0 * std::cos (w);
+    double s1 = 0.0, s2 = 0.0, winSum = 0.0;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double hann = 0.5 - 0.5 * std::cos (2.0 * 3.14159265358979323846 * (double) i / (double) (n - 1));
+        const double s0 = hann * pcm[(from + i) * 2] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+        winSum += hann;
+    }
+
+    const double power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+    return 20.0 * std::log10 (std::max (1.0e-9, 2.0 * std::sqrt (std::max (0.0, power)) / winSum));
+}
+} // namespace
+
+ROVOX_TEST (transport, project_mix_mute_and_solo_shape_the_live_mix_only)
+{
+    test::Env env;
+    auto* stream = test::host().stream();
+    REQUIRE (stream != nullptr);
+    const auto a = makeToneProject (env, "MixA", 440.0);
+    const auto b = makeToneProject (env, "MixB", 1000.0);
+
+    int err = 0;
+    OpusDecoder* decoder = opus_decoder_create (48000, 2, &err);
+    REQUIRE (decoder != nullptr);
+    std::mutex m;
+    std::vector<float> pcm;
+    size_t frames = 0;
+
+    stream->setPacketSink ([&] (const std::vector<std::uint8_t>& p)
+    {
+        std::vector<float> out (960 * 2);
+        const int n = opus_decode_float (decoder, p.data() + BrowserStream::headerBytes, (opus_int32) (p.size() - BrowserStream::headerBytes), out.data(), 960, 0);
+        std::lock_guard<std::mutex> lock (m);
+
+        if (n > 0)
+        {
+            pcm.insert (pcm.end(), out.begin(), out.begin() + n * 2);
+            frames += (size_t) n;
+        }
+    });
+
+    auto frameCount = [&] { std::lock_guard<std::mutex> lock (m); return frames; };
+    constexpr size_t window = 9600;         // 200 ms
+    // levels (A, B) over the 200 ms that start `afterMs` after now
+    auto measure = [&] (int afterMs)
+    {
+        const size_t t0 = frameCount();
+        test::pumpMessages (afterMs + 260);
+        std::lock_guard<std::mutex> lock (m);
+        REQUIRE (frames >= window);
+        const size_t from = std::min (t0 + (size_t) afterMs * 48, frames - window);
+        return std::pair<double, double> { toneDb (pcm, from, from + window, 440.0), toneDb (pcm, from, from + window, 1000.0) };
+    };
+
+    env.ok (a, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
+    env.ok (b, "transport.set", { { "state", "playing" }, { "position_s", 0.0 } });
+    test::pumpMessages (700);
+    const auto both = measure (0);
+    std::cerr << "    both: 440 Hz " << both.first << " dB, 1 kHz " << both.second << " dB\n";
+    CHECK (both.first > -25.0);
+    CHECK (both.second > -25.0);
+
+    const auto undoBefore = env.ok (a, "history.list")["undo"].size();
+    const auto revisionBefore = env.project (a).revision();
+
+    auto set = env.ok (b, "project.mix", { { "muted", true } });
+    CHECK (set["muted"] == true);
+    const auto muted = measure (200);
+    std::cerr << "    B muted: 440 Hz " << muted.first << " dB, 1 kHz " << muted.second << " dB\n";
+    CHECK (muted.first > -25.0);
+    CHECK (muted.second < both.second - 40.0);
+
+    // the mute is a live-mix stage only: an offline render of the muted project still carries its audio
+    RenderRequest request;
+    request.tailS = 0.0;
+    auto rendered = renderProject (env.project (b), request);
+    REQUIRE (rendered.ok());
+    CHECK (rendered.value()["stats"]["true_peak_dbtp"].get<double>() > -30.0);
+    CHECK (rendered.value()["stats"]["silence_ranges"].empty());
+
+    env.ok (b, "project.mix", { { "muted", false } });
+    const auto back = measure (200);
+    CHECK (back.second > -25.0);
+
+    env.ok (a, "project.mix", { { "solo", true } });
+    const auto soloed = measure (200);
+    std::cerr << "    A solo: 440 Hz " << soloed.first << " dB, 1 kHz " << soloed.second << " dB\n";
+    CHECK (soloed.first > -25.0);
+    CHECK (soloed.second < both.second - 40.0);
+
+    env.ok (a, "project.mix", { { "solo", false }, { "gain_db", -20.0 } });
+    const auto quiet = measure (200);
+    CHECK (quiet.first < both.first - 15.0);
+    CHECK (quiet.second > -25.0);
+
+    // project.mix is not an undo step and leaves the revision alone
+    CHECK (env.ok (a, "history.list")["undo"].size() == undoBefore);
+    CHECK (env.project (a).revision() == revisionBefore);
+
+    env.ok (a, "transport.set", { { "state", "stopped" } });
+    env.ok (b, "transport.set", { { "state", "stopped" } });
+    test::pumpMessages (150);
+    stream->setPacketSink ({});
+    opus_decoder_destroy (decoder);
 }

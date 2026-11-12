@@ -470,6 +470,10 @@ Result<te::Plugin::Ptr> createExternalPlugin (Project& p, const json& param, jso
             rec = catalog.find (uid);
     }
 
+    // licence gate: other tenants only get plugins with a catalog record whose licence is free (a plugin created from a bare uid / file has none)
+    if (auto allowed = PluginCatalog::requireLicence (p.tenant(), rec, key.empty() ? param.value ("uid", "") : key); ! allowed.ok())
+        return allowed.error();
+
     juce::PluginDescription d;
 
     if (rec)
@@ -480,7 +484,7 @@ Result<te::Plugin::Ptr> createExternalPlugin (Project& p, const json& param, jso
             if (c->id() == connector && ! c->available())
                 return makeError (errc::preconditionFailed, "plugin " + rec->value ("name", "") + " lives behind the '" + connector + "' connector, which is unavailable: " + c->unavailableReason());
 
-        auto probe = catalog.ensureProbed (rec->value ("plugin_uid", ""));
+        auto probe = catalog.ensureProbed (rec->value ("plugin_uid", ""), p.tenant());
 
         if (! probe.ok())
             return probe.error();

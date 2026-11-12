@@ -1,0 +1,14 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: calf
+Source: https://github.com/calf-studio-gear/calf
+
+Files: *
+Copyright: 2007-2020 Calf Studio Gear
+License: LGPL-2.1+
+
+Files: debian/*
+Copyright: 2010 Someone
+License: GPL-3+
+
+License: LGPL-2.1+
+ On Debian systems, see /usr/share/common-licenses/LGPL-2.1.

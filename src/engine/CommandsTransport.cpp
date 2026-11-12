@@ -53,6 +53,27 @@ void registerTransportCommands (CommandRegistry& r)
             return p.transport().apply (params);
         }));
 
+    r.add (makeProjectCommand ("project.mix",
+        obj ({ { "gain_db", { { "type", "number" }, { "minimum", -150 }, { "maximum", 24 } } },
+               { "muted", { { "type", "boolean" } } },
+               { "solo", { { "type", "boolean" } } } }),
+        anyObject(), false,
+        [] (Project& p, const json& params, const CommandContext&) -> Result<json>
+        {
+            auto& strip = p.strip();
+
+            if (params.contains ("gain_db"))
+                strip.gainDb = params["gain_db"].get<double>();
+
+            if (params.contains ("muted"))
+                strip.muted = params["muted"].get<bool>();
+
+            if (params.contains ("solo"))
+                strip.setSolo (params["solo"].get<bool>());
+
+            return json { { "project_id", p.id() }, { "gain_db", strip.gainDb.load() }, { "muted", strip.muted.load() }, { "solo", strip.solo.load() } };
+        }));
+
     r.add (makeProjectCommand ("mixer.get_meters", obj({}), anyObject(), false,
         [] (Project& p, const json&, const CommandContext&) -> Result<json>
         {

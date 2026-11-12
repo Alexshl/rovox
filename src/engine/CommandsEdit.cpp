@@ -13,6 +13,7 @@
 #include "TimePos.h"
 
 #include <cmath>
+#include <sstream>
 
 namespace rovox
 {
@@ -71,9 +72,31 @@ json clipJson (Project& p, te::Clip& c)
 json paramJson (te::AutomatableParameter& ap)
 {
     const auto range = ap.getValueRange();
-    return { { "ident", toStd (ap.paramID) }, { "name", toStd (ap.getParameterName()) }, { "value", (double) ap.getCurrentExplicitValue() },
-             { "display", toStd (ap.valueToString (ap.getCurrentExplicitValue())) }, { "label", toStd (ap.getLabel()) },
-             { "min", (double) range.getStart() }, { "max", (double) range.getEnd() } };
+    // text is never empty: a plugin that gives no display string gets the number
+    auto shown = [&ap] (float v)
+    {
+        auto t = toStd (ap.valueToString (v));
+
+        if (t.empty())
+        {
+            std::ostringstream o;
+            o << v;
+            t = o.str();
+        }
+
+        return t;
+    };
+    const auto text = shown (ap.getCurrentExplicitValue());
+    json out { { "ident", toStd (ap.paramID) }, { "name", toStd (ap.getParameterName()) }, { "value", (double) ap.getCurrentExplicitValue() },
+               { "display", text }, { "text", text }, { "label", toStd (ap.getLabel()) },
+               { "min", (double) range.getStart() }, { "max", (double) range.getEnd() },
+               { "min_text", shown (range.getStart()) }, { "max_text", shown (range.getEnd()) } };
+
+    // the value a reset (web: double-click) goes back to; absent when the plugin does not say
+    if (const auto d = ap.getDefaultValue())
+        out["default"] = (double) *d;
+
+    return out;
 }
 
 bool isEqBandGain (const std::string& id)

@@ -170,6 +170,30 @@ ROVOX_TEST (plugins, scan_builds_a_catalog_and_the_next_scan_is_incremental)
     CHECK (env.run ("", "plugin.catalog", { { "tag", "utility" } }).data["total"] == 1);
 }
 
+ROVOX_TEST (plugins, vst3_in_the_image_is_scanned_and_lists_its_factory_programs)
+{
+    // the build image installs Debian trixie's dpf-plugins-vst3; MVerb declares factory programs (Halves, Dark, Cupboard, Stadium, ...)
+    const bool require = std::getenv ("ROVOX_REQUIRE_VST3") != nullptr;
+    test::Env env;
+    scanOnce (env);
+    auto r = env.run ("", "plugin.catalog", { { "format", "VST3" }, { "query", "MVerb" }, { "include_presets", true } });
+    REQUIRE (r.ok);
+
+    if (r.data["plugins"].empty())
+    {
+        std::cerr << (require ? "    the image should have the MVerb VST3 but the catalog has none\n" : "    skipped: no MVerb VST3 installed\n");
+        CHECK (! require);
+        return;
+    }
+
+    const auto& mverb = r.data["plugins"][0];
+    CHECK (mverb["format"] == "VST3");
+    CHECK (mverb["plugin_uid"].get<std::string>().rfind ("vst3:", 0) == 0);
+    REQUIRE (mverb.contains ("presets"));
+    CHECK (mverb["presets"].size() >= 1);
+    std::cerr << "    MVerb (VST3): " << mverb["presets"].size() << " presets\n";
+}
+
 ROVOX_TEST (plugins, instruments_in_the_image_are_listed_with_presets)
 {
     test::Env env;
@@ -924,4 +948,64 @@ ROVOX_TEST (projects, delivery_hold_is_a_project_setting_with_undo)
     CHECK (r.data["delivery_hold"] == true);
     env.ok (id, "undo");
     CHECK (env.ok (id, "project.update", json::object())["delivery_hold"] == false);
+}
+
+ROVOX_TEST (fx, lv2_parameters_come_with_a_display_text)
+{
+    test::Env env;
+    scanOnce (env);
+    const char* const queries[] = { "LSP Compressor", "LSP Parametric", "Calf Reverb", "Calf Compressor", "Calf Filter", "x42-eq", "x42-dpl", "ZynAddSubFX", "ZynReverb", "AVLDrums" };
+    const auto id = env.newProject ("param-text");
+    const auto track = env.ok (id, "track.create", { { "name", "FX" } })["track_id"].get<std::string>();
+    int checked = 0;
+    std::string line;
+
+    for (auto* q : queries)
+    {
+        auto cat = env.run ("", "plugin.catalog", { { "query", q }, { "limit", 1 } });
+        REQUIRE (cat.ok);
+
+        if (cat.data["plugins"].empty())
+        {
+            if (requireImagePlugins())
+            {
+                std::cerr << "    the image should have a plugin matching '" << q << "'\n";
+                CHECK (false);
+            }
+
+            continue;
+        }
+
+        auto added = env.run (id, "fx.add", { { "track_id", track }, { "plugin", { { "plugin_uid", cat.data["plugins"][0]["plugin_uid"] } } } });
+
+        if (! added.ok)
+            continue;
+
+        auto info = env.ok (id, "fx.params", { { "plugin_id", added.data["plugin_id"] } })["fx"]["params"];
+        size_t withText = 0;
+
+        for (auto& p : info)
+            CHECK (p.contains ("text") && p["text"].is_string() && ! p["text"].get<std::string>().empty() && p.contains ("min_text") && p.contains ("max_text"));      // the JSON always carries a text
+
+        // the plugin's own text (not the fallback paramJson fills in): measured on the live parameters
+        auto* plugin = env.project (id).findPlugin (added.data["plugin_id"].get<std::string>());
+        REQUIRE (plugin != nullptr);
+
+        for (auto* ap : plugin->getAutomatableParameters())
+            withText += ap->valueToString (ap->getCurrentValue()).isNotEmpty() ? 1 : 0;
+
+        if (info.empty())
+            continue;
+
+        ++checked;
+        const auto ownCount = plugin->getAutomatableParameters().size();
+        const double share = ownCount > 0 ? (double) withText / (double) ownCount : 0.0;
+        line += std::string (q) + " " + std::to_string (withText) + "/" + std::to_string (ownCount) + ", ";
+        CHECK (share >= 0.9);
+    }
+
+    std::cerr << "    param text coverage: " << line << "\n";
+
+    if (requireImagePlugins())
+        CHECK (checked >= 10);
 }

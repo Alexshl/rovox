@@ -13,6 +13,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 
 namespace rovox
 {
@@ -20,12 +21,32 @@ namespace rovox
 class ProjectTransport;
 class ProjectMeters;
 
-/** gain / mute / solo of a project in the shared mix (task 100). M1 has no mixed output yet; the state is kept for the
-    browser-stream device and for `playing_in_background`. */
+/** gain / mute / solo of a project in the shared mix (task 100). Applied to live playback only (ProjectMixNode); renders ignore it. */
 struct ProjectMixerStrip
 {
     std::atomic<double> gainDb { 0.0 };
     std::atomic<bool> muted { false }, solo { false }, playInBackground { false };
+
+    /** Number of soloed strips (projects) of one tenant; when it is above 0 every non-soloed project of that tenant is silent. Counters live forever (stable addresses). */
+    static std::atomic<int>& soloCountFor (const std::string& tenant)
+    {
+        static std::mutex m;
+        static std::map<std::string, std::atomic<int>> counts;
+        std::lock_guard<std::mutex> lock (m);
+        return counts[tenant];
+    }
+
+    void setSolo (bool on)
+    {
+        if (solo.exchange (on) != on)
+            *soloCount += on ? 1 : -1;
+    }
+
+    explicit ProjectMixerStrip (const std::string& tenant) : soloCount (&soloCountFor (tenant)) {}
+    ProjectMixerStrip (const ProjectMixerStrip&) = delete;
+    ~ProjectMixerStrip() { setSolo (false); }
+
+    std::atomic<int>* soloCount;
 };
 
 struct HistoryStep

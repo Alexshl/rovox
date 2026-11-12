@@ -5,12 +5,14 @@
 
 #include "DrumKit.h"
 #include "DrumKitLibrary.h"
+#include "Sha256.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -38,6 +40,45 @@ const char* phaseName (Phase p)
     }
 
     return "error";
+}
+
+/** Identity of a kit: kit.json plus, for every sample it lists (sorted), the relative path, size and sha256 of the bytes. The per-file hashes are
+    cached by path + size + mtime, so reloading an unchanged kit (another sample rate, another plugin instance) does not read the samples again. */
+std::string kitFingerprint (const fs::path& dir, const std::string& kitText, std::vector<std::string> samples)
+{
+    static std::mutex cacheMutex;
+    static std::map<std::string, std::string> cache;
+
+    Sha256 h;
+    h.update (kitText.data(), kitText.size());
+    std::sort (samples.begin(), samples.end());
+
+    for (auto& rel : samples)
+    {
+        std::error_code sizeEc, timeEc;
+        const auto file = dir / rel;
+        const auto size = fs::file_size (file, sizeEc);
+        const auto time = fs::last_write_time (file, timeEc).time_since_epoch();
+        const auto key = file.string() + "|" + std::to_string (sizeEc ? 0 : size) + "|" + std::to_string (timeEc ? 0 : time.count());
+        std::string fileHash;
+        {
+            std::lock_guard<std::mutex> lock (cacheMutex);
+            if (auto it = cache.find (key); it != cache.end())
+                fileHash = it->second;
+        }
+
+        if (fileHash.empty())
+        {
+            fileHash = sha256File (file).value_or ("unreadable");
+            std::lock_guard<std::mutex> lock (cacheMutex);
+            cache[key] = fileHash;
+        }
+
+        const auto line = "\n" + rel + "|" + std::to_string (ec ? 0 : size) + "|" + fileHash;
+        h.update (line.data(), line.size());
+    }
+
+    return h.hexDigest();
 }
 
 /** Decodes one audio file to stereo 16-bit at `rate`. */
@@ -212,6 +253,9 @@ public:
             j["source_url"] = manifest_->source;
             j["pieces"] = manifest_->pieces.size();
             j["samples"] = manifest_->samplePaths().size();
+            j["kit_id"] = manifest_->id;
+            j["kit_version"] = manifest_->version;
+            j["kit_sha256"] = kitSha_;
         }
 
         lock.unlock();
@@ -341,7 +385,8 @@ private:
         std::ifstream in (location.value().dir / "kit.json", std::ios::binary);
         std::stringstream text;
         text << in.rdbuf();
-        auto parsed = json::parse (text.str(), nullptr, false);
+        const auto kitText = text.str();
+        auto parsed = json::parse (kitText, nullptr, false);
 
         if (parsed.is_discarded())
             return setPhase (Phase::failed, "drum kit " + kitId + ": kit.json is not valid JSON (" + location.value().dir.string() + ")");
@@ -352,10 +397,12 @@ private:
             return setPhase (Phase::failed, manifest.error().message);
 
         const auto dir = location.value().dir;
+        const auto fingerprint = kitFingerprint (dir, kitText, manifest.value().samplePaths());       // hashes every sample once (cached), outside the lock
         {
             std::lock_guard<std::mutex> lock (mutex_);
             manifest_ = manifest.value();
             source_ = location.value().source;
+            kitSha_ = fingerprint;
         }
         setPhase (Phase::found, "decoding the samples");
 
@@ -431,7 +478,7 @@ private:
     std::mutex mutex_;                  // phase, message, manifest, rates
     std::condition_variable cv_;
     Phase phase_ = Phase::resolving;
-    std::string message_, source_;
+    std::string message_, source_, kitSha_;
     std::optional<DrumKitManifest> manifest_;
     double requestedRate_ = 44100.0, loadedRateD_ = 0.0;      // decoded for 44.1 kHz at once, again if the engine runs at another rate
     std::atomic<double> requestedRateA_ { 0.0 }, loadedRate_ { 0.0 };       // for the audio thread
@@ -459,6 +506,17 @@ json drumsPluginExtras (te::Plugin& p, double waitS)
         return d->extras (waitS);
 
     return nullptr;
+}
+
+json drumsKitIdentity (te::Plugin& p, double waitS)
+{
+    auto extras = drumsPluginExtras (p, waitS);
+
+    if (! extras.is_object() || ! extras.contains ("kit_sha256"))
+        return nullptr;
+
+    return { { "id", extras["kit_id"] }, { "version", extras["kit_version"] }, { "sha256", extras["kit_sha256"] },
+             { "license", extras["license"] }, { "source", extras["source_url"] } };
 }
 
 } // namespace rovox

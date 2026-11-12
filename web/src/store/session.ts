@@ -227,6 +227,26 @@ export class App {
     this.changed.emit();
   }
 
+  /** Reads the project's mix strip (also after a reconnect) and shows it on the tab. */
+  private async loadMix(p: ProjectStore): Promise<void> {
+    const r = await this.socket.cmd<{ muted?: boolean }>('project.mix', {}, { projectId: p.id });
+    if (r.ok && typeof r.data?.muted === 'boolean' && r.data.muted !== p.muted) {
+      p.muted = r.data.muted;
+      this.changed.emit();
+    }
+  }
+
+  /** Mutes / unmutes the project in the live mix; does not touch the active tab. */
+  async toggleMute(id: string): Promise<void> {
+    const p = this.projects.get(id);
+    if (!p) return;
+    const r = await this.cmd<{ muted?: boolean }>('project.mix', { muted: !p.muted }, { projectId: id });
+    if (r.ok) {
+      p.muted = typeof r.data?.muted === 'boolean' ? r.data.muted : !p.muted;
+      this.changed.emit();
+    }
+  }
+
   private adopt(id: string): ProjectStore {
     const p = new ProjectStore(id);
     this.projects.set(id, p);
@@ -418,6 +438,7 @@ export class App {
         if (!p) break;
         p.applySnapshot(m);
         this.refreshHistorySoon(p.id);
+        void this.loadMix(p);
         void this.socket.cmd<{ activity: ActivityEntry[] }>('project.activity', { limit: 60 }, { projectId: p.id }).then((r) => {
           if (r.ok && r.data) p.applyActivity(r.data.activity);
         });

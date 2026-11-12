@@ -18,7 +18,7 @@
 namespace rovox
 {
 
-class ProjectTransport : private juce::Timer
+class ProjectTransport : private juce::Timer, private te::TransportControl::Listener
 {
 public:
     using EventFn = std::function<void (const json&)>;
@@ -39,6 +39,7 @@ public:
 
 private:
     void timerCallback() override;
+    void playbackContextChanged() override;     // a context was created or deleted: the next one needs the project-mix stage
     void startPlayback (bool afterSeek);
     void stopPlayback();
     void publish();
@@ -48,6 +49,8 @@ private:
     bool wantPlaying_ = false;
     int missedChecks_ = 0, retries_ = 0;
     bool playIssued_ = false;
+    bool mixStageNeeded_ = true;            // set by playbackContextChanged(); cleared once the current context carries the project-mix stage
+    void installMixStage();
     std::chrono::steady_clock::time_point playAt_;
 };
 

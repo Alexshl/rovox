@@ -12,6 +12,7 @@ import type { ItemState, MarkerState, TrackState } from '../net/protocol';
 import type { App } from '../store/session';
 import type { AgentMark, ProjectStore } from '../store/project';
 import { textDialog } from './dialog';
+import { FxPluginSection } from './fxpanel';
 import { PeakCache } from './peaks';
 import { projectPicker } from './projects';
 
@@ -1196,9 +1197,8 @@ class TcpRow {
   private showFx(): void {
     this.popover?.remove();
     const list = this.store.fx.get(this.id) ?? [];
-    const rows = list.map((p) =>
-      h('div', { class: 'row' }, h('span', { text: p.name, style: { color: p.enabled ? 'var(--rx-ink)' : 'var(--rx-ink-muted)' } }), h('span', { class: 'type', text: p.type })),
-    );
+    const sections: FxPluginSection[] = list.map((p) => new FxPluginSection(this.app, p, (self) => sections.forEach((o) => o !== self && o.collapse())));
+    const rows = sections.map((x) => x.el);
     const r = this.fx.getBoundingClientRect();
     const pop = h(
       'div',

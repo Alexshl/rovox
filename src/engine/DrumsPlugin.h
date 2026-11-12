@@ -22,6 +22,10 @@ void registerDrumsPlugin (te::Engine&);
     "source_url", "pieces", "samples", "unmapped_notes"}. `waitS` > 0 waits (at most that long) until the kit is found and parsed or failed. Null for other plugins. */
 json drumsPluginExtras (te::Plugin&, double waitS = 0.0);
 
+/** The resolved kit of a drum sampler: {"id", "version", "sha256" (of kit.json and its sample files, always computed), "license", "source"}; null for other plugins or while the kit is
+    not found/parsed (waits at most `waitS`). */
+json drumsKitIdentity (te::Plugin&, double waitS = 0.0);
+
 /** The credit line the UI shows next to the plugin. */
 inline constexpr const char* drumsAttribution = "Drum samples: DRSKit by the DrumGizmo team and Jes Eiler (DRSDrums), CC BY 4.0";
 

@@ -411,7 +411,7 @@ void registerFxCommands (CommandRegistry& r)
                                                                                       "rovox_eq", "rovox_comp", "rovox_gate", "rovox_limit", "rovox_delay", "rovox_verb", "rovox_drums", "rovox:drums" } } } },
                { "plugin", pluginDesc }, { "index", { { "type", "integer" }, { "minimum", 0 } } } }, { "track_id" }),
         obj ({ { "plugin_id", str() } }), true,
-        [] (Project& p, const json& params, const CommandContext&) -> Result<json>
+        [] (Project& p, const json& params, const CommandContext& ctx) -> Result<json>
         {
             const auto trackId = params["track_id"].get<std::string>();
             te::PluginList* list = nullptr;
@@ -461,7 +461,10 @@ void registerFxCommands (CommandRegistry& r)
 
                 if (! jsfxKey.empty())
                 {
-                    // REAPER JS effects (plugin_uid "jsfx:<path below ROVOX_JSFX_PATH>") are built in: no probe, no child process
+                    // REAPER JS effects (plugin_uid "jsfx:<path below ROVOX_JSFX_PATH>") are built in: no probe, no child process; the licence gate still applies
+                    if (auto allowed = PluginCatalog::requireLicence (ctx.tenant, p.host().catalog().find (jsfxKey), jsfxKey); ! allowed.ok())
+                        return allowed.error();
+
                     auto created = createJsfxPlugin (p.edit(), jsfxKey);
 
                     if (! created.ok())

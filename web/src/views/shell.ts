@@ -19,6 +19,8 @@ const ICONS = {
   play: '<svg viewBox="0 0 16 16"><path d="M4 2.5v11L13.5 8z"/></svg>',
   pause: '<svg viewBox="0 0 16 16"><rect x="3.5" y="3" width="3" height="10"/><rect x="9.5" y="3" width="3" height="10"/></svg>',
   rec: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5"/></svg>',
+  speaker: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M2.5 6h2.5L8.5 3v10L5 10H2.5z" fill="currentColor"/><path d="M10.7 5.8a3.2 3.2 0 0 1 0 4.4M12.4 4.2a5.5 5.5 0 0 1 0 7.6" stroke-linecap="round"/></svg>',
+  speakerMuted: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M2.5 6h2.5L8.5 3v10L5 10H2.5z" fill="currentColor"/><path d="M10.8 6l3.4 4M14.2 6l-3.4 4" stroke-linecap="round"/></svg>',
   loop: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7V6a2 2 0 0 1 2-2h7M13 9v1a2 2 0 0 1-2 2H4"/><path d="M10 2l2.5 2L10 6M6 10l-2.5 2L6 14" fill="currentColor"/></svg>',
 };
 
@@ -205,9 +207,9 @@ export class Shell {
     this.audioBtn.addEventListener('click', () => void app.enableAudio());
     this.transport.append(
       mk('start', ICONS.start, 'На початок', '', () => void app.toStart()),
-      mk('stop', ICONS.stop, 'Стоп', '', () => void app.stop()),
+      mk('stop', ICONS.stop, 'Стоп', '', () => void this.stop()),
       mk('play', ICONS.play, 'Відтворення', 'play', () => void this.play()),
-      mk('pause', ICONS.pause, 'Пауза', '', () => void app.stop()),
+      mk('pause', ICONS.pause, 'Пауза', '', () => void this.stop()),
       mk('rec', ICONS.rec, 'Запис недоступний у цій версії', 'rec', () => undefined),
       mk('loop', ICONS.loop, 'Цикл', 'loop', () => app.toggleLoop()),
       h('div', { class: 'clock' }, this.clockBig, this.clockSmall),
@@ -223,6 +225,25 @@ export class Shell {
       this.snapBtn,
     );
     this.btn['rec']!.disabled = true;
+  }
+
+  /** The --audio none preview player: one element at most, so repeated Play never stacks previews. */
+  private previewAudio: HTMLAudioElement | null = null;
+
+  private async stop(): Promise<void> {
+    this.stopPreview();
+    await this.app.stop();
+  }
+
+  /** Bumped by every stopPreview(): a render.preview that finishes after a Stop (or a newer preview) must not start playing. */
+  private previewGen = 0;
+  private previewPending = false;
+
+  private stopPreview(): void {
+    this.previewGen++;
+    this.previewPending = false;
+    this.previewAudio?.pause();
+    this.previewAudio = null;
   }
 
   private async play(): Promise<void> {
@@ -245,15 +266,28 @@ export class Shell {
     const app = this.app;
     const p = app.active;
     if (!p) return;
+    this.stopPreview();
+    const gen = this.previewGen;
     app.toast('Відтворення недоступне (сервер запущено з --audio none). Граю render.preview: 30 с від курсора.');
     const start = p.transport.position_s;
-    const r = await app.mcp.runJob('render.preview', { project_id: p.id, range: { start: { s: start }, length: { s: 30 } }, format: 'mp3' });
+    this.previewPending = true;
+    let r: Awaited<ReturnType<typeof app.mcp.runJob>>;
+    try {
+      r = await app.mcp.runJob('render.preview', { project_id: p.id, range: { start: { s: start }, length: { s: 30 } }, format: 'mp3' });
+    } finally {
+      if (gen === this.previewGen) this.previewPending = false;
+    }
+    if (gen !== this.previewGen) return; // Stop (or another preview) came while the render was running
     const clip = (r.data as { result?: { clip?: { path?: string } } } | undefined)?.result?.clip;
     if (!r.ok || !clip?.path) {
       app.toast(r.error?.message ?? 'preview не вдався', 'error');
       return;
     }
     const audio = new Audio(`/api/projects/${encodeURIComponent(p.id)}/${clip.path}`);
+    this.previewAudio = audio;
+    audio.addEventListener('ended', () => {
+      if (this.previewAudio === audio) this.previewAudio = null;
+    });
     await audio.play().catch(() => app.toast('Браузер не дозволив відтворення', 'error'));
   }
 
@@ -274,6 +308,8 @@ export class Shell {
   private onKey(e: KeyboardEvent): void {
     const target = e.target as HTMLElement;
     if (target.closest('input, textarea, select') || document.querySelector('.scrim')) return;
+    // Space / Enter activate a focused button (tab mute, FX panel) or move a slider: not the global play shortcut then
+    if ((e.key === ' ' || e.key === 'Enter') && target.closest('button, [role=button], input[type=range]')) return;
     const app = this.app;
     const mod = e.ctrlKey || e.metaKey;
 
@@ -294,7 +330,7 @@ export class Shell {
       this.arrange.fit();
     } else if (!mod && e.key === ' ') {
       e.preventDefault();
-      if (app.active?.isPlaying()) void app.stop();
+      if (app.active?.isPlaying() || this.previewAudio || this.previewPending) void this.stop();
       else void this.play();
     } else if (!mod && e.key.toLowerCase() === 's') {
       this.arrange.splitAtPlayhead();
@@ -350,10 +386,11 @@ export class Shell {
   }
 
   private tabsSignature = '';
+  private readonly mixPending = new Set<string>();
 
   private renderTabs(): void {
     const app = this.app;
-    const sig = app.order.map((id) => { const q = app.projects.get(id); return q ? `${id}:${q.name}:${app.tabStatus(q)}:${q.dirty}:${syncState(q) ?? ''}:${q.storage?.last_error ?? ''}:${id === app.activeId}` : id; }).join('|');
+    const sig = app.order.map((id) => { const q = app.projects.get(id); return q ? `${id}:${q.name}:${app.tabStatus(q)}:${q.dirty}:${q.muted}:${syncState(q) ?? ''}:${q.storage?.last_error ?? ''}:${id === app.activeId}` : id; }).join('|');
     if (sig === this.tabsSignature) return;
     this.tabsSignature = sig;
     clear(this.tabs);
@@ -362,21 +399,41 @@ export class Shell {
       if (!p) continue;
       const st = app.tabStatus(p);
       const label = st === 'idle' ? (p.dirty ? 'edited' : 'idle') : st;
+      const muteTitle = p.muted ? 'Увімкнути звук' : 'Вимкнути звук';
+      // a sibling of the tab, not a child: no interactive element inside role=tab
+      const muteButton = h(
+        'button',
+        {
+          class: `mute${p.muted ? ' on' : ''}`,
+          title: muteTitle,
+          attrs: { 'aria-label': 'Звук проєкту', 'aria-pressed': String(p.muted) },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              if (this.mixPending.has(id)) return; // a project.mix request is in flight
+              this.mixPending.add(id);
+              void app.toggleMute(id).finally(() => this.mixPending.delete(id));
+            },
+          },
+        },
+        icon(p.muted ? ICONS.speakerMuted : ICONS.speaker),
+      );
       const tab = h(
         'div',
         { class: 'tab', attrs: { role: 'tab', 'aria-selected': String(id === app.activeId), tabindex: '0' } },
-        h('span', { class: `dot ${st}` }),
         h('span', { class: 'name', text: p.name || id, title: p.name }),
         h('span', { class: 'state', text: label }),
         p.dirty ? h('span', { class: 'dirty', text: '●', title: 'Є незбережені зміни' }) : null,
         syncBadge(p),
-        h('button', { class: 'close', text: '×', title: 'Закрити проект', attrs: { 'aria-label': 'Закрити проект' }, on: { click: (e) => { e.stopPropagation(); void app.closeProject(id); } } }),
       );
-      tab.addEventListener('click', () => app.setActive(id));
+      // a sibling of the tab like the mute button: no interactive element inside role=tab
+      const closeButton = h('button', { class: 'close', text: '×', title: 'Закрити проект', attrs: { 'aria-label': 'Закрити проект' }, on: { click: (e) => { e.stopPropagation(); void app.closeProject(id); } } });
+      const item = h('div', { class: `tabitem${id === app.activeId ? ' active' : ''}`, attrs: { role: 'presentation' } }, h('span', { class: `dot ${st}` }), muteButton, tab, closeButton);
+      item.addEventListener('click', () => app.setActive(id));
       tab.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') app.setActive(id);
+        if (e.key === 'Enter' && e.target === tab) app.setActive(id);
       });
-      this.tabs.append(tab);
+      this.tabs.append(item);
     }
     this.tabs.append(h('button', { class: 'add', text: '+', title: 'Новий проект', attrs: { 'aria-label': 'Новий проект' }, on: { click: () => void this.promptNewProject() } }));
   }

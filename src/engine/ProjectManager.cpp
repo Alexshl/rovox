@@ -4,6 +4,7 @@
 #include "ProjectManager.h"
 
 #include "Ids.h"
+#include "PluginCatalog.h"
 
 #include <algorithm>
 #include <cstring>
@@ -73,6 +74,10 @@ Result<int> ProjectManager::acquireLock (const fs::path& dir)
 
 Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject loaded, const OpenOptions& opts, bool created)
 {
+    // licence gate: a project of another tenant must not bring in plugins without a free licence (no instance is created from its saved state)
+    if (auto allowed = host_.catalog().requireLicencesInState (loaded.manifest.tenantId, loaded.editState); ! allowed.ok())
+        return allowed.error();
+
     int lockFd = -1;
     const bool mirrored = storage_ != nullptr && ! opts.readOnly && ! loaded.manifest.ephemeral;
 

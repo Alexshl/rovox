@@ -25,6 +25,8 @@ jobs:
         run: tools/check-license-headers.sh
       - name: NOTICE.md mentions every submodule
         run: tools/check-notice.sh
+      - name: tools tests (plugin licence reader)
+        run: python3 -m unittest discover -s tools/tests
       - name: docs/ must not be tracked (private design documents)
         run: |
           if git ls-files | grep -q '^docs/'; then
@@ -47,7 +49,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4          # without submodules: the nested JUCE one needs the https rewrite
       - name: Submodules (shallow, ssh -> https rewrite for nested JUCE)
@@ -62,8 +64,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ccache-mount
-          key: ccache-${{ matrix.arch }}-${{ github.sha }}
-          restore-keys: ccache-${{ matrix.arch }}-
+          key: ccache-trixie-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-trixie-${{ matrix.arch }}-
       - name: Inject ccache into BuildKit
         uses: reproducible-containers/buildkit-cache-dance@v3
         with:
@@ -80,10 +82,14 @@ jobs:
           load: true
           tags: rovox:ci
           build-args: ROVOX_GIT_SHA=${{ github.sha }}
-          cache-from: type=gha,scope=build-${{ matrix.arch }}
-          cache-to: type=gha,scope=build-${{ matrix.arch }},mode=max
+          cache-from: type=gha,scope=build-trixie-${{ matrix.arch }}
+          cache-to: type=gha,scope=build-trixie-${{ matrix.arch }},mode=max
 
       - name: Smoke test the runtime image
         run: |
           docker run --rm --network none rovox:ci --version
+          # every shared library of the binary must resolve in the runtime image
+          set -o pipefail
+          docker run --rm --entrypoint sh rovox:ci -c 'ldd /usr/local/bin/rovox' | tee /tmp/ldd.txt
+          if grep -q "not found" /tmp/ldd.txt; then echo "missing shared libraries"; exit 1; fi
           docker image inspect rovox:ci --format 'size={{.Size}}'

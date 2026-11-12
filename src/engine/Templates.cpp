@@ -249,7 +249,7 @@ void collectDependencies (const json& entry, const std::string& where, std::vect
         out.push_back ({ where, entry });
 }
 
-std::optional<json> resolveInCatalog (PluginCatalog& catalog, const json& spec, std::string& problem)
+std::optional<json> resolveInCatalog (PluginCatalog& catalog, const std::string& tenant, const json& spec, std::string& problem)
 {
     std::optional<json> rec;
 
@@ -263,6 +263,7 @@ std::optional<json> resolveInCatalog (PluginCatalog& catalog, const json& spec, 
         q.kind = spec.value ("kind", "");
         q.query = spec["query"].get<std::string>();
         q.status = "ok";
+        q.hideNonFree = tenant != "local";      // a free match wins over a non-free first match
         q.limit = 1;
         auto res = catalog.query (q);
 
@@ -412,7 +413,11 @@ void registerTemplateCommands (CommandRegistry& r)
             for (auto& d : deps)
             {
                 std::string problem;
-                auto rec = resolveInCatalog (catalog, d.spec, problem);
+                auto rec = resolveInCatalog (catalog, ctx.tenant, d.spec, problem);
+
+                if (rec && ! PluginCatalog::licenceAllows (ctx.tenant, rec))
+                    return makeError (errc::forbiddenLicense, "the template uses plugin " + rec->value ("name", "") + ", which has no known free licence and cannot be used on this server",
+                                      json { { "where", d.where }, { "plugin_uid", rec->value ("plugin_uid", "") }, { "license", rec->value ("license", json (nullptr)) } });
 
                 if (! rec)
                     missing.push_back ({ { "where", d.where }, { "needs", d.spec.contains ("plugin") ? d.spec["plugin"] : d.spec }, { "reason", problem } });
@@ -447,7 +452,7 @@ void registerTemplateCommands (CommandRegistry& r)
                 else
                 {
                     std::string problem;
-                    auto rec = resolveInCatalog (catalog, f, problem);
+                    auto rec = resolveInCatalog (catalog, ctx.tenant, f, problem);
                     args["plugin"] = { { "plugin_uid", rec->value ("plugin_uid", "") } };
                 }
 

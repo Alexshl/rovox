@@ -35,6 +35,7 @@ inline constexpr const char* pluginCrashed       = "PLUGIN_CRASHED";
 inline constexpr const char* pluginBlacklisted   = "PLUGIN_BLACKLISTED";
 inline constexpr const char* pluginLoadFailed    = "PLUGIN_LOAD_FAILED";
 inline constexpr const char* fileTooLarge        = "FILE_TOO_LARGE";
+inline constexpr const char* forbiddenLicense    = "FORBIDDEN_LICENSE";
 } // namespace errc
 
 struct Error

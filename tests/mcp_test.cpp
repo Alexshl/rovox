@@ -8,6 +8,7 @@
 #include "Hmac.h"
 #include "JobCallback.h"
 #include "JobManager.h"
+#include "JsfxPlugin.h"
 #include "Loudness.h"
 #include "McpHttp.h"
 #include "McpStdio.h"
@@ -2039,4 +2040,215 @@ ROVOX_TEST (mcp, midi_transpose_shifts_exactly_errors_or_folds_out_of_range_note
     CHECK ((pitches() == std::vector<int> { 55, 121, 8 }));
     h.data ("undo", { { "project_id", project } });
     CHECK (pitches() == original);
+}
+
+ROVOX_TEST (mcp, a_parameter_change_from_the_web_ui_shows_up_in_external_changes)
+{
+    Harness h;
+    const auto id = sineTracks (h.env, { -20.0 }, 1.0);
+    const std::string t1 = firstTrackId (h.data ("track.list", { { "project_id", id } }));
+    REQUIRE (h.tool ("fx.add", { { "project_id", id }, { "track_id", t1 }, { "builtin", "compressor" } })["ok"] == true);
+    auto params = h.data ("fx.list", { { "project_id", id }, { "target", t1 } })["fx"];
+    std::string compressor;
+
+    for (auto& p : params)
+        if (p["type"] == "compressor")
+            compressor = p["plugin_id"];
+
+    REQUIRE (! compressor.empty());
+    auto ps = h.data ("fx.params", { { "project_id", id }, { "plugin_id", compressor } })["fx"]["params"];
+    REQUIRE (ps.size() > 0);
+    const auto ident = ps[0]["ident"].get<std::string>();
+    const double lo = ps[0]["min"], hi = ps[0]["max"];
+
+    const Origin web { Origin::Kind::ui, "ws_9", "web@browser" };
+    REQUIRE (h.env.runAs (web, id, "fx.update", { { "plugin_id", compressor }, { "params", { { ident, lo + (hi - lo) * 0.5 } } } }).ok);
+
+    auto r = h.tool ("marker.list", { { "project_id", id } });
+    REQUIRE (r.contains ("external_changes"));
+    CHECK (r["external_changes"]["count"].get<int>() >= 1);
+    CHECK (r["external_changes"]["summary"][0].get<std::string>().find ("fx.update") != std::string::npos);
+    CHECK (r["external_changes"]["summary"][0].get<std::string>().find ("web@browser") != std::string::npos);
+}
+
+//==============================================================================
+// plugin licences (E6-01): server_use_ok, the plugin.catalog filter and the FORBIDDEN_LICENSE gate for other tenants
+
+namespace
+{
+/** ROVOX_JSFX_PATH points at a temporary directory with one user JSFX file ("unknown" licence) and, optionally, <data>/catalog/licenses.json
+    carries an override; both are removed when the object goes away. */
+struct LicenseFixture
+{
+    LicenseFixture()
+    {
+        const char* old = std::getenv ("ROVOX_JSFX_PATH");
+        hadOld = old != nullptr;
+
+        if (hadOld)
+            oldValue = old;
+
+        jsfxDir = fs::temp_directory_path() / ("rovox-lic-" + std::to_string (std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories (jsfxDir);
+        std::ofstream (jsfxDir / "licgain.jsfx") << "desc:Licence test gain\nslider1:0<-60,12,0.1>Gain (dB)\n@sample\nspl0 *= 1; spl1 *= 1;\n";
+        ::setenv ("ROVOX_JSFX_PATH", jsfxDir.string().c_str(), 1);
+        jsfxRescan();
+        overrideFile = test::host().dataDir() / "catalog" / "licenses.json";
+        fs::create_directories (overrideFile.parent_path());
+    }
+
+    ~LicenseFixture()
+    {
+        std::error_code ec;
+        fs::remove (overrideFile, ec);
+        test::host().catalog().reloadLicenses();
+
+        if (hadOld)
+            ::setenv ("ROVOX_JSFX_PATH", oldValue.c_str(), 1);
+        else
+            ::unsetenv ("ROVOX_JSFX_PATH");
+
+        jsfxRescan();
+        fs::remove_all (jsfxDir, ec);
+    }
+
+    void setOverride (const json& j)
+    {
+        std::ofstream (overrideFile) << j.dump();
+        test::host().catalog().reloadLicenses();
+    }
+
+    fs::path jsfxDir, overrideFile;
+    bool hadOld = false;
+    std::string oldValue;
+};
+
+json findRecord (const json& catalog, const std::string& uid)
+{
+    for (auto& p : catalog["plugins"])
+        if (p["plugin_uid"] == uid)
+            return p;
+
+    return nullptr;
+}
+}
+
+ROVOX_TEST (mcp, plugin_catalog_reports_licences_and_filters_by_server_use_ok)
+{
+    LicenseFixture fx;
+    Harness h;
+
+    // stock plugins are Rovox code: AGPL, with the repository as the source
+    auto all = h.data ("plugin.catalog", { { "limit", 500 } });
+    auto eq = findRecord (all, "rovox:eq");
+    REQUIRE (eq.is_object());
+    CHECK (eq["license"] == "AGPL-3.0-or-later");
+    CHECK (eq["source_url"] == "https://github.com/Alexshl/rovox");
+    CHECK (eq["server_use_ok"] == true);
+
+    auto drums = findRecord (all, "rovox:drums");
+    REQUIRE (drums.is_object());
+    CHECK (drums["kit"]["license"] == "CC-BY-4.0");
+    CHECK (drums["server_use_ok"] == true);
+
+    // a user JSFX has no licence on record: "unknown", and the strict filter leaves it out
+    const std::string jsfx = "jsfx:licgain.jsfx";
+    auto user = findRecord (all, jsfx);
+    REQUIRE (user.is_object());
+    CHECK (user["server_use_ok"] == "unknown");
+    CHECK (! user.contains ("license"));
+
+    auto filtered = h.data ("plugin.catalog", { { "server_use_ok", true }, { "limit", 500 } });
+    CHECK (findRecord (filtered, jsfx).is_null());
+    CHECK (findRecord (filtered, "rovox:eq").is_object());
+
+    for (auto& p : filtered["plugins"])
+        CHECK (p["server_use_ok"] == true);
+
+    // a record from a licences.json (the one the image build writes, or the override in the data directory) gets the licence and the source
+    fx.setOverride ({ { jsfx, { { "license", "MIT" }, { "source_url", "https://example.org/licgain" }, { "package", "licgain" } } } });
+    auto licensed = findRecord (h.data ("plugin.catalog", { { "server_use_ok", true }, { "limit", 500 } }), jsfx);
+    REQUIRE (licensed.is_object());
+    CHECK (licensed["license"] == "MIT");
+    CHECK (licensed["source_url"] == "https://example.org/licgain");
+    CHECK (licensed["server_use_ok"] == true);
+
+    // a licence that is not on the free list stays "unknown"
+    fx.setOverride ({ { jsfx, { { "license", "LicenseRef-proprietary" }, { "source_url", "https://example.org/licgain" } } } });
+    auto nonFree = findRecord (h.data ("plugin.catalog", { { "limit", 500 } }), jsfx);
+    REQUIRE (nonFree.is_object());
+    CHECK (nonFree["server_use_ok"] == "unknown");
+}
+
+ROVOX_TEST (mcp, other_tenants_cannot_use_plugins_without_a_free_licence)
+{
+    LicenseFixture fx;
+    Harness h;
+    const std::string jsfx = "jsfx:licgain.jsfx";
+
+    auto acme = h.server.createSession ("acme");
+    h.rpc ("initialize", { { "protocolVersion", "2025-06-18" } }, 1, acme.get());
+
+    // the catalog of another tenant hides records that are not server_use_ok
+    auto seen = h.tool ("plugin.catalog", { { "limit", 500 } }, acme.get());
+    REQUIRE (seen["ok"] == true);
+    CHECK (findRecord (seen["data"], jsfx).is_null());
+    CHECK (findRecord (seen["data"], "rovox:eq").is_object());
+
+    auto project = h.tool ("project.new", { { "name", "acme" } }, acme.get());
+    REQUIRE (project["ok"] == true);
+    const std::string acmeProject = project["data"]["project_id"];
+    const std::string acmeTrack = h.tool ("track.create", { { "project_id", acmeProject }, { "name", "T" } }, acme.get())["data"]["track_id"];
+
+    auto denied = h.tool ("fx.add", { { "project_id", acmeProject }, { "track_id", acmeTrack }, { "plugin", { { "plugin_uid", jsfx } } } }, acme.get());
+    CHECK (denied["ok"] == false);
+    CHECK (denied["error"]["code"] == "FORBIDDEN_LICENSE");
+
+    // a free stock plugin is fine for them
+    CHECK (h.tool ("fx.add", { { "project_id", acmeProject }, { "track_id", acmeTrack }, { "plugin", { { "plugin_uid", "rovox:eq" } } } }, acme.get())["ok"] == true);
+
+    // the local tenant is not restricted
+    const auto id = h.newProject();
+    const std::string t1 = h.data ("track.create", { { "project_id", id }, { "name", "T" } })["track_id"];
+    CHECK (h.tool ("fx.add", { { "project_id", id }, { "track_id", t1 }, { "plugin", { { "plugin_uid", jsfx } } } })["ok"] == true);
+
+    // with a free licence on record the other tenant may load it too
+    fx.setOverride ({ { jsfx, { { "license", "GPL-2.0-or-later" }, { "source_url", "https://example.org/licgain" } } } });
+    CHECK (h.tool ("fx.add", { { "project_id", acmeProject }, { "track_id", acmeTrack }, { "plugin", { { "plugin_uid", jsfx } } } }, acme.get())["ok"] == true);
+}
+
+ROVOX_TEST (mcp, licence_gate_covers_uid_file_and_rpp_paths_of_other_tenants)
+{
+    LicenseFixture fx;
+    Harness h;
+
+    auto acme = h.server.createSession ("acme");
+    h.rpc ("initialize", { { "protocolVersion", "2025-06-18" } }, 1, acme.get());
+    auto project = h.tool ("project.new", { { "name", "acme gate" } }, acme.get());
+    REQUIRE (project["ok"] == true);
+    const std::string acmeProject = project["data"]["project_id"];
+    const std::string acmeTrack = h.tool ("track.create", { { "project_id", acmeProject }, { "name", "T" } }, acme.get())["data"]["track_id"];
+
+    // a plugin that is not in the catalog has an unknown licence: format + uid, and a file path, are both refused
+    auto byUid = h.tool ("fx.add", { { "project_id", acmeProject }, { "track_id", acmeTrack }, { "plugin", { { "format", "LV2" }, { "uid", "urn:rovox:test:unknown-plugin" } } } }, acme.get());
+    CHECK (byUid["ok"] == false);
+    CHECK (byUid["error"]["code"] == "FORBIDDEN_LICENSE");
+
+    auto byFile = h.tool ("fx.add", { { "project_id", acmeProject }, { "track_id", acmeTrack },
+                                      { "plugin", { { "format", "VST3" }, { "uid", "1234" }, { "file", "/nonexistent/Unlisted.vst3" } } } }, acme.get());
+    CHECK (byFile["ok"] == false);
+    CHECK (byFile["error"]["code"] == "FORBIDDEN_LICENSE");
+
+    // an RPP with a JS effect of unknown licence is refused as a whole
+    const auto dir = test::makeTempDir ("mcp-lic-rpp");
+    std::ofstream (dir / "js.RPP") << "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  TEMPO 120 4 4 0\n  <TRACK {AAAAAAAA-0000-0000-0000-0000000000A1}\n    NAME \"JS\"\n"
+                                      "    ISBUS 0 0\n    <FXCHAIN\n      BYPASS 0 0 0\n      <JS licgain \"\"\n        -6\n      >\n      FXID {11111111-1111-1111-1111-111111111111}\n    >\n  >\n>\n";
+    auto imported = h.tool ("import.rpp", { { "project_id", acmeProject }, { "path", (dir / "js.RPP").string() } }, acme.get());
+    CHECK (imported["ok"] == false);
+    CHECK (imported["error"]["code"] == "FORBIDDEN_LICENSE");
+
+    // the local tenant still imports it
+    const auto id = h.newProject();
+    auto local = h.tool ("import.rpp", { { "project_id", id }, { "path", (dir / "js.RPP").string() } });
+    CHECK (local["ok"] == true);
 }

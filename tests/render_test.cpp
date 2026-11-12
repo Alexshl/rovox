@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
+#include "DrumKitLibrary.h"
+#include "DrumsPlugin.h"
 #include "Limiter.h"
 #include "Loudness.h"
 #include "Render.h"
@@ -382,6 +384,79 @@ ROVOX_TEST (render, deterministic_input_hash_and_identical_float_output_on_one_a
     auto c = renderProject (env.project (id), req);
     REQUIRE (c.ok());
     CHECK (c.value()["metadata"]["input_hash"] != a.value()["metadata"]["input_hash"]);
+}
+
+namespace
+{
+void writeTinyKit (const fs::path& dir, const std::string& license)
+{
+    fs::create_directories (dir);
+    test::writeWav (dir / "kick.wav", { test::sine (80.0, -12.0, 0.2, 44100.0) }, 44100.0, 16);
+    json layer { { "vel_min", 1 }, { "vel_max", 127 }, { "samples", { "kick.wav" } } };
+    json piece { { "id", "kick" }, { "name", "kick" }, { "notes", { 36 } }, { "max_voices", 2 }, { "choke_group", "" }, { "chokes", json::array() }, { "layers", { layer } } };
+    json manifest { { "format", "rovox-drumkit" }, { "version", 1 }, { "id", "drskit" }, { "name", "Tiny kit" }, { "license", license }, { "sample_rate", 44100 },
+                    { "pieces", { piece } } };
+    std::ofstream (dir / "kit.json", std::ios::binary) << manifest.dump (1);
+}
+
+struct KitPathScope
+{
+    explicit KitPathScope (const fs::path& root) { DrumKitLibrary::instance().setSearchPaths (std::vector<fs::path> { root }); }
+    ~KitPathScope() { DrumKitLibrary::instance().setSearchPaths (std::nullopt); }
+};
+} // namespace
+
+ROVOX_TEST (render, metadata_names_the_drum_kit_and_the_input_hash_follows_it)
+{
+    const auto root = test::makeTempDir ("render-kit");
+    writeTinyKit (root / "drskit", "CC0");
+    KitPathScope scope (root);
+
+    test::Env env;
+    const auto id = env.newProject ("kit");
+    const auto track = env.ok (id, "track.create", { { "name", "Drums" } })["track_id"].get<std::string>();
+    REQUIRE (env.run (id, "fx.add", { { "track_id", track }, { "builtin", "rovox:drums" } }).ok);
+    REQUIRE (env.run (id, "item.create_midi", { { "track_id", track }, { "notes", { { { "pitch", 36 }, { "start_qn", 0.0 }, { "length_qn", 0.25 }, { "velocity", 110 } } } } }).ok);
+
+    auto req = plainRequest();
+    req.seed = "kit-seed";
+    auto a = renderProject (env.project (id), req);
+
+    if (! a.ok())
+        std::cerr << "    " << a.error().toJson().dump() << "\n";
+
+    REQUIRE (a.ok());
+    const auto meta = a.value()["metadata"];
+    REQUIRE (meta["instrument_packs"].size() == 1);
+    const auto pack = meta["instrument_packs"][0];
+
+    for (auto* key : { "id", "version", "sha256" })
+        CHECK (pack.contains (key) && ! pack[key].dump().empty() && pack[key] != "" && ! pack[key].is_null());
+
+    CHECK (pack["id"] == "drskit");
+    CHECK (pack["sha256"].get<std::string>().size() == 64);
+    CHECK (meta["seed"] == "kit-seed");
+    CHECK (! meta["engine"]["rovox"].get<std::string>().empty());
+    CHECK (! meta["engine"]["tracktion"].get<std::string>().empty());
+    CHECK (! meta["engine"]["juce"].get<std::string>().empty());
+
+    // the same kit renders to the same hash; another kit.json changes it
+    auto same = renderProject (env.project (id), req);
+    REQUIRE (same.ok());
+    CHECK (same.value()["metadata"]["input_hash"] == meta["input_hash"]);
+
+    writeTinyKit (root / "drskit", "CC-BY-4.0");
+    auto changed = renderProject (env.project (id), req);
+    REQUIRE (changed.ok());
+    CHECK (changed.value()["metadata"]["instrument_packs"][0]["sha256"] != pack["sha256"]);
+    CHECK (changed.value()["metadata"]["input_hash"] != meta["input_hash"]);
+
+    // the kit identity covers the samples: new bytes under the same kit.json change it
+    test::writeWav (root / "drskit" / "kick.wav", { test::sine (120.0, -12.0, 0.25, 44100.0) }, 44100.0, 16);
+    auto resampled = renderProject (env.project (id), req);
+    REQUIRE (resampled.ok());
+    CHECK (resampled.value()["metadata"]["instrument_packs"][0]["sha256"] != changed.value()["metadata"]["instrument_packs"][0]["sha256"]);
+    CHECK (resampled.value()["metadata"]["input_hash"] != changed.value()["metadata"]["input_hash"]);
 }
 
 // ---- the 60.000 s hang (spike P5) ---------------------------------------------------------------------------

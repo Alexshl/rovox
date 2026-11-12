@@ -3,6 +3,7 @@
 
 #include "Transport.h"
 
+#include "ProjectMixNode.h"
 #include "TimePos.h"
 
 #include <cmath>
@@ -10,10 +11,14 @@
 namespace rovox
 {
 
-ProjectTransport::ProjectTransport (Project& p, EventFn e) : project_ (p), event_ (std::move (e)) {}
+ProjectTransport::ProjectTransport (Project& p, EventFn e) : project_ (p), event_ (std::move (e))
+{
+    project_.edit().getTransport().addListener (this);
+}
 
 ProjectTransport::~ProjectTransport()
 {
+    project_.edit().getTransport().removeListener (this);
     stopTimer();
 
     if (wantPlaying_)
@@ -135,6 +140,9 @@ void ProjectTransport::startPlayback (bool afterSeek)
     auto* stream = project_.host().stream();
 
     tc.ensureContextAllocated();
+
+    installMixStage();
+
     project_.meters().sampleLatest();       // attach the level taps before the first block plays
     wantPlaying_ = true;
     missedChecks_ = 0;
@@ -146,6 +154,34 @@ void ProjectTransport::startPlayback (bool afterSeek)
     playAt_ = std::chrono::steady_clock::now() + std::chrono::milliseconds (afterSeek ? 40 : 0);
     playIssued_ = false;
     startTimer (30);
+}
+
+void ProjectTransport::playbackContextChanged()
+{
+    mixStageNeeded_ = true;             // only a flag: the stage is installed from startPlayback / the supervisor, not inside Tracktion's notification
+}
+
+/** Installs the project-mix stage once per playback context. Tracktion recreates the context (device change, freePlaybackContext) and tells us through
+    TransportControl::Listener::playbackContextChanged(), which sets the flag; the install itself runs on startPlayback and on the supervisor tick.
+    The stage sits after the master LevelMeasuringNode on purpose: the master meter shows the project's own mix, while the mute / solo / gain of the
+    project strip only change what the listener hears. It applies to wave outputs only (MIDI outputs are returned unchanged). */
+void ProjectTransport::installMixStage()
+{
+    auto* ctx = project_.edit().getTransport().getCurrentPlaybackContext();
+
+    if (ctx == nullptr || ! mixStageNeeded_)
+        return;
+
+    auto* strip = &project_.strip();
+    ctx->setInsertOptionalLastStageNodeForDeviceCallback ([strip] (te::OutputDevice& dev, const te::CreateNodeParams&, std::unique_ptr<tracktion::graph::Node> n) -> std::unique_ptr<tracktion::graph::Node>
+                                                          {
+                                                              if (dynamic_cast<te::WaveOutputDevice*> (&dev) == nullptr)
+                                                                  return n;
+
+                                                              return makeProjectMixNode (*strip, std::move (n));
+                                                          });
+    mixStageNeeded_ = false;            // before reallocate(): a context change it causes sets the flag again
+    ctx->reallocate();                  // the callback applies on the next graph build
 }
 
 void ProjectTransport::stopPlayback()
@@ -169,6 +205,8 @@ void ProjectTransport::timerCallback()
 {
     if (! wantPlaying_)
         return;
+
+    installMixStage();
 
     auto& tc = project_.edit().getTransport();
 

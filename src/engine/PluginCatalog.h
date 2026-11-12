@@ -37,6 +37,8 @@ struct CatalogQuery
 {
     std::string kind, query, format, status, tag;       // kind: effect | instrument
     bool includePresets = false;
+    bool serverUseOk = false;                           // only records whose server_use_ok is exactly true
+    bool hideNonFree = false;                           // tenants other than "local" never see records whose server_use_ok is not true
     size_t limit = 50, offset = 0;
 };
 
@@ -55,13 +57,34 @@ public:
 
     json query (const CatalogQuery&);
 
+    /** Reads the licences of the installed plugins: $ROVOX_LICENSES_FILE or /usr/share/rovox/licenses.json (written at image build time by
+        tools/plugin-licenses.py from the Debian copyright files), overridden per key by <data>/catalog/licenses.json. */
+    void reloadLicenses();
+    /** True if the SPDX id (or an expression of ids joined by AND / OR) is on the free list of the server-use policy. */
+    static bool isFreeLicense (const std::string& spdx);
+    /** True only if the record's server_use_ok is exactly boolean true (the string "unknown" is not). */
+    static bool serverUseOk (const json& record)    { return record.is_object() && record.contains ("server_use_ok") && record["server_use_ok"] == true; }
+
+    /** THE licence gate: the "local" tenant may use anything; any other tenant only a plugin that has a catalog record with server_use_ok == true
+        (a plugin without a record has an unknown licence). Every path that instantiates a plugin for a tenant goes through this. */
+    static bool licenceAllows (const std::string& tenant, const std::optional<json>& record)
+    {
+        return tenant == "local" || (record.has_value() && serverUseOk (*record));
+    }
+    /** FORBIDDEN_LICENSE unless licenceAllows(); `what` names the plugin in the message when there is no record. */
+    static Result<void> requireLicence (const std::string& tenant, const std::optional<json>& record, const std::string& what);
+
+    /** Licence gate for a project being opened: every external plugin ("vst" nodes) in the saved edit state must have a catalog record (matched by
+        its file or URI) that passes licenceAllows() for the tenant; the error lists the offending plugins. The "local" tenant is never restricted. */
+    Result<void> requireLicencesInState (const std::string& tenant, const juce::ValueTree& editState) const;
+
     /** Record by plugin_uid ("lv2:<uri>") or, failing that, by exact name (then the first match). nullopt if unknown. */
     std::optional<json> find (const std::string& uidOrName) const;
     static std::optional<juce::PluginDescription> descriptionOf (const json& record);
 
     /** Loads the plugin in a child process once per catalog fingerprint. A crash blacklists it (PLUGIN_CRASHED), a load failure
         gives PLUGIN_LOAD_FAILED. Returns the probe info. */
-    Result<json> ensureProbed (const std::string& pluginUid);
+    Result<json> ensureProbed (const std::string& pluginUid, const std::string& tenant = "local");
 
     std::optional<std::string> blacklistReason (const std::string& pluginUid) const;
     void blacklist (const std::string& pluginUid, const std::string& reason);
@@ -85,6 +108,7 @@ public:
 
 private:
     json summary (const json& record, bool withPresets);
+    json withLicense (json record) const;       // mutex_ held
     void loadFiles();
     void saveCatalog();
     void saveJson (const char* file, const json&) const;
@@ -98,6 +122,7 @@ private:
     std::atomic<bool> cancelled_ { false };
     json plugins_ = json::object();         // plugin_uid -> record
     json blacklist_ = json::object(), probe_ = json::object(), tags_ = json::object(), presetCache_ = json::object();
+    json licenses_ = json::object();        // plugin_uid or bundle name -> {license, source_url, package}
     std::string fingerprint_, scannedAt_;
     std::string state_ = "never";           // never | scanning | done
 };

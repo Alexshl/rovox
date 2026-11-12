@@ -74,6 +74,8 @@ export class ProjectStore {
   lengthS = 0;
   dirty = false;
   storage: StorageInfo | undefined;
+  /** The project's strip in the live mix (project.mix): muted projects are silent in playback. */
+  muted = false;
   loaded = false;
   canUndo = false;
   canRedo = false;

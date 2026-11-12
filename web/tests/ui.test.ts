@@ -85,6 +85,11 @@ function answer(msg: Record<string, any>, ws: FakeWebSocket): void {
         const step = (rev: number, kind: string) => ({ revision: rev, label: 'x', time: '', origin: { kind, session: 's', label: kind === 'mcp' ? 'Claude' : 'ui' } });
         return reply({ undo: [step(8, 'ui'), step(11, 'mcp'), step(12, 'mcp')], redo: [] });
       }
+      case 'project.mix': {
+        const params = (msg.params ?? {}) as Record<string, unknown>;
+        if (typeof params.muted === 'boolean') mix.muted = params.muted;
+        return reply({ project_id: 'p_1', gain_db: 0, muted: mix.muted, solo: false });
+      }
       case 'project.activity':
         return reply({ activity: [] });
       default:
@@ -92,6 +97,8 @@ function answer(msg: Record<string, any>, ws: FakeWebSocket): void {
     }
   }
 }
+
+const mix = { muted: false };
 
 const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
 
@@ -103,6 +110,7 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} });
   if (!hasCanvas) vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   project.revision = 10;
+  mix.muted = false;
   document.body.innerHTML = '';
   localStorage.clear();
 });
@@ -167,7 +175,7 @@ describe('the window', () => {
     expect(document.querySelector('.agent-row b')!.textContent).toBe('Claude');
     expect(document.querySelector('.agent-row')!.classList.contains('active')).toBe(true);
     expect(document.querySelector('.log-row .tool.agent')!.textContent).toBe('item.split');
-    expect(document.querySelector('.tab .dot')!.classList.contains('agent')).toBe(true);
+    expect(document.querySelector('.tabitem .dot')!.classList.contains('agent')).toBe(true);
 
     const undoAgent = [...document.querySelectorAll<HTMLButtonElement>('.mcp-actions button')].find((b) => b.textContent!.startsWith('Undo агента'))!;
     expect(undoAgent.textContent).toBe('Undo агента (2)');
@@ -240,6 +248,122 @@ describe('the window', () => {
 });
 
 // Real 2D drawing through node-canvas: exercises the canvas code of the arrange view and the mixer, and writes PNGs when ROVOX_PNG_DIR is set.
+describe('--audio none preview fallback', () => {
+  it('plays render.preview locally, keeps one Audio, and Stop pauses it without touching the WS audio', async () => {
+    const { app } = await boot();
+    app.serverInfo.audio.mode = 'none';
+    const runJob = vi.spyOn(app.mcp, 'runJob').mockResolvedValue({ ok: true, data: { result: { clip: { path: 'renders/prev.mp3' } } } } as never);
+    const wsPlay = vi.spyOn(app, 'play').mockResolvedValue(undefined as never);
+    const enable = vi.spyOn(app, 'enableAudio').mockResolvedValue(undefined as never);
+    const made: { src: string; pause: ReturnType<typeof vi.fn>; play: ReturnType<typeof vi.fn>; fire: (type: string) => void }[] = [];
+    vi.stubGlobal(
+      'Audio',
+      class {
+        pause = vi.fn();
+        play = vi.fn(async () => undefined);
+        private listeners = new Map<string, (() => void)[]>();
+        constructor(public src: string) {
+          made.push(this);
+        }
+        addEventListener(type: string, fn: () => void): void {
+          this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+        }
+        fire(type: string): void {
+          for (const fn of this.listeners.get(type) ?? []) fn();
+        }
+      },
+    );
+
+    const playBtn = document.querySelector<HTMLButtonElement>('.transport button[title="Відтворення"], .transport .tbtn[aria-label="Відтворення"]') ?? [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.title === 'Відтворення' || b.getAttribute('aria-label') === 'Відтворення')!;
+    playBtn.click();
+    await tick(50);
+    expect(runJob).toHaveBeenCalledTimes(1);
+    expect(runJob.mock.calls[0]![0]).toBe('render.preview');
+    expect(made).toHaveLength(1);
+    expect(made[0]!.src).toContain('renders/prev.mp3');
+    expect(wsPlay).not.toHaveBeenCalled();
+    expect(enable).not.toHaveBeenCalled();
+
+    playBtn.click(); // repeated Play replaces the preview instead of stacking a second one
+    await tick(50);
+    expect(made).toHaveLength(2);
+    expect(made[0]!.pause).toHaveBeenCalled();
+    expect(made[1]!.pause).not.toHaveBeenCalled();
+
+    const stopBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.title === 'Стоп' || b.getAttribute('aria-label') === 'Стоп')!;
+    stopBtn.click();
+    await tick(50);
+    expect(made[1]!.pause).toHaveBeenCalled();
+    expect(wsPlay).not.toHaveBeenCalled();
+
+    playBtn.click(); // a preview that played to its end is forgotten: the next Play starts a new one, nothing is paused twice
+    await tick(50);
+    expect(made).toHaveLength(3);
+    made[2]!.fire('ended');
+    playBtn.click();
+    await tick(50);
+    expect(made).toHaveLength(4);
+    expect(made[2]!.pause).not.toHaveBeenCalled();
+  });
+});
+
+describe('project tab close', () => {
+  it('has the close button outside role=tab, and clicking it does not activate the tab', async () => {
+    const { app } = await boot();
+    const closeBtn = document.querySelector<HTMLButtonElement>('.tabitem .close')!;
+    expect(closeBtn.closest('[role=tab]')).toBeNull();
+    const setActive = vi.spyOn(app, 'setActive');
+    closeBtn.click();
+    expect(setActive).not.toHaveBeenCalled();
+  });
+});
+
+describe('project tab mute', () => {
+  it('toggles project.mix muted from the speaker icon, updates icon and aria, and does not activate the tab', async () => {
+    const { app, ws } = await boot();
+    const btn = () => document.querySelector<HTMLButtonElement>('.tabitem .mute')!;
+    expect(btn().getAttribute('aria-label')).toBe('Звук проєкту');
+    expect(btn().title).toBe('Вимкнути звук');
+    expect(btn().getAttribute('aria-pressed')).toBe('false');
+    expect(btn().closest('[role=tab]')).toBeNull(); // not nested in the tab
+    const setActive = vi.spyOn(app, 'setActive');
+
+    btn().click();
+    await tick(100);
+    const sent = ws.sent.filter((m) => m.t === 'cmd' && m.name === 'project.mix' && m.params?.muted !== undefined);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.params).toMatchObject({ muted: true });
+    expect(btn().getAttribute('aria-label')).toBe('Звук проєкту');
+    expect(btn().title).toBe('Увімкнути звук');
+    expect(btn().getAttribute('aria-pressed')).toBe('true');
+    expect(btn().classList.contains('on')).toBe(true);
+    expect(setActive).not.toHaveBeenCalled();
+
+    btn().click();
+    await tick(100);
+    expect(ws.sent.filter((m) => m.name === 'project.mix' && m.params?.muted === false)).toHaveLength(1);
+    expect(btn().getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('ignores clicks while a project.mix request is in flight', async () => {
+    const { ws } = await boot();
+    const btn = document.querySelector<HTMLButtonElement>('.tabitem .mute')!;
+    btn.click();
+    btn.click();
+    await tick(100);
+    expect(ws.sent.filter((m) => m.t === 'cmd' && m.name === 'project.mix' && m.params?.muted !== undefined)).toHaveLength(1);
+  });
+
+  it('shows the muted state the server reports after a (re)connect', async () => {
+    mix.muted = true;
+    await boot();
+    const b = document.querySelector<HTMLButtonElement>('.tabitem .mute')!;
+    expect(b.getAttribute('aria-pressed')).toBe('true');
+    expect(b.getAttribute('aria-label')).toBe('Звук проєкту');
+    expect(b.title).toBe('Увімкнути звук');
+  });
+});
+
 describe.skipIf(!hasCanvas)('canvas drawing', () => {
   it('draws lanes, items with waveforms, fades, the playhead, the agent cursor and the meters without errors', async () => {
     const tokens = JSON.parse(readFileSync(`${process.cwd()}/design/tokens.json`, 'utf8'));

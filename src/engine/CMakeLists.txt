@@ -31,6 +31,7 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginHost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PluginScan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Project.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ProjectMixNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ProjectFormat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ProjectManager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Render.cpp

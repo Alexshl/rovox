@@ -49,7 +49,7 @@ std::unique_ptr<te::Edit> createEditForProject (te::Engine& engine, const fs::pa
 }
 
 Project::Project (EngineHost& host, fs::path dir, Manifest manifest, juce::ValueTree editState, PublishFn publish)
-    : host_ (host), dir_ (std::move (dir)), manifest_ (std::move (manifest)), publish_ (std::move (publish)), revision_ (manifest_.revision)
+    : host_ (host), dir_ (std::move (dir)), manifest_ (std::move (manifest)), publish_ (std::move (publish)), strip_ (manifest_.tenantId), revision_ (manifest_.revision)
 {
     std::error_code ec;
 

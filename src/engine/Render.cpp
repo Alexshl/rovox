@@ -17,6 +17,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <mutex>
+#include <set>
 #include <thread>
 
 namespace rovox
@@ -1093,17 +1094,29 @@ Result<json> renderEdit (te::Edit& edit, const RenderContext& ctx, const RenderR
         if (auto* ext2 = dynamic_cast<te::ExternalPlugin*> (p))
             plugins.push_back ({ { "uid", toStd (ext2->desc.fileOrIdentifier) }, { "name", toStd (ext2->getName()) }, { "version", toStd (ext2->desc.version) } });
 
+    json packs = json::array();
+    std::set<std::string> packKeys;
+
+    for (auto p : te::getAllPlugins (edit, false))
+        if (auto id = drumsKitIdentity (*p, 60.0); id.is_object())
+            if (packKeys.insert (id["id"].get<std::string>() + "|" + id["version"].get<std::string>() + "|" + id["sha256"].get<std::string>()).second)
+                packs.push_back ({ { "id", id["id"] }, { "version", id["version"] }, { "sha256", id["sha256"] }, { "license", id["license"] }, { "source", id["source"] } });
+
     std::unique_ptr<juce::XmlElement> xml (edit.state.createXml());
     Sha256 inputHash;
     const auto stateXml = xml->toString().toStdString();
     inputHash.update (stateXml.data(), stateXml.size());
+
+    for (auto& k : packKeys)
+        inputHash.update (k.data(), k.size());
+
     const std::string requestKey = req.scope + "|" + std::to_string (range.value().getStart().inSeconds()) + "|" + std::to_string (range.value().getEnd().inSeconds())
                                    + "|" + std::to_string (sr) + "|" + req.seed.value_or ("");
     inputHash.update (requestKey.data(), requestKey.size());
 
     json meta { { "engine", { { "rovox", rovoxVersion() }, { "tracktion", tracktionVersion() }, { "juce", toStd (juce::SystemStats::getJUCEVersion()) } } },
                 { "source_revision", ctx.sourceRevision }, { "input_hash", inputHash.hexDigest() }, { "seed", req.seed ? json (*req.seed) : json (nullptr) },
-                { "instrument_packs", json::array() }, { "plugins", plugins }, { "range_s", { range.value().getStart().inSeconds(), range.value().getEnd().inSeconds() } } };
+                { "instrument_packs", packs }, { "plugins", plugins }, { "range_s", { range.value().getStart().inSeconds(), range.value().getEnd().inSeconds() } } };
 
     for (auto& f : files)
     {

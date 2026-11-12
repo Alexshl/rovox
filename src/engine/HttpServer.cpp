@@ -31,6 +31,7 @@ int statusFor (const std::string& code)
     if (code == errc::busy)                 return 423;
     if (code == errc::unsupported)          return 501;
     if (code == errc::forbiddenPath)        return 403;
+    if (code == errc::forbiddenLicense)     return 403;
     return 500;
 }
 

@@ -1,0 +1,12 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: x42
+Source: https://x42-plugins.com/x42/
+
+Files: *
+Copyright: Robin Gareus
+License: GPL-2+ or Expat
+
+License: GPL-2+
+ text
+License: Expat
+ text

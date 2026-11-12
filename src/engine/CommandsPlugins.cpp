@@ -51,6 +51,8 @@ te::ExternalPlugin* externalPlugin (Project& p, const std::string& id, Error& er
 
     if (ext == nullptr)
         error = makeError (errc::invalidParams, "plugin " + id + " is a built-in effect: it has no presets (use fx.update)");
+    else if (auto allowed = PluginCatalog::requireLicence (p.tenant(), p.host().catalog().find (pluginUidFor (ext->desc)), toStd (ext->desc.name)); ! allowed.ok())
+        error = allowed.error();
     else if (ext->getAudioPluginInstance() == nullptr)
         error = makeError (errc::pluginLoadFailed, "plugin " + id + " did not load: " + toStd (ext->getLoadError()));
 
@@ -101,11 +103,11 @@ json presetsOfLive (Project& p, te::ExternalPlugin& ext, std::string& uidOut)
 void registerPluginCommands (CommandRegistry& r)
 {
     r.add (makeGlobalCommand ("plugin.catalog",
-        obj ({ { "kind", { { "type", "string" }, { "enum", { "effect", "instrument" } } } }, { "query", str() }, { "format", str() }, { "tag", str() },
+        obj ({ { "kind", { { "type", "string" }, { "enum", { "effect", "instrument" } } } }, { "query", str() }, { "format", str() }, { "tag", str() }, { "server_use_ok", boolean() },
                { "status", { { "type", "string" }, { "enum", { "ok", "blacklisted" } } } }, { "include_presets", boolean() },
                { "limit", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 500 } } }, { "cursor", str() } }),
         anyObject(), false,
-        [] (ProjectManager& pm, const json& params, const CommandContext&) -> Result<json>
+        [] (ProjectManager& pm, const json& params, const CommandContext& ctx) -> Result<json>
         {
             auto& catalog = pm.host().catalog();
 
@@ -118,6 +120,8 @@ void registerPluginCommands (CommandRegistry& r)
             q.format = params.value ("format", "");
             q.tag = params.value ("tag", "");
             q.status = params.value ("status", "");
+            q.serverUseOk = params.value ("server_use_ok", false);
+            q.hideNonFree = ctx.tenant != "local";
             q.includePresets = params.value ("include_presets", false);
             q.limit = (size_t) params.value ("limit", 50);
             q.offset = params.contains ("cursor") ? (size_t) std::atoll (params["cursor"].get<std::string>().c_str()) : 0;
@@ -132,9 +136,9 @@ void registerPluginCommands (CommandRegistry& r)
         }));
 
     r.add (makeGlobalCommand ("plugin.probe", obj ({ { "plugin_uid", strMin (1) } }, { "plugin_uid" }), anyObject(), false,
-        [] (ProjectManager& pm, const json& params, const CommandContext&) -> Result<json>
+        [] (ProjectManager& pm, const json& params, const CommandContext& ctx) -> Result<json>
         {
-            auto info = pm.host().catalog().ensureProbed (params["plugin_uid"].get<std::string>());
+            auto info = pm.host().catalog().ensureProbed (params["plugin_uid"].get<std::string>(), ctx.tenant);
 
             if (! info.ok())
                 return info.error();

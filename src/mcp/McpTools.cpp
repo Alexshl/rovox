@@ -144,6 +144,7 @@ const CommandToolSpec commandTools[] = {
     { "item.delete", "Delete item", "Deletes an item.", false },
     { "transport.get", "Get transport", "Playback state of a project: state (playing|stopped), position_s, loop {enabled,start_s,end_s}, epoch, audio mode. The audible output needs the server to run with --audio browser.", true },
     { "transport.set", "Set transport", "Starts or stops playback (state), seeks (position_s or a time) and sets the loop. Playback is heard in the web UI; it is not an undo step and does not change the revision.", false },
+    { "project.mix", "Project mix", "Sets the project's strip in the live mix: gain_db, muted, solo (if any project is soloed, the others are silent). Affects playback only, never renders; not an undo step and does not change the revision. Returns the strip state.", false },
     { "mixer.get_meters", "Get meters", "Peak level in dBFS per track and master since the previous call. Meters only move while the project plays (transport.set state=playing).", true },
     { "agent.accept", "Accept agent changes", "Marks the project's changes up to a revision (default: now) as seen by a person; the web UI stops highlighting them. Not an undo step.", false },
     { "marker.list", "List markers", "Lists markers with marker_id, name, time_s and bar.beat position.", true },
@@ -158,7 +159,7 @@ const CommandToolSpec commandTools[] = {
     { "fx.params", "Plugin parameters", "Lists the parameters of a plugin: ident, name, value in the parameter's own unit, display text, min, max.", true },
     { "fx.update", "Update plugin", "Sets enabled and/or params {ident_or_name: number | \"text such as -6 dB\"} of a plugin in one undo step.", false },
     { "project.catalog", "Project catalog", "Every project of this server, open, only on disk or (with object storage) only in the bucket: id, name, tracks, modified time, open flag, remote_only. project.open takes the project_id and downloads a bucket-only project into the working cache.", true },
-    { "plugin.catalog", "Plugin catalog", "Installed plugins the agent can load: plugin_uid, name, vendor, kind (instrument|effect), io, status (ok|blacklisted), tags and, with include_presets, factory presets. Filter by kind/query/tag/format. Use the plugin_uid with fx.add.", true },
+    { "plugin.catalog", "Plugin catalog", "Installed plugins the agent can load: plugin_uid, name, vendor, kind (instrument|effect), io, status (ok|blacklisted), tags and, with include_presets, factory presets. Each record has license, source_url and server_use_ok (true only for a free licence read from the package; \"unknown\" otherwise). Filter by kind/query/tag/format/server_use_ok. Use the plugin_uid with fx.add.", true },
     { "plugin.rescan", "Rescan plugins", "Scans the plugin directories again (in a child process). Unchanged directories return the cached catalog at once; force=true rescans anyway.", false },
     { "plugin.probe", "Probe plugin", "Loads one plugin in a separate process, pushes audio through it and, for an instrument, plays notes: reports latency, parameter count and whether it makes sound. A plugin that crashes is blacklisted; the server is not affected.", false },
     { "plugin.tag", "Tag plugin", "Sets free-form tags (genre, role) on a catalog entry so plugin.catalog can find it by tag.", false },
@@ -578,7 +579,7 @@ void McpServer::buildTools()
         {
             auto info = c.server.jobs().get (c.args["job_id"]);
 
-            if (! info || info->tenant != c.session.tenant || (c.args.contains ("project_id") && info->projectId != c.args["project_id"]))
+            if (! info || info->tenant != c.session.tenant || (c.args.contains ("project_id") && json (info->projectId) != c.args["project_id"]))
                 return ToolOutput::failure (makeError (errc::notFound, "no job " + c.args["job_id"].get<std::string>()));
 
             return waitForJob (c, info->id, false, jobWait (c.args, 0, 30), info->projectId, false);
@@ -598,7 +599,7 @@ void McpServer::buildTools()
             const std::string id = c.args["job_id"];
             auto info = c.server.jobs().get (id);
 
-            if (! info || info->tenant != c.session.tenant || (c.args.contains ("project_id") && info->projectId != c.args["project_id"]))
+            if (! info || info->tenant != c.session.tenant || (c.args.contains ("project_id") && json (info->projectId) != c.args["project_id"]))
                 return ToolOutput::failure (makeError (errc::notFound, "no job " + id));
 
             const bool cancelling = c.server.jobs().cancel (id);

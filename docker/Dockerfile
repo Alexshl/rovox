@@ -3,15 +3,15 @@
 # Copyright (C) 2026 Rovox contributors
 
 # ---- base: libraries needed at run time ------------------------------------
-FROM debian:bookworm-slim AS base
+FROM debian:trixie-slim AS base
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      libasound2 libatomic1 libfreetype6 libfontconfig1 \
-      libebur128-1 libmp3lame0 libcpp-httplib0.11 libopus0 libtomlplusplus3 \
+      libasound2t64 libatomic1 libfreetype6 libfontconfig1 \
+      libebur128-1 libmp3lame0 libcpp-httplib0.18 libopus0 libtomlplusplus3t64 \
  && rm -rf /var/lib/apt/lists/*
 
 # ---- web: the browser UI (TypeScript, Vite); unit tests run here, the bundle is copied into the runtime image -----------
-FROM node:22-bookworm-slim AS web
+FROM node:22-trixie-slim AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -34,18 +34,21 @@ ENV CCACHE_DIR=/ccache CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNC
 
 # ---- build: configure, compile, test ---------------------------------------
 FROM toolchain AS build
-ARG ROVOX_GIT_SHA=unknown
 ARG ROVOX_BUILD_SPIKES=OFF
 # Optional: cap compiler parallelism (Tracktion/JUCE translation units need ~1.5 GB each; 15 jobs OOM a 12 GB Docker VM)
 ARG ROVOX_BUILD_JOBS=
-ENV ROVOX_GIT_SHA=${ROVOX_GIT_SHA}
 # open LV2 plugins from Debian for the plugin tests (instruments that play MIDI, effects); the tests fail, not skip, when they are missing
 RUN apt-get update \
  && apt-get install -y --no-install-recommends calf-plugins zynaddsubfx-lv2 lsp-plugins-lv2 x42-plugins avldrums.lv2 avldrums.lv2-soundfont \
+      dpf-plugins-vst3 dragonfly-reverb-vst3 \
  && rm -rf /var/lib/apt/lists/*
-ENV ROVOX_REQUIRE_LV2=1
+# VST3 (Debian trixie) only for the tests: the scan and the factory programs (DPF MVerb); not shipped in the runtime image
+ENV ROVOX_REQUIRE_LV2=1 ROVOX_REQUIRE_VST3=1
 WORKDIR /src
 COPY . .
+# declared late so a new commit sha does not invalidate the layers above (the LV2 apt install)
+ARG ROVOX_GIT_SHA=unknown
+ENV ROVOX_GIT_SHA=${ROVOX_GIT_SHA}
 RUN --mount=type=cache,target=/ccache \
     cmake -S . -B build/linux-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DROVOX_BUILD_SPIKES=${ROVOX_BUILD_SPIKES} \
@@ -75,6 +78,12 @@ RUN useradd --uid 10001 --create-home --home-dir /home/rovox --shell /usr/sbin/n
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 calf-plugins zynaddsubfx-lv2 lsp-plugins-lv2 x42-plugins avldrums.lv2 avldrums.lv2-soundfont \
  && rm -rf /var/lib/apt/lists/*
+# Licences of the plugins above, read from their Debian copyright files (server_use_ok in plugin.catalog); unknown ones get no entry.
+COPY tools/plugin-licenses.py /tmp/plugin-licenses.py
+COPY tools/tests /tmp/plugin-licenses-tests
+RUN python3 -m unittest discover -s /tmp/plugin-licenses-tests \
+ && python3 /tmp/plugin-licenses.py --out /usr/share/rovox/licenses.json \
+ && rm -rf /tmp/plugin-licenses.py /tmp/plugin-licenses-tests
 COPY skills/rovox_skills /opt/rovox-skills/rovox_skills
 COPY tools/m45_e2e.py /opt/rovox-skills/m45_e2e.py
 ENV PYTHONPATH=/opt/rovox-skills
@@ -95,7 +104,7 @@ COPY --from=build /out/bin/p1_headless /usr/local/bin/p1_headless
 ENTRYPOINT ["p1_headless"]
 CMD []
 
-# ---- spikes: runtime + P1..P5 spike binaries + open LV2 plugins from Debian bookworm (ROVOX_BUILD_SPIKES=ON)
+# ---- spikes: runtime + P1..P5 spike binaries + open LV2 plugins from Debian (ROVOX_BUILD_SPIKES=ON)
 FROM runtime AS spikes
 USER root
 RUN apt-get update \
@@ -111,9 +120,11 @@ ENTRYPOINT ["rovox_spikes"]
 CMD []
 
 # ---- skills: the rovox-skills sidecar alone (Python, standard library only); talks to the core over MCP
-FROM python:3.12-slim-bookworm AS skills
+FROM python:3.13-slim-trixie AS skills
 COPY skills /opt/rovox-skills
-RUN pip install --no-cache-dir /opt/rovox-skills
+# the sidecar unit tests run at build time: a failing test fails the image build
+RUN cd /opt/rovox-skills && python -m unittest discover -s tests \
+ && pip install --no-cache-dir /opt/rovox-skills
 USER 10001
 ENV ROVOX_URL=http://rovox:4810/mcp
 ENTRYPOINT ["rovox-skills"]

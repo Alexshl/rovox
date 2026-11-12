@@ -1,0 +1,22 @@
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .
+@prefix lsp:  <http://lsp-plug.in/plugins/lv2/> .
+
+# Compressor. The first plugin of the bundle: a comment with a dot must not end a statement.
+lsp:compressor_mono
+    lv2:binary <lsp-plugins-lv2.so> ;
+    rdfs:seeAlso <plugins.ttl> ;
+    a lv2:CompressorPlugin , lv2:Plugin .
+
+<http://lsp-plug.in/plugins/lv2/para_equalizer_x16_lr>
+    a <http://lv2plug.in/ns/lv2core#EQPlugin> ;
+    rdfs:seeAlso <plugins.ttl> .
+
+lsp:ui_only
+    a ui:GtkUI ;
+    ui:binary <ui.so> .
+
+lsp:rev
+    rdfs:comment "a string with an a. dot ; and a semicolon" ;
+    a lv2:ReverbPlugin .

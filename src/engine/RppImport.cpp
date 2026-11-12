@@ -10,6 +10,7 @@
 #include "PanStage.h"
 #include "Import.h"
 #include "JsfxPlugin.h"
+#include "PluginCatalog.h"
 #include "ReaperFx.h"
 #include "RppParser.h"
 #include "Sha256.h"
@@ -840,6 +841,36 @@ struct Importer
         return true;
     }
 
+    std::optional<Error> checkJsfxLicences (const RppNode& root)
+    {
+        if (project.tenant() == "local")
+            return std::nullopt;
+
+        std::vector<const RppNode*> chains;
+
+        for (auto* track : root.blocks ("TRACK"))
+            for (auto* chain : track->blocks ("FXCHAIN"))
+                chains.push_back (chain);
+
+        if (auto* mfx = root.block ("MASTERFXLIST"))
+            chains.push_back (mfx);
+
+        for (auto* chain : chains)
+            for (auto& cfx : collectChain (*chain))
+            {
+                if (cfx.node->name != "JS" || cfx.node->args.empty())
+                    continue;
+
+                const auto& name = cfx.node->args[0];
+                const auto key = isJsfxUid (name) ? name : "jsfx:" + name;
+
+                if (auto allowed = PluginCatalog::requireLicence (project.tenant(), project.host().catalog().find (key), key); ! allowed.ok())
+                    return allowed.error();
+            }
+
+        return std::nullopt;
+    }
+
     Result<void> run()
     {
         std::ifstream in (rppFile, std::ios::binary);
@@ -855,6 +886,11 @@ struct Importer
             return parsed.error();
 
         const auto& root = parsed.value();
+
+        // licence gate, before anything is changed: other tenants may only import JS effects that have a free licence on record
+        if (auto denied = checkJsfxLicences (root); denied.has_value())
+            return *denied;
+
         auto& edit = project.edit();
         std::string recordPath;
 

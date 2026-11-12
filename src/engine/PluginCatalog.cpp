@@ -4,6 +4,8 @@
 #include "PluginCatalog.h"
 #include "StockPlugins.h"
 #include "JsfxPlugin.h"
+#include "DrumsPlugin.h"
+#include "DrumKitLibrary.h"
 
 #include "PluginHost.h"
 #include "ProjectFormat.h"
@@ -12,6 +14,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
+#include <set>
 #include <sstream>
 
 namespace rovox
@@ -44,6 +48,53 @@ std::string searchPathFor (const std::string& format)
     return env != nullptr && *env != 0 ? env : (format == "LV2" ? "/usr/lib/lv2:/usr/local/lib/lv2" : "/usr/lib/vst3:/usr/local/lib/vst3");
 }
 
+bool readJsonFile (const fs::path& file, json& out)
+{
+    std::ifstream in (file);
+
+    if (! in)
+        return false;
+
+    auto j = json::parse (in, nullptr, false);
+
+    if (j.is_discarded() || ! j.is_object())
+        return false;
+
+    out = std::move (j);
+    return true;
+}
+
+const char* const rovoxSourceUrl = "https://github.com/Alexshl/rovox";
+const char* const drskitSourceUrl = "https://drumgizmo.org/wiki/doku.php?id=kits:drskit";
+
+/** kit.json of the default drum kit if it is already on this machine (never downloads): $ROVOX_DRUMKITS_PATH, then the cache of the data directory. */
+json localKitManifest (const fs::path& dataDir)
+{
+    std::vector<fs::path> candidates;
+
+    for (auto& dir : DrumKitLibrary::environmentPaths())
+    {
+        candidates.push_back (dir / defaultDrumKit / "kit.json");
+        candidates.push_back (dir / "kit.json");
+    }
+
+    std::error_code ec;
+    const auto cache = dataDir / "cache" / "drumkits" / defaultDrumKit;
+
+    for (fs::directory_iterator it (cache, ec), end; ! ec && it != end; it.increment (ec))
+        candidates.push_back (it->path() / "kit.json");
+
+    for (auto& file : candidates)
+    {
+        json kit;
+
+        if (readJsonFile (file, kit) && kit.value ("id", "") == defaultDrumKit)
+            return kit;
+    }
+
+    return json::object();
+}
+
 std::string iso (std::time_t t = std::time (nullptr))
 {
     char buf[32];
@@ -69,6 +120,182 @@ PluginCatalog::PluginCatalog (EngineHost& h) : host_ (h), dir_ (h.dataDir() / "c
     std::error_code ec;
     fs::create_directories (dir_, ec);
     loadFiles();
+    reloadLicenses();
+}
+
+void PluginCatalog::reloadLicenses()
+{
+    json fresh = json::object(), file;
+    const char* env = std::getenv ("ROVOX_LICENSES_FILE");
+
+    for (auto path : { fs::path (env != nullptr && *env != 0 ? env : "/usr/share/rovox/licenses.json"), dir_ / "licenses.json" })
+        if (readJsonFile (path, file))
+            for (auto& [key, entry] : file.items())
+                if (entry.is_object() && entry.value ("license", json()).is_string())
+                    fresh[key] = entry;
+
+    std::lock_guard<std::mutex> lock (mutex_);
+    licenses_ = std::move (fresh);
+}
+
+Result<void> PluginCatalog::requireLicence (const std::string& tenant, const std::optional<json>& record, const std::string& what)
+{
+    if (licenceAllows (tenant, record))
+        return {};
+
+    if (! record)
+        return makeError (errc::forbiddenLicense, "plugin " + what + " is not in the catalog, so its licence is unknown and it cannot be used on this server (plugin.catalog with server_use_ok=true lists the allowed ones)",
+                          json { { "plugin", what } });
+
+    return makeError (errc::forbiddenLicense, "plugin " + record->value ("name", what) + " has no known free licence, so it cannot be used on this server (plugin.catalog with server_use_ok=true lists the allowed ones)",
+                      json { { "plugin_uid", record->value ("plugin_uid", "") }, { "license", record->value ("license", json (nullptr)) } });
+}
+
+Result<void> PluginCatalog::requireLicencesInState (const std::string& tenant, const juce::ValueTree& editState) const
+{
+    if (tenant == "local")
+        return {};
+
+    json offending = json::array();
+    std::set<std::string> seen;
+
+    std::function<void (const juce::ValueTree&)> walk = [&] (const juce::ValueTree& node)
+    {
+        if (node.hasType (te::IDs::PLUGIN) && node[te::IDs::type].toString() == te::ExternalPlugin::xmlTypeName)
+        {
+            const auto file = toStd (node[te::IDs::filename].toString());
+
+            if (seen.insert (file).second)
+            {
+                std::vector<std::string> uids;
+                {
+                    std::lock_guard<std::mutex> lock (mutex_);
+
+                    for (auto& [uid, rec] : plugins_.items())
+                        if (rec.value ("file", "") == file)
+                            uids.push_back (uid);
+                }
+
+                bool allowed = ! uids.empty();
+
+                for (auto& uid : uids)
+                    allowed = allowed && licenceAllows (tenant, find (uid));
+
+                if (! allowed)
+                    offending.push_back ({ { "name", toStd (node[te::IDs::name].toString()) }, { "file", file } });
+            }
+        }
+
+        for (int i = 0; i < node.getNumChildren(); ++i)
+            walk (node.getChild (i));
+    };
+
+    walk (editState);
+
+    if (offending.empty())
+        return {};
+
+    return makeError (errc::forbiddenLicense, "the project uses plugins that have no known free licence, so it cannot be opened on this server (" + std::to_string (offending.size()) + " plugin(s); see details)",
+                      json { { "plugins", offending } });
+}
+
+bool PluginCatalog::isFreeLicense (const std::string& spdx)
+{
+    // The server-use policy: only these SPDX ids are free (copyleft and permissive, no "non-commercial", no unknown). BSD ids are listed one by one.
+    static const char* const exact[] = { "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only",
+                                         "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later", "AGPL-3.0-only", "AGPL-3.0-or-later", "MIT", "ISC", "Zlib",
+                                         "MPL-2.0", "Apache-2.0", "CC-BY-4.0", "CC0-1.0", "GPL-2.0", "GPL-3.0", "LGPL-2.0", "LGPL-2.1", "LGPL-3.0", "AGPL-3.0",
+                                         "BSD-2-Clause", "BSD-3-Clause", "BSD-4-Clause", "0BSD" };
+    std::string spaced;
+
+    for (char ch : spdx)
+        spaced += (ch == '(' || ch == ')') ? ' ' : ch;
+
+    std::stringstream ss (spaced);
+    std::string token;
+    bool any = false;
+
+    while (ss >> token)
+    {
+        if (token == "AND" || token == "OR")
+            continue;
+
+        bool ok = false;
+
+        for (auto* id : exact)
+            ok = ok || token == id;
+
+        if (! ok)
+            return false;
+
+        any = true;
+    }
+
+    return any;
+}
+
+json PluginCatalog::withLicense (json rec) const
+{
+    const auto uid = rec.value ("plugin_uid", "");
+    rec.erase ("license");
+    rec.erase ("source_url");
+    rec.erase ("package");
+    std::string license, source;
+
+    if (rec.value ("format", "") == "Rovox")
+    {
+        license = "AGPL-3.0-or-later";
+        source = rovoxSourceUrl;
+
+        if (uid == "rovox:drums")
+        {
+            // the sampler is Rovox code; the drum kit it plays has its own licence, read from the kit's kit.json
+            auto kit = localKitManifest (host_.dataDir());
+            const std::string kitLicense = kit.value ("license", "CC-BY-4.0");
+            rec["kit"] = { { "id", defaultDrumKit }, { "license", kitLicense }, { "source_url", kit.value ("source", drskitSourceUrl) },
+                           { "attribution", kit.value ("attribution", drumsAttribution) } };
+
+            if (! isFreeLicense (kitLicense))
+                license.clear();
+        }
+    }
+    else
+    {
+        const json* entry = licenses_.contains (uid) ? &licenses_[uid] : nullptr;
+
+        if (entry == nullptr)
+        {
+            const auto file = rec.value ("file", "");
+            const auto pos = file.find (".lv2");
+
+            if (pos != std::string::npos)
+            {
+                const auto start = file.rfind ('/', pos);
+                const auto bundle = file.substr (start == std::string::npos ? 0 : start + 1, pos + 4 - (start == std::string::npos ? 0 : start + 1));
+
+                if (licenses_.contains (bundle))
+                    entry = &licenses_[bundle];
+            }
+        }
+
+        if (entry != nullptr)
+        {
+            license = entry->value ("license", "");
+            source = entry->value ("source_url", "");
+
+            if (entry->contains ("package"))
+                rec["package"] = (*entry)["package"];
+        }
+    }
+
+    if (! license.empty())
+        rec["license"] = license;
+
+    if (! source.empty())
+        rec["source_url"] = source;
+
+    rec["server_use_ok"] = ! license.empty() && isFreeLicense (license) ? json (true) : json ("unknown");
+    return rec;
 }
 
 json PluginCatalog::loadJson (const char* file) const
@@ -364,21 +591,32 @@ fs::path PluginCatalog::userPresetDir (const std::string& uid) const
 std::optional<json> PluginCatalog::find (const std::string& key) const
 {
     if (auto* stock = findStockPlugin (key))
-        return stockCatalogRecord (*stock);
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        return withLicense (stockCatalogRecord (*stock));
+    }
 
     if (isJsfxUid (key))
-        return jsfxCatalogRecord (key);
+    {
+        auto rec = jsfxCatalogRecord (key);
+
+        if (! rec)
+            return std::nullopt;
+
+        std::lock_guard<std::mutex> lock (mutex_);
+        return withLicense (*rec);
+    }
 
     std::lock_guard<std::mutex> lock (mutex_);
 
     if (plugins_.contains (key))
-        return plugins_[key];
+        return withLicense (plugins_[key]);
 
     const auto wanted = lowerCase (key);
 
     for (auto& [uid, rec] : plugins_.items())
         if (lowerCase (rec.value ("name", "")) == wanted)
-            return rec;
+            return withLicense (rec);
 
     return std::nullopt;
 }
@@ -396,9 +634,12 @@ std::optional<juce::PluginDescription> PluginCatalog::descriptionOf (const json&
     return std::nullopt;
 }
 
-Result<json> PluginCatalog::ensureProbed (const std::string& uid)
+Result<json> PluginCatalog::ensureProbed (const std::string& uid, const std::string& tenant)
 {
     auto rec = find (uid);
+
+    if (auto allowed = requireLicence (tenant, rec, uid); ! allowed.ok())
+        return allowed.error();
 
     if (! rec)
         return makeError (errc::notFound, "no plugin " + uid + " in the catalog (plugin.catalog lists what is installed)");
@@ -576,6 +817,10 @@ json PluginCatalog::query (const CatalogQuery& q)
 
         for (auto& [uid, rec] : source.items())
         {
+            json licensed = withLicense (rec);
+            rec = std::move (licensed);
+
+            if ((q.serverUseOk || q.hideNonFree) && ! serverUseOk (rec))        continue;
             if (! q.kind.empty() && rec.value ("kind", "") != q.kind)           continue;
             if (! q.format.empty() && lowerCase (rec.value ("format", "")) != lowerCase (q.format))  continue;
 
