@@ -6,6 +6,7 @@
 #include "JsonSchema.h"
 #include "ProjectFormat.h"
 
+#include <algorithm>
 #include <fstream>
 
 namespace rovox::mcp
@@ -149,7 +150,11 @@ Result<json> saveRecipe (const fs::path& dataDir, json recipe)
 
         const auto tool = s["tool"].get<std::string>();
 
-        if (tool.rfind ("recipe.", 0) == 0 || tool == "batch")
+        // judge the canonical name: the only aliases are the underscore spellings (recipe_run -> recipe.run), so undo that first
+        auto canonical = tool;
+        std::replace (canonical.begin(), canonical.end(), '_', '.');
+
+        if (canonical.rfind ("recipe.", 0) == 0 || canonical == "batch")
             return makeError (errc::invalidParams, "a recipe cannot call " + tool, json { { "path", "/recipe/steps/" + std::to_string (i) } });
     }
 
@@ -253,6 +258,18 @@ json substitute (const json& v, const json& params, const json& steps)
 
 ToolOutput runRecipe (ToolCall& c, const json& recipe, const json& callerParams, const std::string& projectId)
 {
+    constexpr int maxRecipeDepth = 4;
+    thread_local int depth = 0;
+
+    struct DepthGuard
+    {
+        DepthGuard()  { ++depth; }
+        ~DepthGuard() { --depth; }
+    } depthGuard;
+
+    if (depth > maxRecipeDepth)
+        return ToolOutput::failure (makeError (errc::preconditionFailed, "recipes are nested too deeply (limit " + std::to_string (maxRecipeDepth) + ")"), std::nullopt, projectId);
+
     json params = recipe.value ("defaults", json::object());
 
     for (auto& [k, v] : callerParams.items())

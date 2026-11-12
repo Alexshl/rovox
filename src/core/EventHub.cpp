@@ -72,6 +72,10 @@ std::uint64_t EventHub::publish (const std::string& tenant, const std::string& p
     std::vector<Observer> observers;
     Event e;
 
+    // one publish at a time: ids are assigned and delivered in the same order, so an observer sees strictly increasing ids.
+    // Recursive so that an observer may publish or remove itself on the publishing thread.
+    std::lock_guard<std::recursive_mutex> publishLock (publishMutex_);
+
     {
         std::lock_guard<std::mutex> lock (mutex_);
         e.id = nextId_++;
@@ -119,8 +123,13 @@ int EventHub::addObserver (Observer o)
 
 void EventHub::removeObserver (int id)
 {
-    std::lock_guard<std::mutex> lock (mutex_);
-    observers_.erase (std::remove_if (observers_.begin(), observers_.end(), [id] (auto& o) { return o.first == id; }), observers_.end());
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        observers_.erase (std::remove_if (observers_.begin(), observers_.end(), [id] (auto& o) { return o.first == id; }), observers_.end());
+    }
+
+    // wait for a publish that copied the observer before it was erased: when this returns the observer is no longer running
+    std::lock_guard<std::recursive_mutex> publishLock (publishMutex_);
 }
 
 } // namespace rovox
