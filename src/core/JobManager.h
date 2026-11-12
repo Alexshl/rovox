@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -39,6 +40,7 @@ struct JobInfo
     json origin = nullptr;
     std::string created, started, finished;
     json callback = nullptr;            // {state, attempts} of the completion callback (E4-04); null without one
+    std::uint64_t revision = 0;         // bumped on every change inside the manager (orders persist/report; not serialized)
 
     json toJson() const;
     static std::optional<JobInfo> fromJson (const json&);
@@ -121,7 +123,7 @@ private:
 
     void worker (Pool&);
     void report (const JobInfo&);
-    void persist (const JobInfo&);
+    void persist (const JobInfo&);                  // a snapshot older than one already written is dropped
     void setProgress (const std::string& id, double, const std::string&);
     void evictOldFinished();
 
@@ -133,6 +135,12 @@ private:
     std::map<std::string, std::string> byRequest_;  // "tenant|project|client_request_id" -> job id
     std::map<std::string, std::unique_ptr<Pool>> pools_;
     bool stopping_ = false;
+
+    std::mutex persistMutex_;                       // serialises file writes; never taken while mutex_ is held
+    std::map<std::string, std::uint64_t> persistedRevision_;
+    std::atomic<std::uint64_t> tmpCounter_ { 0 };
+    std::recursive_mutex reportMutex_;              // onChange_ calls are serialised and ordered by revision
+    std::map<std::string, std::pair<std::uint64_t, bool>> reportedRevision_;     // id -> (revision, final)
 };
 
 } // namespace rovox

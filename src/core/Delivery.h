@@ -6,6 +6,7 @@
 #pragma once
 
 #include "Result.h"
+#include "Url.h"
 
 #include <filesystem>
 #include <functional>
@@ -53,20 +54,14 @@ struct SecretRef
     bool configured() const             { return ! env.empty() || ! file.empty(); }
 };
 
-/** An http(s) URL split into parts. `origin` is scheme://host[:port]; `valid` is false for other schemes or an empty host. */
-struct Url
-{
-    std::string scheme, host, path, origin;     // origin = scheme://host[:port]
-    int port = 0;
-    bool valid = false;
-};
-
-Url parseUrl (const std::string& url);
-
 /** Replaces every occurrence of a non-empty secret in `text` with "***". */
 std::string scrubSecrets (std::string text, const std::vector<std::string>& secrets);
 
 constexpr std::uintmax_t telegramUploadLimitBytes = 50u * 1024u * 1024u;
+constexpr std::uintmax_t webhookDefaultMaxBytes = 512u * 1024u * 1024u;     // [delivery.webhook.<name>] max_bytes overrides it
+
+/** At most `maxCodepoints` Unicode code points of a UTF-8 string, never cutting a multi-byte sequence in half (Telegram counts captions in characters). */
+std::string truncateUtf8 (const std::string& text, size_t maxCodepoints);
 
 class DeliveryRegistry
 {
@@ -97,6 +92,6 @@ struct S3Config
     int presignTtlS = 3600;
 };
 std::unique_ptr<DeliveryAdapter> makeS3Adapter (std::string id, S3Config);
-std::unique_ptr<DeliveryAdapter> makeWebhookAdapter (std::string id, std::string url, SecretRef hmacSecret, std::string mode = "multipart");
+std::unique_ptr<DeliveryAdapter> makeWebhookAdapter (std::string id, std::string url, SecretRef hmacSecret, std::string mode = "multipart", std::uintmax_t maxBytes = webhookDefaultMaxBytes);
 
 } // namespace rovox

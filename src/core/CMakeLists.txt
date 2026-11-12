@@ -15,6 +15,7 @@ add_library(rovox_core STATIC
     Ids.cpp
     Sha1.cpp
     Sha256.cpp
+    Url.cpp
     Subprocess.cpp
     UploadStore.cpp
     JsonSchema.cpp

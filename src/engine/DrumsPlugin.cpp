@@ -188,7 +188,7 @@ public:
             fc.destBuffer->clear (c, fc.bufferStartSample, fc.bufferNumSamples);
 
         if (fc.isRendering && ! failed_ && ! sameRate (loadedRate_.load(), requestedRateA_.load()))
-            waitUntilSettled (std::chrono::minutes (20));
+            waitUntilSettled (std::chrono::seconds (30));
 
         std::unique_lock<std::mutex> lock (samplerMutex_, std::try_to_lock);
 
@@ -322,7 +322,20 @@ private:
     void waitUntilSettled (std::chrono::seconds limit)
     {
         std::unique_lock<std::mutex> lock (mutex_);
-        cv_.wait_for (lock, limit, [this] { return phase_ == Phase::failed || (phase_ == Phase::ready && sameRate (loadedRateD_, requestedRate_)); });
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        const auto settled = [this] { return quit_ || phase_ == Phase::failed || (phase_ == Phase::ready && sameRate (loadedRateD_, requestedRate_)); };
+
+        // short slices so that a cancelled or stalled render (which signals its job) is not held on the render thread
+        while (! settled() && std::chrono::steady_clock::now() < deadline)
+        {
+            if (juce::Thread::currentThreadShouldExit())
+                return;
+
+            if (auto* job = juce::ThreadPoolJob::getCurrentThreadPoolJob(); job != nullptr && job->shouldExit())
+                return;
+
+            cv_.wait_for (lock, std::chrono::milliseconds (100), settled);
+        }
     }
 
     void startWorker()

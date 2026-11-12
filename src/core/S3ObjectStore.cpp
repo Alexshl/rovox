@@ -5,8 +5,14 @@
 
 #include "Hmac.h"
 #include "Sha256.h"
+#include "Url.h"
 
 #include <httplib.h>
+
+// https:// endpoints (S3, Telegram, webhooks, callbacks) need cpp-httplib with OpenSSL: fail the build, not the first delivery
+#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
+#error "cpp-httplib is built without OpenSSL support (CPPHTTPLIB_OPENSSL_SUPPORT): https URLs would not work"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -32,36 +38,25 @@ struct Endpoint
 
 Endpoint parseEndpoint (std::string url)
 {
-    Endpoint e;
-
     while (! url.empty() && url.back() == '/')
         url.pop_back();
 
-    const auto schemeEnd = url.find ("://");
+    Endpoint e;
+    const auto u = parseUrl (url);
 
-    if (schemeEnd == std::string::npos)
+    if (! u.valid)
         return e;
 
-    e.scheme = url.substr (0, schemeEnd);
+    e.scheme = u.scheme;
+    e.host = u.host;
+    e.port = u.port;
+    e.hostHeader = u.hostHeader;
+    e.basePath = u.path.substr (0, u.path.find ('?'));
 
-    if (e.scheme != "http" && e.scheme != "https")
-        return e;
+    while (! e.basePath.empty() && e.basePath.back() == '/')
+        e.basePath.pop_back();
 
-    const auto hostStart = schemeEnd + 3;
-    const auto pathStart = url.find ('/', hostStart);
-    auto hostPort = url.substr (hostStart, pathStart == std::string::npos ? std::string::npos : pathStart - hostStart);
-    e.basePath = pathStart == std::string::npos ? "" : url.substr (pathStart);
-    e.port = e.scheme == "https" ? 443 : 80;
-
-    if (const auto colon = hostPort.rfind (':'); colon != std::string::npos && hostPort.find (']') == std::string::npos)
-    {
-        e.port = std::atoi (hostPort.c_str() + colon + 1);
-        hostPort = hostPort.substr (0, colon);
-    }
-
-    e.host = hostPort;
-    e.hostHeader = e.host + ((e.scheme == "https" && e.port == 443) || (e.scheme == "http" && e.port == 80) ? "" : ":" + std::to_string (e.port));
-    e.valid = ! e.host.empty();
+    e.valid = true;
     return e;
 }
 
@@ -203,7 +198,11 @@ public:
         fs::rename (part, dest, ec);
 
         if (ec)
-            return makeError (errc::io, "cannot move the downloaded file into place: " + ec.message());
+        {
+            const auto why = ec.message();
+            fs::remove (part, ec);
+            return makeError (errc::io, "cannot move the downloaded file into place: " + why);
+        }
 
         return {};
     }
@@ -401,20 +400,36 @@ private:
         client.set_connection_timeout (c_.connectTimeoutS, 0);
         client.set_read_timeout (c_.ioTimeoutS, 0);
         client.set_write_timeout (c_.ioTimeoutS, 0);
+        std::ofstream sink;
+
+        if (req.method == "GET" && ! req.downloadTo.empty())
+            sink.open (req.downloadTo, std::ios::binary | std::ios::trunc);
+
         auto res = [&]() -> httplib::Result
         {
             if (req.method == "GET" && ! req.downloadTo.empty())
             {
-                auto sink = std::make_shared<std::ofstream> (req.downloadTo, std::ios::binary | std::ios::trunc);
                 auto good = std::make_shared<bool> (true);
-                return client.Get (target, headers, [good] (const httplib::Response& r) { *good = r.status / 100 == 2; return true; },
-                                   [sink, good] (const char* data, size_t n)
-                                   {
-                                       if (*good)
-                                           sink->write (data, (std::streamsize) n);
+                auto errorBody = std::make_shared<std::string>();
+                auto result = client.Get (target, headers, [good] (const httplib::Response& r) { *good = r.status / 100 == 2; return true; },
+                                          [&sink, good, errorBody] (const char* data, size_t n)
+                                          {
+                                              if (! *good)        // keep (the start of) the S3 error document: failure() reports its Code
+                                              {
+                                                  if (errorBody->size() < 16384)
+                                                      errorBody->append (data, std::min<size_t> (n, 16384 - errorBody->size()));
 
-                                       return sink->good();
-                                   });
+                                                  return true;
+                                              }
+
+                                              sink.write (data, (std::streamsize) n);
+                                              return sink.good();
+                                          });
+
+                if (result && result->status / 100 != 2)
+                    result->body = std::move (*errorBody);
+
+                return result;
             }
 
             if (req.method == "HEAD")
@@ -457,6 +472,29 @@ private:
         out.status = res->status;
         out.body = std::move (res->body);
         out.headers = res->headers;
+
+        if (req.method == "GET" && ! req.downloadTo.empty() && out.status / 100 == 2)
+        {
+            // a download only counts when every byte reached the disk and the size is the announced one
+            sink.flush();
+            const bool written = sink.good();
+            sink.close();
+            std::error_code ec;
+            const auto onDisk = fs::file_size (req.downloadTo, ec);
+            const auto announced = out.header ("Content-Length");
+
+            if (! written || ec)
+            {
+                out.status = 0;
+                out.netError = "the downloaded data could not be written to disk";
+            }
+            else if (! announced.empty() && onDisk != (std::uintmax_t) std::strtoull (announced.c_str(), nullptr, 10))
+            {
+                out.status = 0;
+                out.netError = "incomplete download: " + std::to_string (onDisk) + " of " + announced + " bytes";
+            }
+        }
+
         return out;
     }
 
@@ -532,7 +570,13 @@ private:
 
         std::ifstream in (file, std::ios::binary);
         std::string completeXml = "<CompleteMultipartUpload>";
-        const auto partSize = std::max<std::uint64_t> (c_.partSize, 1);
+        auto partSize = std::max<std::uint64_t> (c_.partSize, 1);
+
+        // S3 allows at most 10 000 parts: a bigger file gets bigger parts (rounded up to whole MiB)
+        constexpr std::uint64_t maxParts = 10000, mib = 1024 * 1024;
+
+        if ((size + partSize - 1) / partSize > maxParts)
+            partSize = (((size + maxParts - 1) / maxParts) + mib - 1) / mib * mib;
 
         for (std::uint64_t offset = 0, n = 1; offset < size; offset += partSize, ++n)
         {

@@ -751,3 +751,104 @@ ROVOX_TEST (delivery, callback_shutdown_does_not_wait_for_a_hung_receiver)
     svr.stop();
     server.join();
 }
+
+//==============================================================================
+// E10-20 .. E10-25: hardening of the delivery paths
+ROVOX_TEST (delivery, callback_delivery_that_throws_is_a_failed_attempt_not_a_crash)
+{
+    States states;
+    std::atomic<int> calls { 0 };
+    JobCallbackDispatcher d ([&states] (const std::string& id, const json& st) { states.set (id, st); });
+    d.setDelayScale (0.001);
+    d.setDeliverOverride ([&calls] (const std::string&, const std::string&) -> Result<void>
+    {
+        if (++calls < 3)
+            throw std::runtime_error ("boom");
+
+        return {};
+    });
+    d.enqueue (finishedJob ("job_throws"), { "http://127.0.0.1:1/hook", "hook", "127.0.0.1" });
+    REQUIRE (states.waitFor ("job_throws", "delivered", 10));
+    CHECK (states.get ("job_throws")["attempts"] == 3);              // two exceptions were retried like any failure
+
+    d.setDeliverOverride ([] (const std::string&, const std::string&) -> Result<void> { throw std::runtime_error ("always"); });
+    d.enqueue (finishedJob ("job_throws2"), { "http://127.0.0.1:1/hook", "hook", "127.0.0.1" });
+    REQUIRE (states.waitFor ("job_throws2", "callback_failed", 10));
+    CHECK (states.get ("job_throws2")["attempts"] == 5);
+    CHECK (states.get ("job_throws2")["last_error"].get<std::string>().find ("always") != std::string::npos);
+}
+
+ROVOX_TEST (delivery, s3_key_stays_under_the_prefix)
+{
+    Mock mock;
+    setSecret ("ROVOX_TEST_S3_ID", "AKIATESTACCESSKEY00");
+    setSecret ("ROVOX_TEST_S3_SECRET", "s3cr3t/KEY+value/abcdefghijklmnop");
+    S3Config c;
+    c.endpoint = mock.url();
+    c.bucket = "b";
+    c.prefix = "proj-a/";
+    c.accessKey = { "ROVOX_TEST_S3_ID", "" };
+    c.secretKey = { "ROVOX_TEST_S3_SECRET", "" };
+    auto adapter = makeS3Adapter ("s3.x", c);
+    const auto src = makeFile ("mix.wav", "data");
+
+    for (const char* bad : { "../proj-b/HEAD", "a/../../b", "/abs/key", "a//b", "a/b/", "./x", "..", "" })
+    {
+        const auto r = adapter->send ({ src, "", "", "", { { "key", bad } } }, notCancelled);
+        REQUIRE (! r.ok());
+        CHECK (r.error().code == errc::invalidParams);
+    }
+
+    CHECK (mock.count() == 0);
+
+    auto ok = adapter->send ({ src, "", "", "", { { "key", "mixes/v3.wav" } } }, notCancelled);
+    REQUIRE (ok.ok());
+    CHECK (ok.value()["key"] == "proj-a/mixes/v3.wav");
+    CHECK (mock.at (0).path == "/b/proj-a/mixes/v3.wav");
+}
+
+ROVOX_TEST (delivery, telegram_caption_is_cut_on_a_character_boundary)
+{
+    CHECK (truncateUtf8 ("abc", 10) == "abc");
+    CHECK (truncateUtf8 ("abcdef", 3) == "abc");
+    CHECK (truncateUtf8 ("\xD0\xBF\xD1\x80\xD0\xB8", 2) == "\xD0\xBF\xD1\x80");      // two Cyrillic letters of three
+
+    Mock mock;
+    setSecret ("ROVOX_TEST_TG", "123456:SECRET-bot-token-AAE");
+    auto adapter = makeTelegramAdapter ("telegram.me", { "ROVOX_TEST_TG", "" }, "1", mock.url());
+    std::string caption;
+
+    for (int i = 0; i < 1500; ++i)
+        caption += "\xD1\x8F";                                  // "ya", two bytes
+
+    REQUIRE (adapter->send ({ makeFile ("mix.mp3", "x"), caption, "", "", {} }, notCancelled).ok());
+    const auto sent = mock.at (0).fields["caption"];
+    CHECK (sent.size() == 2048);                                // 1024 characters, not 1024 bytes
+    CHECK (sent == truncateUtf8 (caption, 1024));
+}
+
+ROVOX_TEST (delivery, webhook_streams_the_file_and_refuses_one_over_the_limit)
+{
+    Mock mock;
+    mock.defaultReply = { 200, "{}" };
+    std::string big (3 * 1024 * 1024 + 17, 'q');
+
+    for (size_t i = 0; i < big.size(); i += 251)
+        big[i] = (char) ('a' + (i % 26));
+
+    const auto src = makeFile ("stem.wav", big);
+    auto adapter = makeWebhookAdapter ("webhook.big", mock.url() + "/hook", {}, "multipart", 8 * 1024 * 1024);
+    auto r = adapter->send ({ src, "cap", "T", "", {} }, notCancelled);
+    REQUIRE (r.ok());
+    REQUIRE (mock.count() == 1);
+    CHECK (mock.at (0).fileContents["file"] == big);
+    CHECK (mock.at (0).fileNames["file"] == "stem.wav");
+    CHECK (mock.at (0).fields["caption"] == "cap");
+    CHECK (mock.at (0).fields["sha256"] == sha256Hex (big));
+
+    auto tiny = makeWebhookAdapter ("webhook.tiny", mock.url() + "/hook", {}, "multipart", 1024);
+    auto refused = tiny->send ({ src, "", "", "", {} }, notCancelled);
+    REQUIRE (! refused.ok());
+    CHECK (refused.error().code == "FILE_TOO_LARGE");
+    CHECK (mock.count() == 1);                                  // nothing was sent
+}

@@ -9,6 +9,7 @@
 #include "ProjectFormat.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -371,8 +372,32 @@ Result<json> renderInChild (const fs::path& snapshotDir, const fs::path& dataDir
                 failure = std::move (j);
         }
     };
-    o.shouldCancel = req.hooks.shouldCancel;
-    const auto r = runSubprocess (o);
+    // the child watches its own stall timeout; this is the hard stop if it hangs outright (frozen process, stuck in a plugin):
+    // no output at all for the stall timeout plus a margin kills it (a long render keeps printing PROGRESS)
+    auto lastOutput = std::chrono::steady_clock::now();
+    bool hung = false;
+    const auto userLine = o.onStdoutLine;
+    o.onStdoutLine = [&, userLine] (const std::string& line) { lastOutput = std::chrono::steady_clock::now(); userLine (line); };
+    o.shouldCancel = [&]
+    {
+        if (req.hooks.shouldCancel && req.hooks.shouldCancel())
+            return true;
+
+        if (std::chrono::duration<double> (std::chrono::steady_clock::now() - lastOutput).count() > req.stallTimeoutS + 30.0)
+        {
+            hung = true;
+            return true;
+        }
+
+        return false;
+    };
+    auto r = runSubprocess (o);
+
+    if (hung && r.cancelled)
+    {
+        r.cancelled = false;
+        r.timedOut = true;
+    }
 
     if (result)
         return *result;

@@ -780,6 +780,75 @@ ROVOX_TEST (storage, s3_client_uploads_large_files_in_parts)
     CHECK (s3.objects["small.wav"] == "tiny");                  // under the threshold: one PUT
 }
 
+ROVOX_TEST (storage, s3_client_reports_the_s3_error_code_of_a_failed_download)
+{
+    MockS3 s3;
+    auto store = makeS3ObjectStore (s3.config());
+    const auto dir = test::makeTempDir ("s3err");
+    auto r = store->getFile ("rovox/none", dir / "none.bin");
+    REQUIRE (! r.ok());
+    CHECK (r.error().code == errc::notFound);
+    CHECK (r.error().message.find ("NoSuchKey") != std::string::npos);      // the code of the error document, not just the HTTP status
+    CHECK (! fs::exists (dir / "none.bin"));
+    CHECK (! fs::exists (dir / "none.bin.part"));
+}
+
+ROVOX_TEST (storage, s3_client_never_leaves_a_truncated_download_in_place)
+{
+    httplib::Server svr;
+    svr.Get (R"(/bkt/(.+))", [] (const httplib::Request&, httplib::Response& res)
+    {
+        // announces 100 bytes, sends 10 and drops the connection
+        res.set_content_provider (100, "application/octet-stream", [] (size_t, size_t, httplib::DataSink& sink)
+        {
+            sink.write ("0123456789", 10);
+            sink.done();
+            return true;
+        });
+    });
+    const int port = svr.bind_to_any_port ("127.0.0.1");
+    std::thread server ([&] { svr.listen_after_bind(); });
+
+    for (int i = 0; i < 200 && ! svr.is_running(); ++i)
+        std::this_thread::sleep_for (std::chrono::milliseconds (5));
+
+    S3StoreConfig c;
+    c.endpoint = "http://127.0.0.1:" + std::to_string (port);
+    c.bucket = "bkt";
+    c.accessKey = "AKIAMOCK";
+    c.secretKey = "the-mock-secret-key";
+    c.backoffBaseMs = 5;
+    c.maxAttempts = 2;
+    auto store = makeS3ObjectStore (c);
+
+    const auto dir = test::makeTempDir ("s3trunc");
+    const auto dest = dir / "big.bin";
+    std::ofstream (dest, std::ios::binary) << "previous good content";
+    auto r = store->getFile ("big.bin", dest);
+    CHECK (! r.ok());
+    CHECK (fs::exists (dest) && fs::file_size (dest) == 21);                // the older file was not replaced by the partial one
+    CHECK (! fs::exists (dir / "big.bin.part"));
+
+    svr.stop();
+    server.join();
+}
+
+ROVOX_TEST (storage, s3_client_raises_the_part_size_to_stay_within_10000_parts)
+{
+    MockS3 s3;
+    auto cfg = s3.config();
+    cfg.multipartThreshold = 10;
+    cfg.partSize = 1;                                           // a 10 001 byte file would need 10 001 parts of this size
+    auto store = makeS3ObjectStore (cfg);
+
+    const auto dir = test::makeTempDir ("s3parts");
+    const std::string content (10001, 'z');
+    std::ofstream (dir / "huge.wav", std::ios::binary) << content;
+    REQUIRE (store->putFile ("huge.wav", dir / "huge.wav", "audio/wav").ok());
+    CHECK (s3.objects["huge.wav"] == content);
+    CHECK (! s3.parts["up1"].empty() && s3.parts["up1"].size() <= 10000);
+}
+
 //==============================================================================
 ROVOX_TEST (storage, project_survives_losing_the_working_cache)
 {
