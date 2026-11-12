@@ -64,6 +64,13 @@ public:
         root, else FORBIDDEN_PATH. Without it every path passes (CLI, tests). Returns the resolved path. */
     Result<fs::path> checkPath (const fs::path& p) const;
 
+    /** Test hook: switches the path policy of this host at run time (tests share one host per process; restore it when done). */
+    void setPathPolicy (bool restrictPaths, std::vector<fs::path> allowedRoots)
+    {
+        config_.restrictPaths = restrictPaths;
+        config_.allowedRoots = std::move (allowedRoots);
+    }
+
 private:
     // Declared first, destroyed last: JUCE needs to outlive everything below.
     juce::ScopedJuceInitialiser_GUI juceInit_;

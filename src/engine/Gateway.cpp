@@ -96,9 +96,10 @@ bool Gateway::tokenMatches (const std::string& expected, const std::string& auth
     return constantTimeEquals (authorization, "Bearer " + expected) || constantTimeEquals (cookieValue (cookie, "rovox_token"), expected) || constantTimeEquals (queryValue (query, "token"), expected);
 }
 
-bool Gateway::originAllowed (const std::string& origin, const std::string& host, const std::vector<std::string>& allowed, bool loopbackBind)
+bool Gateway::originAllowed (const std::string& origin, const std::string& host, const std::vector<std::string>& allowed, bool loopbackBind,
+                             const std::vector<std::string>& allowedHosts)
 {
-    return guard::requestAllowed (loopbackBind, origin, host, allowed);
+    return guard::requestAllowed (loopbackBind, origin, host, allowed, allowedHosts);
 }
 
 //==============================================================================
@@ -167,7 +168,7 @@ void Gateway::handleUpgrade (int fd, WsRequest req)
     if (! tokenMatches (options_.token, header ("authorization"), header ("cookie"), req.query))
         return wsSendHttp (fd, 401, "Unauthorized", "missing or wrong token"), void (::close (fd));
 
-    if (! originAllowed (header ("origin"), header ("host"), options_.allowedOrigins, options_.loopbackBind))
+    if (! originAllowed (header ("origin"), header ("host"), options_.allowedOrigins, options_.loopbackBind, options_.allowedHosts))
         return wsSendHttp (fd, 403, "Forbidden", "Origin not allowed"), void (::close (fd));
 
     if (clientCount() >= (int) options_.maxClients)

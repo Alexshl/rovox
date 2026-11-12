@@ -23,6 +23,7 @@ struct Options
     std::string toolNames = "dots", sourceUrl;
     bool reaperCompat = false;
     std::vector<std::string> allowOrigins;
+    std::vector<std::string> allowHosts;
     std::string connectUrl;             // mcp --connect: URL of a running `rovox serve`
 
     // render

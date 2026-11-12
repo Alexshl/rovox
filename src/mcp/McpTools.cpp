@@ -677,8 +677,9 @@ void McpServer::buildTools()
         t.name = "events.poll";
         t.title = "Poll events";
         t.description = "Events (project.changed with origin, revision and entities; job.updated; upload events) with event_id greater than since_event_id. wait_s (0..30) long-polls. "
-                        "Start with since_event_id 0 and pass next_event_id back. resync_required=true means events were dropped: re-read with project.get.";
-        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "since_event_id", integer() }, { "limit", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 500 } } },
+                        "Start with since_event_id 0 and pass next_event_id back. resync_required=true means events you could see were dropped, or the server restarted (event ids begin again): re-read with project.get. "
+                        "event_epoch is random per server start; pass the value you saw before as event_epoch to get resync_required=true after a restart (it is also returned by events.subscribe).";
+        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "since_event_id", integer() }, { "event_epoch", str ("event_epoch returned by an earlier events.poll / events.subscribe") }, { "limit", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 500 } } },
                                   { "wait_s", { { "type", "number" }, { "minimum", 0 }, { "maximum", 30 } } } });
         t.annotations = { { "readOnlyHint", true } };
         t.mayBlock = true;
@@ -686,7 +687,7 @@ void McpServer::buildTools()
         {
             const auto wait = std::chrono::milliseconds ((int) (std::clamp (c.args.value ("wait_s", 0.0), 0.0, 30.0) * 1000));
             return ToolOutput::success (c.server.pollEvents (c.session.tenant, c.args.value ("project_id", ""), c.args.value ("since_event_id", (std::uint64_t) 0),
-                                                              (size_t) c.args.value ("limit", 100), wait, c.rc.cancelled.get()));
+                                                              (size_t) c.args.value ("limit", 100), wait, c.rc.cancelled.get(), c.args.value ("event_epoch", "")));
         };
         add (std::move (t));
     }
@@ -719,7 +720,7 @@ void McpServer::buildTools()
                 c.session.subscribedUris.erase (uri);
             }
 
-            return ToolOutput::success ({ { "subscribed", on }, { "project_id", project } });
+            return ToolOutput::success ({ { "subscribed", on }, { "project_id", project }, { "event_epoch", c.server.eventEpoch() } });
         };
         add (std::move (t));
     }

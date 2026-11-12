@@ -9,6 +9,11 @@
 
 #include <httplib.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <fstream>
 #include <iterator>
@@ -402,6 +407,103 @@ ROVOX_TEST (upload, request_bodies_are_capped_except_on_upload_routes)
     const auto data = patternData (4096, 3);
     const auto loc = tusCreate (*f.client, data.size(), "ok.bin");
     CHECK (f.client->Patch (loc, httplib::Headers { { "Upload-Offset", "0" } }, data, "application/offset+octet-stream")->status == 204);
+}
+
+namespace
+{
+/** Sends a raw HTTP request and returns everything the server answers until it closes the connection (or goes quiet). */
+std::string rawExchange (int port, const std::string& request)
+{
+    const int fd = ::socket (AF_INET, SOCK_STREAM, 0);
+    sockaddr_in a {};
+    a.sin_family = AF_INET;
+    a.sin_port = htons ((uint16_t) port);
+    inet_pton (AF_INET, "127.0.0.1", &a.sin_addr);
+    timeval tv { 3, 0 };
+    ::setsockopt (fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    std::string reply;
+
+    if (::connect (fd, (sockaddr*) &a, sizeof a) == 0 && ::send (fd, request.data(), request.size(), 0) == (ssize_t) request.size())
+    {
+        char buf[4096];
+        ssize_t n;
+
+        while ((n = ::recv (fd, buf, sizeof buf, 0)) > 0)
+            reply.append (buf, (size_t) n);
+    }
+
+    ::close (fd);
+    return reply;
+}
+} // namespace
+
+ROVOX_TEST (upload, bodies_without_a_length_get_411_and_every_denial_closes_the_connection)
+{
+    ServerOptions so;
+    so.maxBodyBytes = 1024;
+    Fixture f (so);
+    const std::string head = "Host: 127.0.0.1\r\nContent-Type: application/json\r\n";
+
+    // no Content-Length (and not chunked): refused before the body is read; the server closes, so an unread body cannot desync keep-alive
+    const auto noLength = rawExchange (f.server->port(), "POST /api/login HTTP/1.1\r\n" + head + "\r\n");
+    CHECK (noLength.find (" 411 ") != std::string::npos);
+    CHECK (noLength.find ("Connection: close") != std::string::npos);
+
+    const auto chunked = rawExchange (f.server->port(), "POST /api/login HTTP/1.1\r\n" + head + "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+    CHECK (chunked.find (" 413 ") != std::string::npos);
+    CHECK (chunked.find ("Connection: close") != std::string::npos);
+
+    const auto foreign = rawExchange (f.server->port(), "GET /api/projects HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\n\r\n");
+    CHECK (foreign.find (" 403 ") != std::string::npos);
+    CHECK (foreign.find ("Connection: close") != std::string::npos);
+
+    const auto wrongType = rawExchange (f.server->port(), "POST /api/projects HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nhi");
+    CHECK (wrongType.find (" 415 ") != std::string::npos);
+    CHECK (wrongType.find ("Connection: close") != std::string::npos);
+
+    // only the streamed tus PATCH goes without the cap: the (non-streamed) tus POST and DELETE bodies keep it
+    auto bigCreate = f.client->Post ("/api/uploads", httplib::Headers { { "Tus-Resumable", "1.0.0" }, { "Upload-Length", "10" } }, std::string (4096, 'a'), "text/plain");
+    REQUIRE (bigCreate != nullptr);
+    CHECK (bigCreate->status == 413);
+    auto bigDelete = f.client->Delete ("/api/uploads/someid", std::string (4096, 'a'), "text/plain");
+    REQUIRE (bigDelete != nullptr);
+    CHECK (bigDelete->status == 413);
+}
+
+ROVOX_TEST (upload, a_render_file_that_shrinks_during_the_download_closes_the_connection)
+{
+    Fixture f;
+    const auto id = f.env.newProject ("shrinking");
+    const auto dir = f.env.project (id).rendersDir();
+    fs::create_directories (dir);
+    const auto file = dir / "big.wav";
+    constexpr std::uintmax_t total = 64u << 20;
+
+    {
+        std::ofstream (file, std::ios::binary) << "x";
+        fs::resize_file (file, total);              // sparse: far more than the socket buffers hold
+    }
+
+    size_t received = 0;
+    bool truncated = false;
+    httplib::Client c ("127.0.0.1", f.server->port());
+    c.set_read_timeout (10, 0);
+    auto res = c.Get ("/api/projects/" + id + "/renders/big.wav", [&] (const char*, size_t len)
+    {
+        received += len;
+
+        if (! truncated && received >= (1u << 20))
+        {
+            truncated = true;
+            fs::resize_file (file, 1024);           // the file got shorter while it was served
+        }
+
+        return true;
+    });
+
+    CHECK (truncated);
+    CHECK (received < total);                       // the server closed instead of looping forever on an empty read
+    CHECK (! res);
 }
 
 ROVOX_TEST (upload, patch_past_upload_length_is_413_and_nothing_extra_is_written)

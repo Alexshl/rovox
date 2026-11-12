@@ -26,6 +26,9 @@ json drumsPluginExtras (te::Plugin&, double waitS = 0.0);
     not found/parsed (waits at most `waitS`). */
 json drumsKitIdentity (te::Plugin&, double waitS = 0.0);
 
+/** Why a drum sampler failed the render it ran in (its kit was still not ready after the bounded wait); empty when it did not fail or for other plugins. */
+std::string drumsRenderFailure (te::Plugin&);
+
 /** The credit line the UI shows next to the plugin. */
 inline constexpr const char* drumsAttribution = "Drum samples: DRSKit by the DrumGizmo team and Jes Eiler (DRSDrums), CC BY 4.0";
 

@@ -315,7 +315,8 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
         undo.undoCurrentTransactionOnly();      // inside the scope: the rollback itself is not reported as a change
 
     // a failed command of a gesture left partial changes in the step it was merged into. The UndoManager cannot take back only the tail of a
-    // transaction, so the whole gesture step goes (redoable); its removal is reported as a change of its own
+    // transaction, so the whole gesture step goes; it is not left on the redo stack (Redo would re-apply half of the failed command) and its
+    // removal is reported as a change of its own
     bool gestureRolledBack = false;
 
     if (failure.has_value() && coalesce && undo.getNumActionsInCurrentTransaction() > actionsBefore && undo.undoCurrentTransactionOnly())
@@ -323,10 +324,9 @@ CommandResult CommandBus::runInProject (Project& project, const std::vector<Op>&
         gestureRolledBack = true;
 
         if (! project.undoSteps().empty())
-        {
-            project.redoSteps().push_back (project.undoSteps().back());
             project.undoSteps().pop_back();
-        }
+
+        project.redoSteps().clear();
     }
 
     auto changes = project.collector().endScope();

@@ -63,6 +63,8 @@ public:
     void touch();
     std::chrono::steady_clock::time_point lastActive() const;
     std::atomic<int> streamGeneration { 0 };            // a new GET stream replaces the old one
+    std::atomic<int> inFlight { 0 };                    // HTTP requests being handled right now
+    std::atomic<int> openStreams { 0 };                 // open SSE streams (GET /mcp)
 
     // per-project bookkeeping for external_changes
     std::optional<std::uint64_t> lastSeen (const std::string& project) const;
@@ -169,7 +171,10 @@ public:
     CommandContext contextFor (Session&, const std::string& projectId) const;
 
     /** events.poll: events with event_id > since (all projects of the tenant, or one), waiting up to `wait`. */
-    json pollEvents (const std::string& tenant, const std::string& project, std::uint64_t since, size_t limit, std::chrono::milliseconds wait, const std::atomic<bool>* cancelled);
+    json pollEvents (const std::string& tenant, const std::string& project, std::uint64_t since, size_t limit, std::chrono::milliseconds wait, const std::atomic<bool>* cancelled,
+                     const std::string& clientEpoch = {});
+    /** Random per server start: event ids begin again after a restart, so a client compares this to the value it saw before. */
+    const std::string& eventEpoch() const       { return eventEpoch_; }
     /** project.diff */
     Result<json> diffSince (const std::string& project, std::uint64_t since);
     json externalChanges (Session&, const std::string& project, bool baselineOnly);
@@ -213,6 +218,9 @@ private:
     std::mutex eventMutex_;
     std::condition_variable eventCv_;
     std::deque<json> events_;                                  // every hub event, newest last (capped)
+    std::map<std::string, std::uint64_t> droppedEventId_;      // newest evicted event id per tenant ("t") and per project ("t\x1fp"): resync_required only concerns what the caller could see
+    std::uint64_t lastEventId_ = 0;                            // newest event id seen
+    std::string eventEpoch_;
     std::map<std::string, std::deque<ProjectEvent>> projectEvents_;
     std::map<std::string, std::uint64_t> projectEventFloor_;   // lowest revision the ring can answer for
     std::map<std::string, std::chrono::steady_clock::time_point> dirtyUris_;

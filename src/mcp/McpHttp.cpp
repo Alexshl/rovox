@@ -50,6 +50,13 @@ struct Channel
     }
 };
 
+/** Counts one request on the session until the returned handle (and every copy of it) is gone. */
+std::shared_ptr<void> markBusy (const std::shared_ptr<Session>& session)
+{
+    ++session->inFlight;
+    return std::shared_ptr<void> (nullptr, [session] (void*) { --session->inFlight; });
+}
+
 bool wantsProgress (const json& body)
 {
     return body.value ("method", "") == "tools/call" && body.contains ("params") && body["params"].is_object() && body["params"].contains ("_meta")
@@ -62,9 +69,9 @@ bool originAllowed (const std::string& origin, const std::vector<std::string>& a
     return guard::originInList (origin, allowed);
 }
 
-bool hostAllowed (const std::string& hostHeader)
+bool hostAllowed (const std::string& hostHeader, const std::vector<std::string>& allowedHosts)
 {
-    return guard::hostAllowed (true, hostHeader);
+    return guard::hostAllowed (true, hostHeader, allowedHosts);
 }
 
 void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions options)
@@ -82,16 +89,10 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
     auto guard = [options] (const httplib::Request& req, httplib::Response& res) -> bool
     {
-        // DNS rebinding: a browser page on another origin must not be able to talk to a local server
-        if (req.has_header ("Origin") && ! originAllowed (req.get_header_value ("Origin"), options.allowedOrigins))
+        // the same rule as REST and WebSocket (guard::requestAllowed): DNS rebinding and cross-origin pages
+        if (! guard::requestAllowed (options.loopbackBind, req.get_header_value ("Origin"), req.get_header_value ("Host"), options.allowedOrigins, options.allowedHosts))
         {
-            replyJson (res, 403, rpcError (nullptr, -32000, "Origin not allowed"));
-            return false;
-        }
-
-        if (options.loopbackBind && ! hostAllowed (req.get_header_value ("Host")))
-        {
-            replyJson (res, 403, rpcError (nullptr, -32000, "Host not allowed"));
+            replyJson (res, 403, rpcError (nullptr, -32000, "Origin or Host not allowed"));
             return false;
         }
 
@@ -121,6 +122,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
         const bool isInit = body.value ("method", "") == "initialize";
         std::shared_ptr<Session> session;
+        std::shared_ptr<void> busy;         // keeps the session out of LRU eviction while this request (or its streaming worker) runs
 
         if (isInit)
         {
@@ -131,10 +133,28 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
                     it = server.findSession (*it) ? std::next (it) : limits->sessionIds.erase (it);
 
                 if (limits->sessionIds.size() >= maxSessions)
-                    return replyJson (res, 503, rpcError (nullptr, -32000, "too many MCP sessions"));
+                {
+                    // make room: close the least recently used session that has no request in flight and no open stream
+                    std::shared_ptr<Session> victim;
+
+                    for (const auto& sid : limits->sessionIds)
+                        if (auto s = server.findSession (sid); s && s->inFlight.load() == 0 && s->openStreams.load() == 0
+                                                               && (! victim || s->lastActive() < victim->lastActive()))
+                            victim = s;
+
+                    if (! victim)
+                    {
+                        res.set_header ("Retry-After", "30");
+                        return replyJson (res, 503, rpcError (nullptr, -32000, "too many MCP sessions"));
+                    }
+
+                    server.closeSession (victim->id);
+                    limits->sessionIds.erase (victim->id);
+                }
 
                 session = server.createSession();
                 limits->sessionIds.insert (session->id);
+                busy = markBusy (session);
             }
 
             res.set_header ("Mcp-Session-Id", session->id);
@@ -150,8 +170,11 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
             if (! session)
                 return replyJson (res, 404, rpcError (body.value ("id", json (nullptr)), -32001, "unknown or expired session; initialize again"));
+
+            busy = markBusy (session);
         }
 
+        session->touch();
         RequestContext rc;
         Session* raw = session.get();
         rc.emit = [raw] (const json& n) { raw->push (n); };
@@ -173,7 +196,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
             auto channel = std::make_shared<Channel>();
             rc.emit = [channel] (const json& n) { channel->push (n, false); };
-            channel->worker = std::thread ([channel, &server, session, body, rc]() mutable
+            channel->worker = std::thread ([channel, &server, session, body, rc, busy]() mutable
             {
                 auto response = server.handle (*session, body, rc);
                 channel->push (response ? *response : json (nullptr), true);
@@ -254,6 +277,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
         }
 
         session->touch();
+        ++session->openStreams;
         const int generation = ++session->streamGeneration;
         std::uint64_t cursor = session->lastMessageId();
 
@@ -293,7 +317,11 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
             return true;
         },
-        [limits] (bool) { --limits->streams; });
+        [limits, session] (bool)
+        {
+            --limits->streams;
+            --session->openStreams;
+        });
     });
 
     svr.Delete ("/mcp", [&server, guard] (const httplib::Request& req, httplib::Response& res)

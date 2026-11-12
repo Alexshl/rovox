@@ -1209,10 +1209,13 @@ namespace
 {
 struct HttpFixture
 {
-    HttpFixture (const std::string& token = {}, const std::string& bind = "127.0.0.1")
+    HttpFixture (const std::string& token = {}, const std::string& bind = "127.0.0.1", size_t maxSessions = 256, size_t maxStreams = 32)
         : h(), server (test::host(), h.env.pm, h.env.bus, h.env.hub, [&] { ServerOptions o; o.port = 0; o.bind = bind; o.token = token; return o; }())
     {
-        server.mount ([this] (httplib::Server& svr) { mcp::installMcpRoutes (svr, h.server, { .allowedOrigins = { "https://rovox.example" }, .loopbackBind = true }); });
+        server.mount ([this, maxSessions, maxStreams] (httplib::Server& svr)
+        {
+            mcp::installMcpRoutes (svr, h.server, { .allowedOrigins = { "https://rovox.example" }, .loopbackBind = true, .maxSessions = maxSessions, .maxStreams = maxStreams });
+        });
         REQUIRE (server.start().ok());
     }
 
@@ -1342,6 +1345,91 @@ ROVOX_TEST (mcp, http_rejects_bad_origin_host_and_missing_token)
     CHECK (! mcp::originAllowed ("http://localhost.evil.example", {}));
     CHECK (mcp::hostAllowed ("localhost:4810"));
     CHECK (! mcp::hostAllowed ("rovox.example:4810"));
+}
+
+namespace
+{
+/** Opens GET /mcp streams that stay open until the server shuts down; waits until the server counts them. */
+struct HeldStreams
+{
+    std::vector<std::thread> threads;
+
+    void open (HttpFixture& f, const std::string& sid)
+    {
+        const auto before = f.h.server.findSession (sid)->openStreams.load();
+        threads.emplace_back ([&f, sid]
+        {
+            httplib::Client c ("127.0.0.1", f.server.port());
+            c.set_read_timeout (20, 0);
+            c.Get ("/mcp", f.headers ({ { "Accept", "text/event-stream" }, { "Mcp-Session-Id", sid } }));
+        });
+
+        for (int i = 0; i < 1000 && f.h.server.findSession (sid)->openStreams.load() == before; ++i)
+            std::this_thread::sleep_for (std::chrono::milliseconds (5));
+    }
+
+    void closeAll (HttpFixture& f)
+    {
+        f.h.server.shutdown();      // ends every open SSE stream
+
+        for (auto& t : threads)
+            t.join();
+
+        threads.clear();
+    }
+};
+} // namespace
+
+ROVOX_TEST (mcp, http_session_cap_evicts_the_least_recently_used_idle_session)
+{
+    HttpFixture f ("", "127.0.0.1", 2, 32);
+
+    auto r = f.h.onClient ([&]
+    {
+        httplib::Client c ("127.0.0.1", f.server.port());
+        const auto ping = [&] (const std::string& sid)
+        {
+            return post (c, f.headers ({ { "Mcp-Session-Id", sid } }), { { "jsonrpc", "2.0" }, { "id", 2 }, { "method", "ping" } }).status;
+        };
+
+        const auto a = post (c, f.headers(), initBody()), b = post (c, f.headers(), initBody());
+        const int pingA = ping (a.session);                 // a is now newer than b
+        const auto third = post (c, f.headers(), initBody());
+        return std::vector<int> { a.status, b.status, pingA, third.status, ping (b.session), ping (a.session), ping (third.session) };
+    });
+
+    CHECK ((r == std::vector<int> { 200, 200, 200, 200, 404, 200, 200 }));      // the third initialize evicted b, the least recently used
+}
+
+ROVOX_TEST (mcp, http_session_cap_answers_503_when_every_session_is_busy_and_caps_event_streams)
+{
+    HttpFixture f ("", "127.0.0.1", 2, 2);
+    HeldStreams streams;
+    std::string a, b;
+    int thirdStatus = 0, thirdStream = 0;
+    std::string retryAfter;
+
+    f.h.onClient ([&]
+    {
+        httplib::Client c ("127.0.0.1", f.server.port());
+        a = post (c, f.headers(), initBody()).session;
+        b = post (c, f.headers(), initBody()).session;
+        streams.open (f, a);
+        streams.open (f, b);
+
+        auto res = c.Post ("/mcp", f.headers(), initBody().dump(), "application/json");      // both sessions have an open stream: nothing to evict
+        thirdStatus = res ? res->status : 0;
+        retryAfter = res ? res->get_header_value ("Retry-After") : "";
+
+        auto stream = c.Get ("/mcp", f.headers ({ { "Accept", "text/event-stream" }, { "Mcp-Session-Id", a } }));      // the 3rd concurrent stream
+        thirdStream = stream ? stream->status : 0;
+        return true;
+    });
+
+    CHECK (thirdStatus == 503);
+    CHECK (! retryAfter.empty());
+    CHECK (thirdStream == 429);
+    streams.closeAll (f);
 }
 
 ROVOX_TEST (mcp, http_sse_stream_delivers_notifications_and_resumes_after_a_drop)
@@ -2329,6 +2417,39 @@ ROVOX_TEST (mcp, events_poll_reports_resync_after_the_ring_overflowed)
     CHECK (fresh["resync_required"] == false);
 }
 
+ROVOX_TEST (mcp, events_poll_resync_only_counts_events_the_tenant_could_see_and_detects_a_restart)
+{
+    Harness h;
+    const auto mine = h.env.hub.publish ("local", "", json { { "type", "test.mine" } });
+    std::uint64_t theirsFirst = 0;
+
+    for (int i = 0; i < 2100; ++i)
+    {
+        const auto id = h.env.hub.publish ("tenant-b", "", json { { "type", "test.theirs" } });
+        theirsFirst = theirsFirst == 0 ? id : theirsFirst;
+    }
+
+    const auto last = h.env.hub.publish ("local", "", json { { "type", "test.mine" } });
+
+    // 2000+ events of another tenant pushed mine out of the ring, but I saw everything up to `mine`: nothing I could see was lost
+    auto local = h.data ("events.poll", { { "since_event_id", mine } });
+    CHECK (local["resync_required"] == false);
+    CHECK (local["events"].size() == 1);
+
+    // the other tenant did lose events it had not read
+    auto theirs = h.server.pollEvents ("tenant-b", "", theirsFirst, 10, std::chrono::milliseconds (0), nullptr);
+    CHECK (theirs["resync_required"] == true);
+
+    // `since` newer than anything this server ever published: it restarted (ids begin again)
+    CHECK (h.data ("events.poll", { { "since_event_id", last + 100000 } })["resync_required"] == true);
+
+    // the epoch changes with every server start
+    const auto epoch = local["event_epoch"].get<std::string>();
+    CHECK (! epoch.empty());
+    CHECK (h.data ("events.poll", { { "since_event_id", last }, { "event_epoch", epoch } })["resync_required"] == false);
+    CHECK (h.data ("events.poll", { { "since_event_id", last }, { "event_epoch", "0123456789abcdef" } })["resync_required"] == true);
+}
+
 ROVOX_TEST (mcp, external_changes_never_skip_user_edits_between_agent_calls)
 {
     Harness h;
@@ -2336,13 +2457,40 @@ ROVOX_TEST (mcp, external_changes_never_skip_user_edits_between_agent_calls)
     const std::string t1 = firstTrackId (h.data ("track.list", { { "project_id", id } }));
     const Origin ui { Origin::Kind::ui, "ws_1", "alex@browser" };
 
-    for (int i = 0; i < 5; ++i)
+    // a user thread edits for real while the agent keeps calling: every edit is reported exactly once, none is skipped or doubled
+    constexpr int edits = 25;
+    std::atomic<int> done { 0 };
+    std::atomic<bool> failed { false };
+    int reported = 0;
+
+    std::thread user ([&]
     {
-        REQUIRE (h.env.runAs (ui, id, "track.update", { { "track_id", t1 }, { "pan", 0.05 * (i + 1) } }).ok);
+        for (int i = 0; i < edits; ++i)
+        {
+            if (! h.env.executor.run ([&] { return h.env.runAs (ui, id, "track.update", { { "track_id", t1 }, { "pan", 0.01 * (i + 1) } }).ok; }).get())
+                failed = true;
+
+            ++done;
+        }
+    });
+
+    while (done < edits)
+    {
         auto r = h.tool ("marker.list", { { "project_id", id } });
-        REQUIRE (r.contains ("external_changes"));
-        CHECK (r["external_changes"]["count"] == 1);
+
+        if (r.contains ("external_changes"))
+            reported += r["external_changes"]["count"].get<int>();
     }
+
+    user.join();
+    auto tail = h.tool ("marker.list", { { "project_id", id } });
+
+    if (tail.contains ("external_changes"))
+        reported += tail["external_changes"]["count"].get<int>();
+
+    CHECK (! failed);
+    CHECK (reported == edits);
+    CHECK (! h.tool ("marker.list", { { "project_id", id } }).contains ("external_changes"));       // reported exactly once
 }
 
 ROVOX_TEST (mcp, skill_session_does_not_see_its_own_edits_as_external)
