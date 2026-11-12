@@ -10,8 +10,9 @@ let hasCanvas = false;
 try {
   await import('canvas');
   hasCanvas = true;
-} catch {
-  /* node-canvas is an optional dependency: the canvas test is skipped without it */
+} catch (e) {
+  // the Docker web stage sets ROVOX_REQUIRE_CANVAS=1: a missing node-canvas fails the run there instead of skipping the canvas test
+  if (process.env.ROVOX_REQUIRE_CANVAS === '1') throw new Error(`ROVOX_REQUIRE_CANVAS=1 but node-canvas does not load: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 class FakeWebSocket {
@@ -324,9 +325,10 @@ describe('project tab mute', () => {
   it('toggles project.mix muted from the speaker icon, updates icon and aria, and does not activate the tab', async () => {
     const { app, ws } = await boot();
     const btn = () => document.querySelector<HTMLButtonElement>('.tabitem .mute')!;
-    expect(btn().getAttribute('aria-label')).toBe('Звук проєкту');
+    expect(btn().getAttribute('aria-label')).toBe('Звук проєкту rahiv');
     expect(btn().title).toBe('Вимкнути звук');
-    expect(btn().getAttribute('aria-pressed')).toBe('false');
+    expect(btn().getAttribute('role')).toBe('switch');
+    expect(btn().getAttribute('aria-checked')).toBe('true'); // checked = the sound is on
     expect(btn().closest('[role=tab]')).toBeNull(); // not nested in the tab
     const setActive = vi.spyOn(app, 'setActive');
 
@@ -335,16 +337,16 @@ describe('project tab mute', () => {
     const sent = ws.sent.filter((m) => m.t === 'cmd' && m.name === 'project.mix' && m.params?.muted !== undefined);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.params).toMatchObject({ muted: true });
-    expect(btn().getAttribute('aria-label')).toBe('Звук проєкту');
+    expect(btn().getAttribute('aria-label')).toBe('Звук проєкту rahiv');
     expect(btn().title).toBe('Увімкнути звук');
-    expect(btn().getAttribute('aria-pressed')).toBe('true');
+    expect(btn().getAttribute('aria-checked')).toBe('false');
     expect(btn().classList.contains('on')).toBe(true);
     expect(setActive).not.toHaveBeenCalled();
 
     btn().click();
     await tick(100);
     expect(ws.sent.filter((m) => m.name === 'project.mix' && m.params?.muted === false)).toHaveLength(1);
-    expect(btn().getAttribute('aria-pressed')).toBe('false');
+    expect(btn().getAttribute('aria-checked')).toBe('true');
   });
 
   it('ignores clicks while a project.mix request is in flight', async () => {
@@ -360,8 +362,8 @@ describe('project tab mute', () => {
     mix.muted = true;
     await boot();
     const b = document.querySelector<HTMLButtonElement>('.tabitem .mute')!;
-    expect(b.getAttribute('aria-pressed')).toBe('true');
-    expect(b.getAttribute('aria-label')).toBe('Звук проєкту');
+    expect(b.getAttribute('aria-checked')).toBe('false');
+    expect(b.getAttribute('aria-label')).toBe('Звук проєкту rahiv');
     expect(b.title).toBe('Увімкнути звук');
   });
 });

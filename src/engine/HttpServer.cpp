@@ -328,6 +328,12 @@ void HttpServer::installRoutes()
         svr.set_file_request_handler ([] (const httplib::Request& req, httplib::Response& res)
         {
             res.set_header ("Cache-Control", req.path.rfind ("/assets/", 0) == 0 ? "public, max-age=31536000, immutable" : "no-cache");
+            // the built app has no inline script or style attribute: scripts, styles and workers only from this origin
+            res.set_header ("Content-Security-Policy",
+                            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; media-src 'self' blob:; "
+                            "connect-src 'self' ws: wss:; worker-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; object-src 'none'");
+            res.set_header ("X-Content-Type-Options", "nosniff");
+            res.set_header ("Referrer-Policy", "no-referrer");
         });
     }
 

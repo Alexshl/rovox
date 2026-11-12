@@ -4,10 +4,10 @@
 // Arrange view: ruler + lanes drawn on Canvas (virtualised: only the visible tracks and the items in the visible time window),
 // track control panels (TCP) as DOM. Edits become commands of the command layer; items touched by an agent are drawn in agent-cyan.
 import { alpha, mix } from '../lib/color';
-import { clear, h, rafThrottle, token } from '../lib/dom';
+import { clear, h, rafThrottle, sliderKeyDb, token } from '../lib/dom';
 import { type Grid, snapTime } from '../lib/snap';
 import { barQn, barToSeconds, beatQn, formatClock, qnToSeconds, secondsToBar, secondsToQn } from '../lib/time';
-import { clamp, dbToFader, dbToLinear, faderToDb, formatDb } from '../lib/units';
+import { SILENCE_DB, clamp, dbToFader, dbToLinear, faderToDb, formatDb } from '../lib/units';
 import type { ItemState, MarkerState, TrackState } from '../net/protocol';
 import type { App } from '../store/session';
 import type { AgentMark, ProjectStore } from '../store/project';
@@ -67,7 +67,9 @@ type Drag =
 export class ArrangeView {
   readonly el: HTMLElement;
   private readonly rulerCanvas = h('canvas');
-  private readonly lanesCanvas = h('canvas');
+  private readonly lanesCanvas = h('canvas', { attrs: { tabindex: '0', role: 'application', 'aria-label': 'Аранжування', 'aria-describedby': 'rx-arrange-hint' } });
+  private readonly hint = h('div', { class: 'sr-only', id: 'rx-arrange-hint', text: 'Стрілки ліворуч і праворуч вибирають кліп на доріжці, вгору і вниз змінюють доріжку, Enter перейменовує кліп, Delete видаляє вибране.' });
+  private readonly announce = h('div', { class: 'sr-only', attrs: { 'aria-live': 'polite', role: 'status' } });
   private readonly scroller = h('div', { class: 'lanes-scroll' });
   private readonly inner = h('div', { class: 'lanes-inner' });
   private readonly lanes = h('div', { class: 'lanes' });
@@ -109,6 +111,8 @@ export class ArrangeView {
       h('div', { class: 'ruler-row' }, h('div', { class: 'head' }, this.headLabel), this.rulerBox),
       lanesWrap,
       this.tip,
+      this.hint,
+      this.announce,
     );
 
     this.scroller.addEventListener('scroll', () => {
@@ -123,6 +127,7 @@ export class ArrangeView {
     this.lanesCanvas.addEventListener('pointerleave', () => this.hideTip());
     this.lanesCanvas.addEventListener('dblclick', (e) => this.onLanesDouble(e));
     this.lanesCanvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    this.lanesCanvas.addEventListener('keydown', (e) => this.onLanesKey(e));
     this.rulerCanvas.addEventListener('pointerdown', (e) => this.onRulerDown(e));
     this.rulerCanvas.addEventListener('pointermove', (e) => this.onRulerMove(e));
     this.rulerCanvas.addEventListener('pointerup', (e) => this.onUp(e));
@@ -949,12 +954,68 @@ export class ArrangeView {
     const { x, y } = this.local(e, this.lanesCanvas);
     const hit = this.hit(x, y);
     if (hit?.zone === 'gain') void this.app.edit('item.update', { item_id: hit.item.item_id, gain_db: 0 });
-    else if (hit && hit.zone === 'body') {
-      const item = hit.item;
-      void textDialog({ title: 'Назва айтема', label: 'Назва', value: item.name }).then((name) => {
-        if (name && name !== item.name) void this.app.edit('item.update', { item_id: item.item_id, name });
-      });
+    else if (hit && hit.zone === 'body') this.renameItem(hit.item);
+  }
+
+  private renameItem(item: ItemState): void {
+    void textDialog({ title: 'Назва айтема', label: 'Назва', value: item.name }).then((name) => {
+      if (name && name !== item.name) void this.app.edit('item.update', { item_id: item.item_id, name });
+    });
+  }
+
+  /** Keyboard access to the items: Arrow keys move the selection (left/right along the track, up/down between tracks), Enter renames. */
+  private onLanesKey(e: KeyboardEvent): void {
+    const s = this.store;
+    if (!s || e.ctrlKey || e.metaKey || e.altKey) return;
+    const sorted = (trackId: string) => [...s.items.values()].filter((i) => i.track_id === trackId).sort((a, b) => a.start_s - b.start_s);
+    const current = s.selection.size === 1 ? s.items.get([...s.selection][0]!) : undefined;
+    const trackIds = s.tracks.map((t) => t.track_id);
+    let next: ItemState | undefined;
+    if (e.key === 'Enter') {
+      if (!current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.renameItem(current);
+      return;
     }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const dir = e.key === 'ArrowRight' ? 1 : -1;
+      const trackId = current?.track_id ?? s.selectedTrack ?? trackIds[0];
+      if (!trackId) return;
+      const list = sorted(trackId);
+      const at = current ? list.findIndex((i) => i.item_id === current.item_id) : -1;
+      next = current ? list[at + dir] : dir === 1 ? list[0] : list[list.length - 1];
+      if (!next) next = current; // at the end of the track: stay (and announce again)
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      const dir = e.key === 'ArrowDown' ? 1 : -1;
+      const from = trackIds.indexOf(current?.track_id ?? s.selectedTrack ?? trackIds[0] ?? '');
+      for (let i = from + dir; i >= 0 && i < trackIds.length && !next; i += dir) {
+        const list = sorted(trackIds[i]!);
+        if (!list.length) continue;
+        const ref = current?.start_s ?? 0;
+        next = list.reduce((best, it) => (Math.abs(it.start_s - ref) < Math.abs(best.start_s - ref) ? it : best), list[0]!);
+      }
+      if (!next) next = current;
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (next) this.selectItem(s, next);
+  }
+
+  private selectItem(s: ProjectStore, item: ItemState): void {
+    s.selection = new Set([item.item_id]);
+    s.selectedTrack = item.track_id;
+    const index = s.tracks.findIndex((t) => t.track_id === item.track_id);
+    const rowTop = index * TRACK_H;
+    const viewH = this.scroller.clientHeight;
+    if (rowTop < this.scroller.scrollTop) this.scroller.scrollTop = rowTop;
+    else if (viewH > 0 && rowTop + TRACK_H > this.scroller.scrollTop + viewH) this.scroller.scrollTop = rowTop + TRACK_H - viewH;
+    const w = this.lanesCanvas.clientWidth;
+    if (w > 0 && (item.end_s < this.t0 || item.start_s > this.tOf(w))) s.view.start = Math.max(0, item.start_s - 1);
+    s.state.emit();
+    this.draw();
+    const track = s.tracks[index];
+    this.announce.textContent = `${item.name}, доріжка ${track?.name ?? index + 1}, ${formatClock(item.start_s)}–${formatClock(item.end_s)}`;
   }
 
   private onWheel(e: WheelEvent): void {
@@ -1121,7 +1182,7 @@ class TcpRow {
   private readonly num = h('span', { class: 'num' });
   private readonly color = h('span', { class: 'color' });
   private readonly nameEl = h('span', { class: 'name' });
-  private readonly vol = h('div', { class: 'vol' }, h('i'));
+  private readonly vol = h('div', { class: 'vol', attrs: { role: 'slider', tabindex: '0', 'aria-valuemin': String(SILENCE_DB), 'aria-valuemax': '12', 'aria-valuenow': '0' } }, h('i'));
   private readonly mute = h('button', { class: 'sbtn mute', text: 'M', title: 'Mute', attrs: { 'aria-label': 'Mute' } });
   private readonly solo = h('button', { class: 'sbtn solo', text: 'S', title: 'Solo', attrs: { 'aria-label': 'Solo' } });
   private readonly fx = h('button', { class: 'sbtn fx', text: 'FX', title: 'FX', attrs: { 'aria-label': 'FX' } });
@@ -1153,6 +1214,15 @@ class TcpRow {
     this.fx.addEventListener('click', () => this.showFx());
     this.vol.addEventListener('pointerdown', (e) => this.dragVolume(e));
     this.vol.addEventListener('dblclick', () => this.setVolume(0, false));
+    this.vol.addEventListener('keydown', (e) => {
+      const db = sliderKeyDb(e, this.store.track(this.id)?.volume_db ?? 0, SILENCE_DB, 12);
+      if (db === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // one command per key press; a held key (auto-repeat) is one coalesced gesture
+      this.store.patchTrack(this.id, { volume_db: db });
+      void this.app.edit('track.update', { track_id: this.id, volume_db: db }, e.repeat ? { coalesceKey: `vol:${this.id}` } : {});
+    });
   }
 
   update(t: TrackState, index: number): void {
@@ -1171,6 +1241,9 @@ class TcpRow {
     const bar = this.vol.firstElementChild as HTMLElement;
     bar.style.width = `${dbToFader(t.volume_db ?? 0) * 100}%`;
     this.vol.title = `Гучність ${formatDb(t.volume_db ?? 0, true)} (двічі клік = 0 dB)`;
+    this.vol.setAttribute('aria-label', `Гучність: ${t.name}`);
+    this.vol.setAttribute('aria-valuenow', String(Math.round((t.volume_db ?? 0) * 10) / 10));
+    this.vol.setAttribute('aria-valuetext', formatDb(t.volume_db ?? 0, true));
   }
 
   private rename(): void {

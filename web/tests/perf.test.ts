@@ -11,14 +11,31 @@ let hasCanvas = false;
 try {
   await import('canvas');
   hasCanvas = true;
-} catch {
-  /* optional dependency */
+} catch (e) {
+  // the Docker web stage sets ROVOX_REQUIRE_CANVAS=1: a missing node-canvas fails the run there instead of skipping the test
+  if (process.env.ROVOX_REQUIRE_CANVAS === '1') throw new Error(`ROVOX_REQUIRE_CANVAS=1 but node-canvas does not load: ${e instanceof Error ? e.message : String(e)}`);
 }
+
+// E5-02 asks for >= 50 fps in Chrome, i.e. 20 ms per frame. This test draws with node-canvas (a software rasteriser, no GPU) inside
+// jsdom, which is several times slower than Chrome's canvas, so the bound is 3x the target: 60 ms per frame (~16 fps here). A frame that
+// costs more than that is an algorithmic regression (the drawing is virtualised), not a slow rasteriser; the number printed is the
+// figure to compare between versions.
+const FRAME_BUDGET_MS = 20 * 3;
 
 describe.skipIf(!hasCanvas)('arrange performance', () => {
   it('draws a frame of a 5000 item, 64 track project quickly and queries the index in microseconds', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} });
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false })));
+    // real peak data (int8 min/max pairs) for every item, so the waveforms are drawn and part of the frame cost
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const bins = Number(/bins=(\d+)/.exec(String(url))?.[1] ?? 8);
+      const data = new Int8Array(bins * 2);
+      for (let i = 0; i < bins; i++) {
+        const a = Math.round(100 * Math.abs(Math.sin(i / 11)) * (0.4 + 0.6 * Math.abs(Math.sin(i / 70))));
+        data[i * 2] = -a;
+        data[i * 2 + 1] = a;
+      }
+      return { ok: true, headers: { get: (k: string) => (k === 'X-Rovox-T0' ? '0' : k === 'X-Rovox-T1' ? '4.5' : null) }, arrayBuffer: async () => data.buffer };
+    }));
     Object.defineProperty(HTMLCanvasElement.prototype, 'clientWidth', { configurable: true, get: () => 1200 });
     Object.defineProperty(HTMLCanvasElement.prototype, 'clientHeight', { configurable: true, get: () => 640 });
     const { App } = await import('../src/store/session');
@@ -56,7 +73,9 @@ describe.skipIf(!hasCanvas)('arrange performance', () => {
     // only the visible window is drawn: ~10 tracks x 60 s / 5 s per item
     expect(view.visibleItemCount()).toBeLessThan(64 * 14);
 
-    // a frame
+    // a frame: the first paint starts the peak fetches, the wait lets them land, so the measured frames draw the waveforms
+    (view as unknown as { paint(): void }).paint();
+    await new Promise((r) => setTimeout(r, 200));
     (view as unknown as { paint(): void }).paint();
     const f0 = performance.now();
     const frames = 20;
@@ -66,6 +85,6 @@ describe.skipIf(!hasCanvas)('arrange performance', () => {
     }
     const perFrame = (performance.now() - f0) / frames;
     console.log(`paint: ${perFrame.toFixed(1)} ms per frame (node-canvas, 1200x640, ${items.length} items in the project)`);
-    expect(perFrame).toBeLessThan(150);
+    expect(perFrame).toBeLessThan(FRAME_BUDGET_MS);
   });
 });

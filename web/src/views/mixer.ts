@@ -4,7 +4,7 @@
 // Mixer: one strip per track and the master. Fader (dB law, double click = 0 dB, Shift-drag = fine), pan, M/S, FX list and peak
 // meters (green to -12 dBFS, amber to -3, red above; fed by the 0x02 frames at 30 Hz). Changes go through track.update with a
 // coalesce key, so a drag is one undo step.
-import { clear, h, token } from '../lib/dom';
+import { clear, h, sliderKeyDb, token } from '../lib/dom';
 import { SILENCE_DB, clamp, dbToFader, faderToDb, formatDb, formatPan, meterPosition } from '../lib/units';
 import type { PluginState, TrackState } from '../net/protocol';
 import type { MasterState } from '../net/protocol';
@@ -60,7 +60,7 @@ class Strip {
   private readonly pan = h('input', { class: 'pan', attrs: { type: 'range', min: '-100', max: '100', step: '1', 'aria-label': 'Pan' } });
   private readonly panRead = h('div', { class: 'panread' });
   private readonly dbRead = h('div', { class: 'dbread' });
-  private readonly canvas = h('canvas');
+  private readonly canvas = h('canvas', { attrs: { role: 'slider', tabindex: '0', 'aria-orientation': 'vertical', 'aria-valuemin': String(SILENCE_DB), 'aria-valuemax': '12', 'aria-valuenow': '0' } });
   private readonly mute = h('button', { class: 'sbtn mute', text: 'M', attrs: { 'aria-label': 'Mute' } });
   private readonly solo = h('button', { class: 'sbtn solo', text: 'S', attrs: { 'aria-label': 'Solo' } });
   private dragging = false;
@@ -107,6 +107,16 @@ class Strip {
     this.mute.addEventListener('click', () => this.toggle('mute'));
     this.solo.addEventListener('click', () => this.toggle('solo'));
     this.canvas.addEventListener('pointerdown', (e) => this.faderDown(e));
+    this.canvas.addEventListener('keydown', (e) => {
+      const db = sliderKeyDb(e, this.current().volume_db ?? 0, SILENCE_DB, 12);
+      if (db === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // one command per key press; a held key (auto-repeat) is one coalesced gesture
+      this.store.patchTrack(this.id, { volume_db: db });
+      this.update(this.id === 'master' ? undefined : this.store.track(this.id)); // readout and aria-valuenow follow the key at once
+      this.send({ volume_db: db }, e.repeat ? `vol:${this.id}` : undefined);
+    });
     this.canvas.addEventListener('dblclick', () => {
       this.store.patchTrack(this.id, { volume_db: 0 });
       this.send({ volume_db: 0 });
@@ -196,6 +206,9 @@ class Strip {
     if (document.activeElement !== this.pan) this.pan.value = String(Math.round((c.pan ?? 0) * 100));
     this.panRead.textContent = formatPan(c.pan);
     this.dbRead.textContent = formatDb(this.dragging ? this.dragDb : (c.volume_db ?? 0), true);
+    this.canvas.setAttribute('aria-label', `Гучність: ${name}`);
+    this.canvas.setAttribute('aria-valuenow', String(Math.round((c.volume_db ?? 0) * 10) / 10));
+    this.canvas.setAttribute('aria-valuetext', formatDb(c.volume_db ?? 0, true));
 
     const list: PluginState[] = (this.store.fx.get(this.id) ?? []).filter((p) => p.type !== 'volume' && p.type !== 'level');
     const fxSig = list.map((p) => `${p.name}\u0001${p.type}\u0001${p.enabled ? 1 : 0}`).join('\u0002');
