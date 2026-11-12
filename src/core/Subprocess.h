@@ -30,6 +30,7 @@ struct SubprocessResult
     bool timedOut = false, cancelled = false;
     std::string stdoutText;         // everything the child printed to stdout, kept only if onStdoutLine is not set
     std::string stderrTail;         // last 4 KB of stderr
+    double cpuUserS = 0, cpuSystemS = 0;    // exact CPU time of the child (rusage from wait4); 0 if it was not reaped
 
     bool crashed() const noexcept   { return signal != 0 && ! timedOut && ! cancelled; }
     bool succeeded() const noexcept { return started && signal == 0 && exitCode == 0; }
@@ -37,5 +38,9 @@ struct SubprocessResult
 };
 
 SubprocessResult runSubprocess (const SubprocessOptions&);
+
+/** Running total of user+system CPU seconds of the children reaped by runSubprocess on the calling thread. A job takes the difference
+    before and after its work to learn what its child renders cost. */
+double childCpuSecondsThisThread();
 
 } // namespace rovox

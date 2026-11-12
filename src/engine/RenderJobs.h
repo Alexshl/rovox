@@ -9,6 +9,7 @@
 #include "CommandBus.h"
 #include "JobCallback.h"
 #include "JobManager.h"
+#include "Quota.h"
 #include "Render.h"
 
 namespace rovox
@@ -19,6 +20,8 @@ struct JobContextInfo
     std::string tenant = "local";
     std::string projectId;
     Origin origin = Origin::cli();
+    std::string keyId;              // the calling key (usage journal, per-key accounting); empty = the local operator
+    std::string quotaProfile;       // the key's own quota profile, empty = the tenant's
 };
 
 struct StartedJob
@@ -47,7 +50,8 @@ public:
     Result<StartedJob> startImportPlan (const JobContextInfo&, const json& args);
 
     /** TOML file whose [callbacks] table says which hosts a job callback may target (read at every render.start; no file = no callbacks). */
-    void setConfigFile (fs::path file)      { configFile_ = std::move (file); }
+    /** The same file holds [quota_profiles] and [tenants.<id>] (see Quota.h). */
+    void setConfigFile (fs::path file)      { quotas().setConfigFile (file); configFile_ = std::move (file); }
     JobCallbackDispatcher& callbacks()      { return callbacks_; }
 
     /** Keeps the newest `keep` previews younger than `maxAgeS` (task 240: 10 files, 24 h). Returns the number removed. */
@@ -57,8 +61,11 @@ private:
     struct Prepared;
     Result<std::shared_ptr<Prepared>> prepare (const JobContextInfo&, const json& args, const std::string& kind, bool wantTrackIds);
     Result<json> runAnalysisJob (JobContext&, Prepared&, bool keepClip);
+    /** `meteredAudioS` >= 0 makes the job count against the tenant's quotas (concurrent jobs, CPU seconds per day, audio minutes per month): it is
+        admitted before the job exists (QUOTA_EXCEEDED creates nothing), its CPU is measured around `fn` and the result gains `usage {cpu_s, audio_s}`
+        (the same numbers as the usage journal record). */
     Result<StartedJob> submit (const JobContextInfo&, const std::string& kind, const std::string& pool, int priority, const json& args, JobFn,
-                               json callbackState = nullptr, std::function<void (const JobInfo&)> onFinished = nullptr);
+                               json callbackState = nullptr, std::function<void (const JobInfo&)> onFinished = nullptr, double meteredAudioS = -1);
 
     ProjectManager& projects_;
     JobManager& jobs_;

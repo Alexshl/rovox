@@ -9,11 +9,14 @@
 #include "Loudness.h"
 #include "PluginHost.h"
 #include "ProjectManager.h"
+#include "Quota.h"
 #include "Spectrum.h"
+#include "Subprocess.h"
 #include "TimePos.h"
 
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 #include <mutex>
 
 namespace rovox
@@ -23,6 +26,18 @@ namespace
 {
 double round1 (double v)    { return std::round (v * 10.0) / 10.0; }
 double round2 (double v)    { return std::round (v * 100.0) / 100.0; }
+
+/** CPU seconds of the calling thread. In-process renders are measured with it; Tracktion work done on other threads is not seen, so the figure
+    is approximate (child renders are exact, see childCpuSecondsThisThread). */
+double threadCpuSeconds()
+{
+    timespec ts {};
+
+    if (::clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0.0;
+
+    return (double) ts.tv_sec + (double) ts.tv_nsec * 1.0e-9;
+}
 
 Error bad (const std::string& what, const std::string& path = {})
 {
@@ -317,8 +332,64 @@ Result<std::shared_ptr<JobService::Prepared>> JobService::prepare (const JobCont
 }
 
 Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::string& kind, const std::string& pool, int priority, const json& args, JobFn fn,
-                                       json callbackState, std::function<void (const JobInfo&)> onFinished)
+                                       json callbackState, std::function<void (const JobInfo&)> onFinished, double meteredAudioS)
 {
+    ReservationId reservation = 0;
+
+    if (meteredAudioS >= 0)
+    {
+        if (! quotas().configured())
+            quotas().configure (projects_.host().dataDir(), configFile_, &projects_.hub());
+
+        // concurrent jobs, CPU seconds of the day and audio minutes of the month: QUOTA_EXCEEDED means no job is created
+        auto admitted = quotas().admit (who.tenant, who.quotaProfile, meteredAudioS);
+
+        if (! admitted.ok())
+            return admitted.error();
+
+        reservation = admitted.value();
+        fn = [inner = std::move (fn), reservation, who, kind, meteredAudioS] (JobContext& jc) -> Result<json>
+        {
+            const double cpu0 = threadCpuSeconds(), child0 = childCpuSecondsThisThread();
+            auto result = inner (jc);
+            const double cpuS = roundUsage (std::max (0.0, threadCpuSeconds() - cpu0) + std::max (0.0, childCpuSecondsThisThread() - child0));
+            const double audioS = result.ok() ? roundUsage (meteredAudioS) : 0.0;
+
+            UsageRecord rec;
+            rec.tenant = who.tenant;
+            rec.keyId = who.keyId;
+            rec.jobId = jc.id();
+            rec.kind = kind;
+            rec.cpuS = cpuS;
+            rec.audioS = audioS;
+
+            if (result.ok() && result.value().is_object())
+            {
+                result.value()["usage"] = { { "cpu_s", cpuS }, { "audio_s", audioS } };
+
+                if (result.value().contains ("files") && result.value()["files"].is_array())
+                    for (auto& f : result.value()["files"])
+                        if (f.is_object())
+                        {
+                            rec.bytes += f.value ("bytes", (std::int64_t) 0);
+                            rec.outputs.push_back (f.value ("path", ""));
+                        }
+            }
+
+            quotas().finish (reservation, std::move (rec));
+            return result;
+        };
+
+        // a job cancelled while queued never runs `fn`: its slot is freed here (a no-op once the usage was committed)
+        onFinished = [inner = std::move (onFinished), reservation] (const JobInfo& done)
+        {
+            quotas().release (reservation);
+
+            if (inner)
+                inner (done);
+        };
+    }
+
     JobSpec spec;
     spec.kind = kind;
     spec.projectId = who.projectId;
@@ -330,6 +401,10 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
     spec.callback = std::move (callbackState);
     spec.onFinished = std::move (onFinished);
     auto s = jobs_.submit (std::move (spec), std::move (fn));
+
+    if (! s.created && reservation != 0)
+        quotas().release (reservation);     // the client_request_id matched a job that already exists
+
     return StartedJob { s.id, s.created };
 }
 
@@ -398,7 +473,8 @@ Result<StartedJob> JobService::startRender (const JobContextInfo& who, const jso
         return result;
     },
     callback ? json { { "state", "pending" }, { "attempts", 0 } } : json (nullptr),
-    callback ? std::function<void (const JobInfo&)> ([this, target = *callback] (const JobInfo& done) { callbacks_.enqueue (done, target); }) : nullptr);
+    callback ? std::function<void (const JobInfo&)> ([this, target = *callback] (const JobInfo& done) { callbacks_.enqueue (done, target); }) : nullptr,
+    p->cap.endS - p->cap.startS);
 }
 
 //==============================================================================
@@ -752,7 +828,8 @@ Result<StartedJob> JobService::startPreview (const JobContextInfo& who, const js
     p->embedAudio = args.value ("embed_audio", false);
     p->req.failOn.clear();
 
-    return submit (who, "preview", "render", 10, args, [this, p] (JobContext& jc) -> Result<json> { return runAnalysisJob (jc, *p, true); });
+    return submit (who, "preview", "render", 10, args, [this, p] (JobContext& jc) -> Result<json> { return runAnalysisJob (jc, *p, true); },
+                   nullptr, nullptr, p->cap.endS - p->cap.startS);
 }
 
 Result<StartedJob> JobService::startAnalysis (const JobContextInfo& who, const json& args)
@@ -784,7 +861,8 @@ Result<StartedJob> JobService::startAnalysis (const JobContextInfo& who, const j
     if (target != "master")
         p->kinds.erase (std::remove (p->kinds.begin(), p->kinds.end(), std::string ("tracks_presence")), p->kinds.end());
 
-    return submit (who, "analysis", "analysis", 5, args, [this, p] (JobContext& jc) -> Result<json> { return runAnalysisJob (jc, *p, false); });
+    return submit (who, "analysis", "analysis", 5, args, [this, p] (JobContext& jc) -> Result<json> { return runAnalysisJob (jc, *p, false); },
+                   nullptr, nullptr, p->cap.endS - p->cap.startS);
 }
 
 //==============================================================================
