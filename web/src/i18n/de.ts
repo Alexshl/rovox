@@ -9,7 +9,9 @@
 //   plugin = Plug-in · effects = Effekte · parameter = Parameter · agent = Agent · token = Zugriffstoken
 //   dropout (underrun) = Aussetzer · loudness = Lautheit · bit depth = Bittiefe
 // Plural: German has one / other only, so `few` and `many` repeat `other`.
+import { deImport } from './parts/de.import';
 import type { MessageKey } from './uk';
+import { deNarrow } from './parts/de.narrow';
 
 export const de: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -276,4 +278,6 @@ export const de: Record<MessageKey, string> = {
   'errors.MCP_ERROR': 'Der Server hat einen MCP-Fehler zurückgegeben. Erneut versuchen.',
   'errors.BAD_RESPONSE': 'Der Server hat in einem unerwarteten Format geantwortet. Seite neu laden.',
   'errors.UNKNOWN': 'Aktion fehlgeschlagen. Erneut versuchen.',
+  ...deImport,
+  ...deNarrow,
 };

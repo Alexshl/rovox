@@ -10,7 +10,9 @@
 //   dropout (underrun) = trūkis  sample = semplas       loudness = garsis (LUFS)  token = prieigos raktas
 // Marker is "žyma" (a flag on the timeline); the playhead is "žymeklis" (cursor).
 // Lithuanian plural: one (1, 21 ...) / few (2-9, 22-29 ...) / many (fractions: genitive singular) / other (10-20, 30 ... : genitive plural).
+import { ltImport } from './parts/lt.import';
 import type { MessageKey } from './uk';
+import { ltNarrow } from './parts/lt.narrow';
 
 export const lt: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -277,4 +279,6 @@ export const lt: Record<MessageKey, string> = {
   'errors.MCP_ERROR': 'Serveris grąžino MCP klaidą. Bandykite dar kartą.',
   'errors.BAD_RESPONSE': 'Serveris atsakė nesuprantamu formatu. Atnaujinkite puslapį.',
   'errors.UNKNOWN': 'Nepavyko atlikti veiksmo. Bandykite dar kartą.',
+  ...ltImport,
+  ...ltNarrow,
 };

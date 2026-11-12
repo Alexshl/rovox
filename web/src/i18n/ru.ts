@@ -9,7 +9,9 @@
 //   plugin = плагин · effects = эффекты · parameter = параметр · agent = агент · token = токен доступа
 //   dropout (underrun) = обрыв звука · loudness = громкость (нормализация) · bit depth = разрядность
 // Plural: one / few / many are the real Russian forms; `other` is the form for fractions.
+import { ruImport } from './parts/ru.import';
 import type { MessageKey } from './uk';
+import { ruNarrow } from './parts/ru.narrow';
 
 export const ru: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -276,4 +278,6 @@ export const ru: Record<MessageKey, string> = {
   'errors.MCP_ERROR': 'Сервер вернул ошибку MCP. Попробуйте ещё раз.',
   'errors.BAD_RESPONSE': 'Сервер ответил в непонятном формате. Обновите страницу.',
   'errors.UNKNOWN': 'Не удалось выполнить действие. Попробуйте ещё раз.',
+  ...ruImport,
+  ...ruNarrow,
 };

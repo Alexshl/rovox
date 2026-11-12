@@ -9,7 +9,9 @@
 //   plugin = plugin · effects = effekter · parameter = parameter · agent = agent · token = åtkomsttoken
 //   dropout (underrun) = avbrott · loudness = loudness (ljudstyrka) · bit depth = bitdjup
 // Plural: Swedish has one / other only, so `few` and `many` repeat `other`.
+import { svImport } from './parts/sv.import';
 import type { MessageKey } from './uk';
+import { svNarrow } from './parts/sv.narrow';
 
 export const sv: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -276,4 +278,6 @@ export const sv: Record<MessageKey, string> = {
   'errors.MCP_ERROR': 'Servern returnerade ett MCP-fel. Försök igen.',
   'errors.BAD_RESPONSE': 'Servern svarade i ett oväntat format. Ladda om sidan.',
   'errors.UNKNOWN': 'Åtgärden misslyckades. Försök igen.',
+  ...svImport,
+  ...svNarrow,
 };
