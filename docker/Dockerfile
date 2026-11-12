@@ -95,6 +95,15 @@ ENV ROVOX_DATA_DIR=/data
 ENV ROVOX_GENERATE_TOKEN=1
 VOLUME /data
 EXPOSE 4810
+ARG ROVOX_GIT_SHA=unknown
+LABEL org.opencontainers.image.title="Rovox" \
+      org.opencontainers.image.description="Headless DAW server: MCP and HTTP API, offline render, LV2/VST3 plugin hosting" \
+      org.opencontainers.image.source="https://github.com/Alexshl/rovox" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.revision="${ROVOX_GIT_SHA}"
+# python3 is already in the image; /healthz is public (no token). Only meaningful for `rovox serve`.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4810/healthz', timeout=4).status == 200 else 1)"]
 ENTRYPOINT ["rovox"]
 CMD ["--version"]
 

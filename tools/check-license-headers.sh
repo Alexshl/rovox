@@ -29,7 +29,7 @@ while IFS= read -r -d '' f; do
     esac
 done < <(find src tests spikes tools cmake docker .github web skills \
               \( -name node_modules -o -name dist \) -prune -o \
-              \( -name '*.py' -o -name '*.sh' -o -name '*.cmake' -o -name 'CMakeLists.txt' -o -name 'Dockerfile' \
+              \( -name '*.py' -o -name '*.lua' -o -name '*.sh' -o -name '*.cmake' -o -name 'CMakeLists.txt' -o -name 'Dockerfile' \
                  -o -name '*.yml' -o -name '*.yaml' -o -name '*.html' -o -name '*.js' -o -name '*.mjs' -o -name '*.ts' -o -name '*.css' -o -name '*.ttl' -o -name '*.toml' \) -print0 2>/dev/null
          printf '%s\0' CMakeLists.txt)
 

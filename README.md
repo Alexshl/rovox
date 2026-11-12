@@ -110,6 +110,8 @@ Delivery adapters are configured in `<data>/config/rovox.toml` (`--config`, `$RO
 `secret_key_env`, `hmac_secret_env` (the Telegram token defaults to `$ROVOX_TELEGRAM_TOKEN`, the chat to `$ROVOX_TELEGRAM_CHAT_ID`).
 Plugins are found in the system LV2/VST3 directories and in `--plugins` / `/plugins`. Plugins are used as licensed: nothing here bypasses
 an activation, and a plugin that cannot start is reported and blacklisted, not worked around.
+The runtime image (Debian 13, trixie) ships a set of open Debian LV2 plugin packages; their licences are recorded in `/usr/share/rovox/licenses.json`
+(see `NOTICE.md`). The VST3 packages (dpf-plugins, dragonfly-reverb) are installed only in the build stage, for the tests; they are not in the runtime image.
 
 ## Building
 

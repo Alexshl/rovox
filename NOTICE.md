@@ -79,6 +79,11 @@ at run time (in child processes), not linked into Rovox and not part of this rep
 | lsp-plugins-lv2 | dynamics, EQ, reverbs | LGPL-3.0-or-later |
 | x42-plugins | EQ, compressor, limiter, meters | GPL-2.0-or-later |
 
+The licenses of these packages are read from their Debian copyright files at image build time and recorded in `/usr/share/rovox/licenses.json`
+(plugins without a recognised license get no entry). The base image is Debian 13 (trixie). The VST3 packages `dpf-plugins-vst3` (GPL-2.0-or-later) and
+`dragonfly-reverb-vst3` (GPL-3.0-or-later) are installed only in the Docker build stage, for the plugin scan and factory-program tests; they are not
+copied into, and not shipped in, the runtime image.
+
 Commercial plugins are never bypassed: a plugin that needs an activation or a license that the server cannot satisfy simply fails to load and is
 reported (`PLUGIN_LOAD_FAILED`, blacklist), see `plugin.catalog` and `plugin.probe`.
 

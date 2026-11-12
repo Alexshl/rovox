@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Rovox contributors
 #
-# The core (`rovox serve`) and the rovox-skills sidecar. Set the token in the environment (or an untracked .env file):
-#   ROVOX_TOKEN=<long random string> docker compose -f docker/compose.yml up
+# The core (`rovox serve`) and, on demand, the rovox-skills sidecar. The token has no default: set it in the environment or an untracked .env file.
+#   export ROVOX_TOKEN=<long random string>
+#   docker compose -f docker/compose.yml up -d rovox          # the core; `docker compose ps` shows it healthy once /healthz answers
+# The sidecar is an MCP stdio server. It is not a daemon: an MCP client starts it and talks to it over stdin/stdout, so it sits behind a profile and
+# `up` does not start it. The client command is:
+#   docker compose -f docker/compose.yml run --rm -T skills
+# (`-T` = no TTY; the sidecar reaches the core at http://rovox:4810/mcp with the same token). Other sidecar commands: `... run --rm skills list`.
 services:
   rovox:
     build:
@@ -17,14 +22,23 @@ services:
       - "127.0.0.1:4810:4810"
     volumes:
       - rovox-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4810/healthz', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
   skills:
+    profiles: ["skills"]
     build:
       context: ..
       dockerfile: docker/Dockerfile
       target: skills
     image: rovox-skills
     depends_on:
-      - rovox
+      rovox:
+        condition: service_healthy
     environment:
       ROVOX_URL: http://rovox:4810/mcp
       ROVOX_TOKEN: ${ROVOX_TOKEN:?set ROVOX_TOKEN}
