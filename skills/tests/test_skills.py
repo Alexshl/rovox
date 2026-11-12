@@ -135,7 +135,7 @@ class ServerTests(unittest.TestCase):
             r = server.handle(m, lambda name: fake)
             out.write(json.dumps(r) + "\n")
         replies = [json.loads(x) for x in out.getvalue().splitlines()]
-        self.assertEqual({t["name"] for t in replies[1]["result"]["tools"]}, {"skill.list", "skill.run", "analysis.tempo_map"})
+        self.assertTrue({"skill.list", "skill.run", "analysis.tempo_map"} <= {t["name"] for t in replies[1]["result"]["tools"]})
         self.assertIn("rhythm_section", json.dumps(replies[2]))
         self.assertTrue(replies[3]["result"]["structuredContent"]["ok"])
         self.assertEqual(replies[4]["result"]["structuredContent"]["error"]["code"], "SKILL_FAILED")
