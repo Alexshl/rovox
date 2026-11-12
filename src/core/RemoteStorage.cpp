@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -162,6 +163,14 @@ Result<StorageConfig> StorageConfig::fromEnvironment (const std::string& modeOpt
     if (const auto ttl = envValue ("ROVOX_LEASE_TTL_S"); ! ttl.empty())
         c.leaseTtlS = std::max (5, std::atoi (ttl.c_str()));
 
+    if (const auto cw = lowerCase (envValue ("ROVOX_CONDITIONAL_WRITES")); ! cw.empty())
+    {
+        if (cw != "auto" && cw != "on" && cw != "off")
+            return makeError (errc::invalidParams, "conditional_writes must be auto, on or off (got '" + cw + "')");
+
+        c.conditionalWrites = cw;
+    }
+
     return c;
 }
 
@@ -170,7 +179,7 @@ json StorageConfig::describe() const
     if (! s3)
         return { { "backend", "local" } };
 
-    return { { "backend", "s3" }, { "endpoint", store.endpoint }, { "bucket", store.bucket }, { "region", store.region }, { "prefix", prefix } };
+    return { { "backend", "s3" }, { "endpoint", store.endpoint }, { "bucket", store.bucket }, { "region", store.region }, { "prefix", prefix }, { "conditional_writes", conditionalWrites } };
 }
 
 std::string StorageKeys::normalisePrefix (std::string p)
@@ -247,53 +256,94 @@ Result<void> writeLease (ObjectStore& store, const std::string& key, const Lease
 }
 } // namespace
 
-Result<LeaseInfo> ProjectLease::acquire (ObjectStore& store, const std::string& key, const std::string& owner, int ttlS, const Clock& clock)
+namespace
 {
-    auto current = read (store, key);
+/** acquire and renew: read the lease, refuse while another owner's is live, write ours. `verify` (acquire without conditional writes) reads it back. */
+Result<LeaseInfo> claimLease (ObjectStore& store, const std::string& key, const std::string& owner, int ttlS, const ProjectLease::Clock& clock, bool conditional, bool verify)
+{
+    LeaseInfo seen { "another server", 0, 0 };
 
-    if (! current.ok())
-        return current.error();
+    // a lost conditional write means somebody changed the lease between our read and our write: look again (a few times)
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        std::string etag;
+        bool exists = false;
 
-    const auto now = clock();
+        if (conditional)                            // the ETag first: a body read afterwards can only be newer, which then fails If-Match
+        {
+            auto meta = store.head (key);
 
-    if (current.value() && current.value()->owner != owner && current.value()->expires > now)
-        return leaseBusy (*current.value(), now);
+            if (meta.ok())
+            {
+                exists = true;
+                etag = meta.value().etag;
+            }
+            else if (meta.error().code != errc::notFound)
+            {
+                return meta.error();
+            }
+        }
 
-    LeaseInfo mine { owner, now + ttlS, current.value() && current.value()->owner == owner ? current.value()->acquired : now };
+        auto current = ProjectLease::read (store, key);
 
-    if (auto w = writeLease (store, key, mine); ! w.ok())
-        return w.error();
+        if (! current.ok())
+            return current.error();
 
-    // two servers can both pass the check above; the one whose write came last is the one that reads itself back
-    auto verify = read (store, key);
+        const auto now = clock();
 
-    if (! verify.ok())
-        return verify.error();
+        if (current.value() && current.value()->owner != owner && current.value()->expires > now)
+            return leaseBusy (*current.value(), now);
 
-    if (! verify.value() || verify.value()->owner != owner)
-        return leaseBusy (verify.value().value_or (LeaseInfo { "another server", now + ttlS, now }), now);
+        LeaseInfo mine { owner, now + ttlS, current.value() && current.value()->owner == owner ? current.value()->acquired : now };
+        PutCondition cond;
 
-    return mine;
+        if (conditional)
+        {
+            if (! exists)
+                cond.ifNoneMatch = "*";
+            else if (! etag.empty())
+                cond.ifMatch = etag;
+        }
+
+        auto w = cond.any() ? store.putIf (key, json { { "owner", mine.owner }, { "expires", mine.expires }, { "acquired", mine.acquired }, { "expires_at", isoTime (mine.expires) } }.dump(), "application/json", cond)
+                            : writeLease (store, key, mine);
+
+        if (w.ok())
+        {
+            if (! verify || cond.any())
+                return mine;
+
+            // best-effort fallback: two servers can both pass the check above; the one whose write came last is the one that reads itself back
+            auto check = ProjectLease::read (store, key);
+
+            if (! check.ok())
+                return check.error();
+
+            if (! check.value() || check.value()->owner != owner)
+                return leaseBusy (check.value().value_or (LeaseInfo { "another server", now + ttlS, now }), now);
+
+            return mine;
+        }
+
+        if (w.error().code != putConditionFailed && ! (cond.any() && w.error().code == errc::notFound))
+            return w.error();
+
+        if (current.value())
+            seen = *current.value();
+    }
+
+    return leaseBusy (seen, clock());
+}
+} // namespace
+
+Result<LeaseInfo> ProjectLease::acquire (ObjectStore& store, const std::string& key, const std::string& owner, int ttlS, const Clock& clock, bool conditional)
+{
+    return claimLease (store, key, owner, ttlS, clock, conditional, true);
 }
 
-Result<LeaseInfo> ProjectLease::renew (ObjectStore& store, const std::string& key, const std::string& owner, int ttlS, const Clock& clock)
+Result<LeaseInfo> ProjectLease::renew (ObjectStore& store, const std::string& key, const std::string& owner, int ttlS, const Clock& clock, bool conditional)
 {
-    auto current = read (store, key);
-
-    if (! current.ok())
-        return current.error();
-
-    const auto now = clock();
-
-    if (current.value() && current.value()->owner != owner && current.value()->expires > now)
-        return leaseBusy (*current.value(), now);
-
-    LeaseInfo mine { owner, now + ttlS, current.value() && current.value()->owner == owner ? current.value()->acquired : now };
-
-    if (auto w = writeLease (store, key, mine); ! w.ok())
-        return w.error();
-
-    return mine;
+    return claimLease (store, key, owner, ttlS, clock, conditional, false);
 }
 
 void ProjectLease::release (ObjectStore& store, const std::string& key, const std::string& owner)
@@ -347,7 +397,58 @@ Result<SnapshotJob> readSnapshot (const fs::path& dir, const fs::path& projectDi
 //==============================================================================
 RemoteStorage::RemoteStorage (std::shared_ptr<ObjectStore> store, StorageKeys keys, std::string description, std::string owner, int leaseTtlS)
     : store_ (std::move (store)), keys_ (std::move (keys)), description_ (std::move (description)), owner_ (std::move (owner)), leaseTtlS_ (leaseTtlS)
-{}
+{
+    setConditionalWrites (envValue ("ROVOX_CONDITIONAL_WRITES"));          // the same switch StorageConfig reads; a caller may override it
+}
+
+void RemoteStorage::setConditionalWrites (const std::string& mode)
+{
+    const auto m = lowerCase (mode);
+    std::lock_guard<std::mutex> lock (probeMutex_);
+    conditionalMode_ = m == "on" ? ConditionalMode::on : (m == "off" ? ConditionalMode::off : ConditionalMode::autoDetect);
+    conditionalProbed_.reset();
+    conditionalNote_.clear();
+}
+
+bool RemoteStorage::conditionalWritesActive()
+{
+    std::lock_guard<std::mutex> lock (probeMutex_);
+
+    if (conditionalMode_ == ConditionalMode::off)
+        return false;
+
+    if (conditionalMode_ == ConditionalMode::on)
+        return true;
+
+    if (conditionalProbed_)
+        return *conditionalProbed_;
+
+    // Probe: a conditional put (If-None-Match: *) on a scratch key that already exists must be refused (412). A store that ignores
+    // preconditions overwrites it instead; then leases fall back to write + read-back, which cannot stop two overlapping acquirers.
+    static std::atomic<unsigned> counter { 0 };
+    const auto key = keys_.prefix + "probe/" + owner_ + "-" + std::to_string (ProjectLease::systemNow()) + "-" + std::to_string (counter++);
+
+    if (! store_->put (key, "1", "text/plain").ok())
+        return false;                                       // inconclusive (store unreachable): best-effort now, probe again next time
+
+    auto second = store_->putIf (key, "2", "text/plain", { "*", "" });
+    store_->remove (key);
+
+    if (! second.ok() && second.error().code == putConditionFailed)
+    {
+        conditionalProbed_ = true;
+        return true;
+    }
+
+    if (! second.ok())
+        return false;                                       // inconclusive
+
+    conditionalProbed_ = false;
+    conditionalNote_ = "the object store did not enforce a conditional write (If-None-Match): writer leases are best-effort (write, then read back), so two servers "
+                       "acquiring a project in the same instant can both believe they hold it. Use a store with conditional writes, or set conditional_writes=off to silence this";
+    std::fprintf (stderr, "rovox: warning: %s\n", conditionalNote_.c_str());
+    return false;
+}
 
 RemoteStorage::~RemoteStorage()
 {
@@ -363,7 +464,10 @@ void RemoteStorage::start()
 
     started_ = true;
     stop_ = false;
+    closing_ = false;
+    cancelUploads_ = false;
     thread_ = std::thread ([this] { loop(); });
+    leaseThread_ = std::thread ([this] { leaseLoop(); });
 }
 
 bool RemoteStorage::flush (std::chrono::seconds timeout)
@@ -401,25 +505,66 @@ bool RemoteStorage::shutdown (std::chrono::seconds timeout)
     bool clean = true;
 
     if (wasStarted)
+    {
         clean = flush (timeout);
+
+        if (! clean)
+        {
+            // the upload in flight stops at its next part boundary (aborting the multipart upload); wait for that, but not for ever
+            cancelUploads_ = true;
+            std::unique_lock<std::mutex> lock (mutex_);
+            idleCv_.wait_for (lock, std::chrono::seconds (5), [this] { return inFlight_.empty(); });
+        }
+    }
 
     {
         std::lock_guard<std::mutex> lock (mutex_);
+        closing_ = true;                                    // no new snapshots from here on
         stop_ = true;
         started_ = false;
     }
 
     cv_.notify_all();
+    leaseCv_.notify_all();
 
     if (thread_.joinable())
         thread_.join();
+
+    if (leaseThread_.joinable())
+        leaseThread_.join();
+
+    // give the projects back that have nothing left to upload; the others keep their lease until it runs out (their snapshot is still ours to push)
+    std::vector<Key> held;
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+
+        for (auto& [k, st] : states_)
+            if (st.leaseHeld && ! st.leaseLost && ! queue_.count (k) && ! inFlight_.count (k))
+                held.push_back (k);
+    }
+
+    for (auto& k : held)
+    {
+        ProjectLease::release (*store_, keys_.lease (k.first, k.second), owner_);
+        std::lock_guard<std::mutex> lock (mutex_);
+        states_[k].leaseHeld = false;
+        states_[k].releaseWanted = false;
+    }
 
     return clean;
 }
 
 json RemoteStorage::describe() const
 {
-    return { { "backend", "s3" }, { "store", description_ }, { "owner", owner_ } };
+    std::lock_guard<std::mutex> lock (probeMutex_);
+    const char* cw = conditionalMode_ == ConditionalMode::on ? "on" : (conditionalMode_ == ConditionalMode::off ? "off"
+                         : (! conditionalProbed_ ? "auto" : (*conditionalProbed_ ? "on" : "fallback")));
+    json j { { "backend", "s3" }, { "store", description_ }, { "owner", owner_ }, { "conditional_writes", cw } };
+
+    if (! conditionalNote_.empty())
+        j["warning"] = conditionalNote_;
+
+    return j;
 }
 
 void RemoteStorage::setListener (StatusListener l)
@@ -497,7 +642,8 @@ Result<void> RemoteStorage::acquireLease (const std::string& tenant, const std::
         }
     }
 
-    auto r = ProjectLease::acquire (*store_, keys_.lease (tenant, projectId), owner_, leaseTtlS_, clock_);
+    const auto started = clock_();
+    auto r = ProjectLease::acquire (*store_, keys_.lease (tenant, projectId), owner_, leaseTtlS_, clock_, conditionalWritesActive());
 
     if (! r.ok())
         return r.error();
@@ -508,7 +654,7 @@ Result<void> RemoteStorage::acquireLease (const std::string& tenant, const std::
         st.leaseHeld = true;
         st.leaseLost = false;
         st.releaseWanted = false;
-        st.leaseRenewedAt = clock_();
+        st.leaseRenewedAt = started;                // the lease runs out leaseTtlS after the moment we asked, not after the answer
     }
 
     emit (k);
@@ -545,6 +691,10 @@ void RemoteStorage::enqueue (SnapshotJob job)
     const Key k { job.tenant, job.projectId };
     {
         std::lock_guard<std::mutex> lock (mutex_);
+
+        if (closing_)
+            return;                             // shutting down: nothing new is accepted
+
         auto& st = states_[k];
         st.attempts = 0;
         st.notBefore = {};
@@ -562,14 +712,46 @@ void RemoteStorage::setHead (const ProjectHead& h)
     heads_[h.tenant][h.projectId] = h;
 }
 
+Result<void> RemoteStorage::checkLease (const Key& k)
+{
+    std::lock_guard<std::mutex> lock (mutex_);
+    auto it = states_.find (k);
+
+    if (it == states_.end())
+        return {};
+
+    const auto& st = it->second;
+
+    if (st.leaseLost)
+        return makeError (errc::busy, "the writer lease of this project was lost (another server may have taken it over); this snapshot was not published");
+
+    if (st.leaseHeld && clock_() >= st.leaseRenewedAt + leaseTtlS_)
+        return makeError (errc::busy, "the writer lease of this project could not be renewed in time and has run out (another server may take it over); this snapshot was not published");
+
+    return {};
+}
+
+Result<void> RemoteStorage::uploadGuard (const Key& k)
+{
+    if (cancelUploads_)
+        return makeError (errc::cancelled, "the upload was cancelled because the server is shutting down; it will be retried at the next start");
+
+    return checkLease (k);
+}
+
 Result<void> RemoteStorage::uploadMedia (const SnapshotJob& job, std::string& warning)
 {
+    const Key k { job.tenant, job.projectId };
+
     for (auto& m : job.media)
     {
         const auto ext = mediaExtension (m.sha256, m.relPath);
 
         if (! ext)
             continue;
+
+        if (auto g = uploadGuard (k); ! g.ok())
+            return g;
 
         const auto key = keys_.media (job.tenant, m.sha256, *ext);
         {
@@ -595,8 +777,15 @@ Result<void> RemoteStorage::uploadMedia (const SnapshotJob& job, std::string& wa
                 continue;
             }
 
-            if (auto up = store_->putFile (key, local, contentTypeFor (local)); ! up.ok())
+            // multipart uploads poll the guard between parts: a lost lease or a shutdown aborts the upload instead of finishing it
+            if (auto up = store_->putFileCancellable (key, local, contentTypeFor (local), [this, &k] { return ! uploadGuard (k).ok(); }); ! up.ok())
+            {
+                if (up.error().code == errc::cancelled)
+                    if (auto g = uploadGuard (k); ! g.ok())
+                        return g;                   // say why: lease lost / shutdown
+
                 return up.error();
+            }
         }
 
         std::lock_guard<std::mutex> lock (mutex_);
@@ -636,11 +825,21 @@ Result<void> RemoteStorage::push (const SnapshotJob& job)
     if (auto r = uploadMedia (job, warning); ! r.ok())          // media first: HEAD must never point at a revision whose media is not there
         return r;
 
+    const Key k { job.tenant, job.projectId };
+
+    if (auto g = uploadGuard (k); ! g.ok())
+        return g;
+
     if (auto r = store_->put (keys_.revFile (job.tenant, job.projectId, job.revision, "edit.xml"), job.editXml, "application/xml"); ! r.ok())
         return r;
 
     if (auto r = store_->put (keys_.revFile (job.tenant, job.projectId, job.revision, "rovox.json"), job.manifestJson, "application/json"); ! r.ok())
         return r;
+
+    // HEAD is what other servers follow: never move it without the lease (the check cannot close the window to the PUT completely, but the
+    // renewal thread keeps the lease alive through uploads of any length, so only a real take-over can fail it)
+    if (auto g = uploadGuard (k); ! g.ok())
+        return g;
 
     auto head = job.head;
     head.revision = job.revision;
@@ -694,14 +893,9 @@ bool RemoteStorage::processOne (bool ignoreBackoff)
             flushTried_.insert (k);
     }
 
-    Result<void> r = makeError (errc::busy, "the lease on this project is lost");
-    bool leaseLost = false;
-    {
-        std::lock_guard<std::mutex> lock (mutex_);
-        leaseLost = states_[k].leaseLost;
-    }
+    Result<void> r = uploadGuard (k);
 
-    if (! leaseLost)
+    if (r.ok())
         r = push (job);
 
     {
@@ -745,6 +939,8 @@ void RemoteStorage::housekeeping()
 
     for (auto& [k, what] : due)
     {
+        std::lock_guard<std::mutex> op (leaseOpMutex_);         // not while a renewal of this lease is on the wire
+
         if (what.second)
         {
             store_->remove (keys_.head (k.first, k.second));
@@ -775,50 +971,90 @@ void RemoteStorage::housekeeping()
     if (! due.empty())
         idleCv_.notify_all();
 
-    // lease renewal
-    const auto renewEvery = leaseRenew_.count() > 0 ? leaseRenew_ : std::chrono::milliseconds (leaseTtlS_ * 1000 / 3);
-
-    if (now - lastRenew_ >= renewEvery)
-    {
-        lastRenew_ = now;
-        std::vector<Key> held;
-        {
-            std::lock_guard<std::mutex> lock (mutex_);
-
-            for (auto& [k, st] : states_)
-                if (st.leaseHeld && ! st.leaseLost && ! st.releaseWanted)
-                    held.push_back (k);
-        }
-
-        for (auto& k : held)
-        {
-            auto r = ProjectLease::renew (*store_, keys_.lease (k.first, k.second), owner_, leaseTtlS_, clock_);
-            {
-                std::lock_guard<std::mutex> lock (mutex_);
-                auto& st = states_[k];
-
-                if (r.ok())
-                {
-                    st.leaseRenewedAt = clock_();
-                }
-                else if (r.error().code == errc::busy && r.error().details.contains ("lease_owner"))
-                {
-                    st.leaseLost = true;
-                    st.lastError = "the writer lease was taken over: " + r.error().message;
-                }
-                else
-                {
-                    st.lastError = "cannot renew the writer lease: " + r.error().message;
-                }
-            }
-            emit (k);
-        }
-    }
-
     if (now - lastRefresh_ >= headRefresh_)
     {
         lastRefresh_ = now;
         refreshHeads();
+    }
+}
+
+void RemoteStorage::renewLeases()
+{
+    std::vector<Key> held;
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+
+        for (auto& [k, st] : states_)
+            if (st.leaseHeld && ! st.leaseLost && ! st.releaseWanted)
+                held.push_back (k);
+    }
+
+    for (auto& k : held)
+    {
+        std::lock_guard<std::mutex> op (leaseOpMutex_);
+        {
+            std::lock_guard<std::mutex> lock (mutex_);
+            auto it = states_.find (k);
+
+            if (it == states_.end() || ! it->second.leaseHeld || it->second.leaseLost || it->second.releaseWanted)
+                continue;                       // released or forgotten while we were busy with another project
+        }
+
+        const auto started = clock_();
+        auto r = ProjectLease::renew (*store_, keys_.lease (k.first, k.second), owner_, leaseTtlS_, clock_, conditionalWritesActive());
+        {
+            std::lock_guard<std::mutex> lock (mutex_);
+            auto& st = states_[k];
+
+            if (r.ok())
+            {
+                st.leaseRenewedAt = started;
+            }
+            else if (r.error().code == errc::busy && r.error().details.contains ("lease_owner"))
+            {
+                st.leaseLost = true;
+                st.lastError = "the writer lease was taken over: " + r.error().message;
+            }
+            else
+            {
+                st.lastError = "cannot renew the writer lease: " + r.error().message;
+
+                // not heard from the store for a whole TTL: another server may hold the project by now
+                if (clock_() >= st.leaseRenewedAt + leaseTtlS_)
+                {
+                    st.leaseLost = true;
+                    st.lastError += " (the lease ran out)";
+                }
+            }
+        }
+        emit (k);
+    }
+}
+
+void RemoteStorage::leaseLoop()
+{
+    // renewal runs here and nowhere else: an upload of any length (a big multipart push) cannot make the lease run out
+    auto last = std::chrono::steady_clock::now();
+
+    while (true)
+    {
+        std::chrono::milliseconds every;
+        {
+            std::unique_lock<std::mutex> lock (mutex_);
+            every = leaseRenew_.count() > 0 ? leaseRenew_ : std::chrono::milliseconds (leaseTtlS_ * 1000 / 3);
+            leaseCv_.wait_for (lock, std::min (every, std::chrono::milliseconds (250)), [this] { return stop_; });
+
+            if (stop_)
+                return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+
+        if (now - last >= every)
+        {
+            last = now;
+            renewLeases();
+        }
     }
 }
 

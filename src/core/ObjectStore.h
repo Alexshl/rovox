@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -29,6 +30,19 @@ struct ListResult
     std::vector<std::string> prefixes;      // "directories" below the prefix, only when a delimiter was given
 };
 
+/** Error code of a put whose precondition (If-None-Match / If-Match) did not hold: the object exists / changed since. Distinct from every errc. */
+inline constexpr const char* putConditionFailed = "PUT_CONDITION_FAILED";
+
+/** Optional preconditions of a put. `ifNoneMatch == "*"`: only when the key does not exist. `ifMatch`: only when the current ETag is this one. */
+struct PutCondition
+{
+    std::string ifNoneMatch, ifMatch;
+    bool any() const    { return ! ifNoneMatch.empty() || ! ifMatch.empty(); }
+};
+
+/** Polled between the parts of a long upload; true = stop (the upload is aborted and fails with errc::cancelled). */
+using CancelCheck = std::function<bool()>;
+
 /** Thread-safe: every call may be made from any thread. A missing object is the error code NOT_FOUND. */
 class ObjectStore
 {
@@ -41,6 +55,17 @@ public:
     virtual Result<void> getFile (const std::string& key, const std::filesystem::path& dest) = 0;
     virtual Result<void> put (const std::string& key, const std::string& body, const std::string& contentType = "application/octet-stream") = 0;
     virtual Result<void> putFile (const std::string& key, const std::filesystem::path& file, const std::string& contentType = "application/octet-stream") = 0;
+    /** put with preconditions. A failed one is the error code putConditionFailed. The default ignores the conditions (stores that cannot
+        honour them): callers that need them must probe first (see RemoteStorage). */
+    virtual Result<void> putIf (const std::string& key, const std::string& body, const std::string& contentType, const PutCondition&)
+    {
+        return put (key, body, contentType);
+    }
+    /** putFile that polls `cancel` between multipart parts. The default does not poll. */
+    virtual Result<void> putFileCancellable (const std::string& key, const std::filesystem::path& file, const std::string& contentType, const CancelCheck&)
+    {
+        return putFile (key, file, contentType);
+    }
     /** All keys below `prefix`; with a non-empty `delimiter` the first level is folded into ListResult::prefixes. Follows pagination. */
     virtual Result<ListResult> list (const std::string& prefix, const std::string& delimiter = "") = 0;
     virtual Result<void> remove (const std::string& key) = 0;

@@ -30,13 +30,24 @@ class FakeStore : public ObjectStore
 public:
     Result<ObjectMeta> head (const std::string& key) override
     {
+        if (headDelayMs > 0)
+            std::this_thread::sleep_for (std::chrono::milliseconds (headDelayMs));
+
         std::lock_guard<std::mutex> lock (mutex);
         auto it = objects.find (key);
 
         if (it == objects.end())
             return makeError (errc::notFound, "no " + key);
 
-        return ObjectMeta { key, "etag", it->second.size() };
+        return ObjectMeta { key, etagOf (key), it->second.size() };
+    }
+
+    /** Test helper: writes an object behind the store's back (as another server would), bumping its ETag. */
+    void setObject (const std::string& key, const std::string& body)
+    {
+        std::lock_guard<std::mutex> lock (mutex);
+        objects[key] = body;
+        versions[key] = nextVersion++;
     }
 
     Result<std::string> get (const std::string& key) override
@@ -65,17 +76,31 @@ public:
 
     Result<void> put (const std::string& key, const std::string& body, const std::string&) override
     {
-        std::lock_guard<std::mutex> lock (mutex);
+        return doPut (key, body, nullptr);
+    }
 
-        if (failPuts > 0)
+    /** Honours the preconditions like S3 (412 = putConditionFailed) unless `honourConditions` is off (then it behaves like a store that ignores them). */
+    Result<void> putIf (const std::string& key, const std::string& body, const std::string&, const PutCondition& cond) override
+    {
+        return doPut (key, body, &cond);
+    }
+
+    /** A multipart-like upload: `fileParts` parts of `partDelayMs` each, polling `cancel` between them. */
+    Result<void> putFileCancellable (const std::string& key, const fs::path& file, const std::string& type, const CancelCheck& cancel) override
+    {
+        for (int i = 0; i < fileParts; ++i)
         {
-            --failPuts;
-            return makeError (errc::busy, "injected failure");
+            if (i > 0 && cancel && cancel())
+            {
+                cancelledUploads++;
+                return makeError (errc::cancelled, "cancelled between parts");
+            }
+
+            if (partDelayMs > 0)
+                std::this_thread::sleep_for (std::chrono::milliseconds (partDelayMs));
         }
 
-        objects[key] = body;
-        putLog.push_back (key);
-        return {};
+        return putFile (key, file, type);
     }
 
     Result<void> putFile (const std::string& key, const fs::path& file, const std::string& type) override
@@ -102,7 +127,7 @@ public:
             if (! delimiter.empty() && rest.find (delimiter) != std::string::npos)
                 folded.insert (prefix + rest.substr (0, rest.find (delimiter) + 1));
             else
-                out.objects.push_back ({ k, "etag", v.size() });
+                out.objects.push_back ({ k, etagOf (k), v.size() });
         }
 
         out.prefixes.assign (folded.begin(), folded.end());
@@ -126,8 +151,49 @@ public:
 
     std::mutex mutex;
     std::map<std::string, std::string> objects;
+    std::map<std::string, int> versions;
     std::vector<std::string> putLog;
-    int failPuts = 0;
+    int failPuts = 0, nextVersion = 1;
+    bool honourConditions = true;
+    std::string slowKey;                    // puts of keys containing this take slowPutMs
+    std::atomic<int> slowPutMs { 0 }, headDelayMs { 0 }, fileParts { 1 }, partDelayMs { 0 }, cancelledUploads { 0 };
+
+private:
+    std::string etagOf (const std::string& key) const      // call with the mutex held
+    {
+        auto it = versions.find (key);
+        return "\"v" + std::to_string (it == versions.end() ? 0 : it->second) + "\"";
+    }
+
+    Result<void> doPut (const std::string& key, const std::string& body, const PutCondition* cond)
+    {
+        if (slowPutMs > 0 && ! slowKey.empty() && key.find (slowKey) != std::string::npos)
+            std::this_thread::sleep_for (std::chrono::milliseconds (slowPutMs));
+
+        std::lock_guard<std::mutex> lock (mutex);
+
+        if (failPuts > 0)
+        {
+            --failPuts;
+            return makeError (errc::busy, "injected failure");
+        }
+
+        if (cond != nullptr && honourConditions)
+        {
+            const bool exists = objects.count (key) > 0;
+
+            if (! cond->ifNoneMatch.empty() && exists)
+                return makeError (putConditionFailed, "412: " + key + " exists");
+
+            if (! cond->ifMatch.empty() && (! exists || etagOf (key) != cond->ifMatch))
+                return makeError (putConditionFailed, "412: " + key + " changed");
+        }
+
+        objects[key] = body;
+        versions[key] = nextVersion++;
+        putLog.push_back (key);
+        return {};
+    }
 };
 
 const std::string shaA (64, 'a');
@@ -164,9 +230,9 @@ SnapshotJob jobFor (const Cache& c)
     return job.value();
 }
 
-std::shared_ptr<RemoteStorage> makeStorage (const std::shared_ptr<FakeStore>& store, const std::string& owner, const std::string& prefix = "rovox/")
+std::shared_ptr<RemoteStorage> makeStorage (const std::shared_ptr<FakeStore>& store, const std::string& owner, const std::string& prefix = "rovox/", int leaseTtlS = 60)
 {
-    return std::make_shared<RemoteStorage> (store, StorageKeys { prefix }, "fake", owner, 60);
+    return std::make_shared<RemoteStorage> (store, StorageKeys { prefix }, "fake", owner, leaseTtlS);
 }
 
 bool waitFor (const std::function<bool()>& cond, int ms = 8000)
@@ -449,6 +515,176 @@ ROVOX_TEST (storage, lease_released_after_the_pending_snapshot_and_taken_over_by
     a->shutdown (std::chrono::seconds (2));
 }
 
+ROVOX_TEST (storage, conditional_lease_take_over_and_renewal_use_etags)
+{
+    FakeStore store;
+    std::int64_t now = 1000;
+    const ProjectLease::Clock clock = [&] { return now; };
+    const std::string key = "rovox/tenants/local/projects/p_1/LEASE";
+
+    REQUIRE (ProjectLease::acquire (store, key, "server-a", 60, clock, true).ok());
+    CHECK (! ProjectLease::acquire (store, key, "server-b", 60, clock, true).ok());
+    now = 1030;
+    REQUIRE (ProjectLease::renew (store, key, "server-a", 60, clock, true).ok());
+    CHECK (ProjectLease::read (store, key).value()->expires == 1090);
+
+    now = 1100;                                                 // expired: take-over with If-Match
+    REQUIRE (ProjectLease::acquire (store, key, "server-b", 60, clock, true).ok());
+    auto lost = ProjectLease::renew (store, key, "server-a", 60, clock, true);
+    REQUIRE (! lost.ok());
+    CHECK (lost.error().details.contains ("lease_owner"));
+}
+
+ROVOX_TEST (storage, lease_is_renewed_during_a_push_longer_than_the_ttl)
+{
+    auto store = std::make_shared<FakeStore>();
+    store->fileParts = 16;                                      // a 4 s upload against a 3 s lease
+    store->partDelayMs = 250;
+    auto a = makeStorage (store, "server-a", "rovox/", 3), b = makeStorage (store, "server-b", "rovox/", 3);
+    a->setIntervals (std::chrono::milliseconds (60000), std::chrono::milliseconds (200));
+    auto c = makeCache ("local", 1);
+    a->start();
+    REQUIRE (a->acquireLease ("local", c.id).ok());
+    a->enqueue (jobFor (c));
+
+    const auto begin = std::chrono::steady_clock::now();
+    const auto elapsedMs = [&] { return (int) std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now() - begin).count(); };
+    int refusedAfterTtl = 0;
+    bool tookOver = false;
+
+    while (a->status ("local", c.id)["synced_revision"].is_null() && elapsedMs() < 20000)
+    {
+        std::this_thread::sleep_for (std::chrono::milliseconds (150));
+
+        if (elapsedMs() > 3500)                                 // the original lease ran out long ago unless it was renewed
+        {
+            if (b->acquireLease ("local", c.id).ok())
+                tookOver = true;
+            else
+                ++refusedAfterTtl;
+        }
+    }
+
+    CHECK (! tookOver);
+    CHECK (refusedAfterTtl > 0);
+    CHECK (a->status ("local", c.id)["synced_revision"] == 1);
+    CHECK (a->status ("local", c.id)["lease"] == "held");
+    CHECK (store->objects.count (a->keys().head ("local", c.id)) == 1);
+    a->shutdown (std::chrono::seconds (5));
+}
+
+ROVOX_TEST (storage, push_does_not_write_head_after_the_lease_was_taken_over)
+{
+    auto store = std::make_shared<FakeStore>();
+    store->fileParts = 10;                                      // a 2 s upload
+    store->partDelayMs = 200;
+    auto a = makeStorage (store, "server-a", "rovox/", 3);
+    a->setIntervals (std::chrono::milliseconds (60000), std::chrono::milliseconds (100));
+    a->setRetryBackoff (std::chrono::milliseconds (5000));
+    auto c = makeCache ("local", 1);
+    a->start();
+    REQUIRE (a->acquireLease ("local", c.id).ok());
+    a->enqueue (jobFor (c));
+    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+
+    store->setObject (a->keys().lease ("local", c.id), json { { "owner", "server-b" }, { "expires", ProjectLease::systemNow() + 60 }, { "acquired", ProjectLease::systemNow() } }.dump());
+
+    REQUIRE (waitFor ([&] { return a->status ("local", c.id)["lease"] == "lost"; }, 5000));
+    REQUIRE (waitFor ([&] { return store->cancelledUploads >= 1; }, 5000));          // the upload in flight noticed at a part boundary
+    CHECK (a->status ("local", c.id)["last_error"].get<std::string>().find ("lease") != std::string::npos);
+
+    CHECK (store->objects.count (a->keys().head ("local", c.id)) == 0);
+    CHECK (store->objects.count (a->keys().revFile ("local", c.id, 1, "rovox.json")) == 0);
+    CHECK (store->cancelledUploads >= 1);                       // the upload stopped at a part boundary
+    CHECK (a->status ("local", c.id)["synced_revision"].is_null());
+    a->shutdown (std::chrono::seconds (2));
+    CHECK (ProjectLease::read (*store, a->keys().lease ("local", c.id)).value()->owner == "server-b");       // the new owner's lease is not released by us
+}
+
+ROVOX_TEST (storage, two_concurrent_acquirers_exactly_one_wins_with_conditional_writes)
+{
+    for (int round = 0; round < 5; ++round)
+    {
+        auto store = std::make_shared<FakeStore>();
+        store->headDelayMs = 30;                                // both read "no lease" before either writes
+        auto b = makeStorage (store, "server-b"), c = makeStorage (store, "server-c");
+        REQUIRE (b->conditionalWritesActive());                 // probe up front so only the acquisition races
+        REQUIRE (c->conditionalWritesActive());
+
+        std::atomic<bool> go { false };
+        std::atomic<int> winners { 0 }, busy { 0 };
+        const auto race = [&] (const std::shared_ptr<RemoteStorage>& rs)
+        {
+            while (! go)
+                std::this_thread::yield();
+
+            auto r = rs->acquireLease ("local", "p_race");
+
+            if (r.ok())
+                ++winners;
+            else if (r.error().code == errc::busy && r.error().details.contains ("lease_owner"))
+                ++busy;
+        };
+        std::thread t1 ([&] { race (b); }), t2 ([&] { race (c); });
+        go = true;
+        t1.join();
+        t2.join();
+        CHECK (winners == 1);
+        CHECK (busy == 1);
+    }
+}
+
+ROVOX_TEST (storage, probe_detects_a_store_that_ignores_preconditions_and_leases_fall_back)
+{
+    auto store = std::make_shared<FakeStore>();
+    store->honourConditions = false;
+    auto a = makeStorage (store, "server-a"), b = makeStorage (store, "server-b");
+    CHECK (! a->conditionalWritesActive());
+    const auto d = a->describe();
+    CHECK (d.value ("conditional_writes", "") == "fallback");
+    CHECK (d.value ("warning", "").find ("best-effort") != std::string::npos);
+    CHECK (std::none_of (store->objects.begin(), store->objects.end(), [] (const auto& kv) { return kv.first.find ("probe/") != std::string::npos; }));      // scratch key cleaned up
+
+    REQUIRE (a->acquireLease ("local", "p_fb").ok());               // the best-effort write + read-back path still works
+    auto refused = b->acquireLease ("local", "p_fb");
+    REQUIRE (! refused.ok());
+    CHECK (refused.error().details.value ("lease_owner", "") == "server-a");
+
+    auto honest = std::make_shared<FakeStore>();
+    auto c = makeStorage (honest, "server-c");
+    CHECK (c->conditionalWritesActive());
+    CHECK (c->describe().value ("conditional_writes", "") == "on");
+    CHECK (! c->describe().contains ("warning"));
+
+    auto forcedOn = makeStorage (store, "server-d"), forcedOff = makeStorage (honest, "server-e");
+    forcedOn->setConditionalWrites ("on");
+    forcedOff->setConditionalWrites ("off");
+    CHECK (forcedOn->conditionalWritesActive());                    // no probe: trusted
+    CHECK (! forcedOff->conditionalWritesActive());
+}
+
+ROVOX_TEST (storage, shutdown_during_a_slow_push_returns_within_the_bound)
+{
+    auto store = std::make_shared<FakeStore>();
+    store->fileParts = 50;                                      // a 10 s upload
+    store->partDelayMs = 200;
+    auto a = makeStorage (store, "server-a");
+    auto c = makeCache ("local", 1);
+    a->start();
+    REQUIRE (a->acquireLease ("local", c.id).ok());
+    a->enqueue (jobFor (c));
+    std::this_thread::sleep_for (std::chrono::milliseconds (400));
+
+    const auto begin = std::chrono::steady_clock::now();
+    const bool clean = a->shutdown (std::chrono::seconds (1));
+    const auto tookMs = std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now() - begin).count();
+
+    CHECK (! clean);                                            // the snapshot did not make it
+    CHECK (tookMs < 4000);                                      // 1 s of grace + the part in flight, not the whole upload
+    CHECK (store->cancelledUploads == 1);
+    CHECK (store->objects.count (a->keys().head ("local", c.id)) == 0);
+}
+
 ROVOX_TEST (storage, heads_listing_feeds_the_catalog_and_forget_removes_a_project)
 {
     auto store = std::make_shared<FakeStore>();
@@ -538,6 +774,18 @@ struct MockS3
             {
                 parts[req.get_param_value ("uploadId")][std::stoi (req.get_param_value ("partNumber"))] = req.body;
                 res.set_header ("ETag", "\"part" + req.get_param_value ("partNumber") + "\"");
+                return;
+            }
+
+            // preconditions like S3: If-None-Match: * only when the key is new, If-Match only against the current ETag (always "etag" here)
+            const bool exists = objects.count (req.matches[1]) > 0;
+            lastIfNoneMatch = req.get_header_value ("If-None-Match");
+            lastIfMatch = req.get_header_value ("If-Match");
+
+            if ((lastIfNoneMatch == "*" && exists) || (! lastIfMatch.empty() && (! exists || lastIfMatch != "\"etag\"")))
+            {
+                res.status = 412;
+                res.set_content ("<Error><Code>PreconditionFailed</Code><Message>at least one precondition failed</Message></Error>", "application/xml");
                 return;
             }
 
@@ -668,7 +916,7 @@ struct MockS3
     std::mutex mutex;
     std::map<std::string, std::string> objects;
     std::map<std::string, std::map<int, std::string>> parts;
-    std::string lastAuth, lastHost, lastPath, lastPayloadHash, completeBody;
+    std::string lastAuth, lastHost, lastPath, lastPayloadHash, completeBody, lastIfNoneMatch, lastIfMatch;
     int requests = 0, failNext = 0;
 };
 } // namespace
@@ -778,6 +1026,49 @@ ROVOX_TEST (storage, s3_client_uploads_large_files_in_parts)
     std::ofstream (dir / "small.wav", std::ios::binary) << "tiny";
     REQUIRE (store->putFile ("small.wav", dir / "small.wav").ok());
     CHECK (s3.objects["small.wav"] == "tiny");                  // under the threshold: one PUT
+}
+
+ROVOX_TEST (storage, s3_client_sends_write_preconditions_and_maps_412)
+{
+    MockS3 s3;
+    auto store = makeS3ObjectStore (s3.config());
+
+    REQUIRE (store->putIf ("lease", "a", "application/json", { "*", "" }).ok());
+    CHECK (s3.lastIfNoneMatch == "*");
+
+    auto again = store->putIf ("lease", "b", "application/json", { "*", "" });          // the key exists now
+    REQUIRE (! again.ok());
+    CHECK (again.error().code == putConditionFailed);
+    CHECK (s3.objects["lease"] == "a");
+
+    auto meta = store->head ("lease");
+    REQUIRE (meta.ok());
+    REQUIRE (store->putIf ("lease", "c", "application/json", { "", meta.value().etag }).ok());
+    CHECK (s3.lastIfMatch == "\"etag\"");
+    CHECK (s3.objects["lease"] == "c");
+
+    auto stale = store->putIf ("lease", "d", "application/json", { "", "\"older\"" });
+    REQUIRE (! stale.ok());
+    CHECK (stale.error().code == putConditionFailed);
+    CHECK (s3.objects["lease"] == "c");
+}
+
+ROVOX_TEST (storage, s3_multipart_upload_stops_between_parts_when_cancelled)
+{
+    MockS3 s3;
+    auto cfg = s3.config();
+    cfg.multipartThreshold = 10;
+    cfg.partSize = 10;
+    auto store = makeS3ObjectStore (cfg);
+
+    const auto dir = test::makeTempDir ("s3mpcancel");
+    std::ofstream (dir / "big.wav", std::ios::binary) << "0123456789abcdefghijklmno";
+    int polls = 0;
+    auto r = store->putFileCancellable ("big.wav", dir / "big.wav", "audio/wav", [&] { return ++polls > 1; });
+    REQUIRE (! r.ok());
+    CHECK (r.error().code == errc::cancelled);
+    CHECK (s3.parts["up1"].size() == 1);                        // stopped before part 2
+    CHECK (s3.objects.count ("big.wav") == 0);                  // never completed
 }
 
 ROVOX_TEST (storage, s3_client_reports_the_s3_error_code_of_a_failed_download)

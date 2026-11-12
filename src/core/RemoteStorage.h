@@ -35,9 +35,12 @@ struct StorageConfig
     S3StoreConfig store;
     std::string prefix = "rovox/";
     int leaseTtlS = 60;
+    /** `[storage] conditional_writes`: auto | on | off. Writer leases use conditional puts (If-None-Match / If-Match) when the store enforces them;
+        `auto` probes once and falls back to a best-effort write + read-back (with a warning) when the store ignores preconditions. */
+    std::string conditionalWrites = "auto";
 
     /** Reads S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_PREFIX (each also as <NAME>_FILE: first line of that file),
-        ROVOX_STORAGE (s3 | local), ROVOX_LEASE_TTL_S. `mode` (the --storage option) overrides ROVOX_STORAGE. Without either, S3 is used when
+        ROVOX_STORAGE (s3 | local), ROVOX_LEASE_TTL_S, ROVOX_CONDITIONAL_WRITES (auto | on | off). `mode` (the --storage option) overrides ROVOX_STORAGE. Without either, S3 is used when
         S3_ENDPOINT and S3_BUCKET are both set, else local. */
     static Result<StorageConfig> fromEnvironment (const std::string& mode = "");
 
@@ -85,8 +88,10 @@ struct LeaseInfo
     std::int64_t acquired = 0;
 };
 
-/** One writer per project. Not a hard lock (S3 has no portable compare-and-swap): the holder writes LEASE with an expiry and renews it;
-    others refuse while it is live; a verification read after writing narrows the race. */
+/** One writer per project. The holder writes LEASE with an expiry and renews it; others refuse while it is live.
+    With `conditional` (the store enforces preconditions) a new lease is written with If-None-Match: * and a take-over / renewal with If-Match: <etag>
+    of the lease that was read, so two overlapping acquirers cannot both win. Without it (best-effort fallback for stores that ignore preconditions)
+    a verification read after writing only narrows the race: two servers acquiring in the same instant can both believe they hold the lease. */
 class ProjectLease
 {
 public:
@@ -96,9 +101,9 @@ public:
     /** Empty optional = no lease object (or an unreadable one); an Error = the store could not be asked. */
     static Result<std::optional<LeaseInfo>> read (ObjectStore&, const std::string& key);
     /** BUSY (with details owner / expires) while another owner's lease is live. */
-    static Result<LeaseInfo> acquire (ObjectStore&, const std::string& key, const std::string& owner, int ttlS, const Clock& = systemNow);
+    static Result<LeaseInfo> acquire (ObjectStore&, const std::string& key, const std::string& owner, int ttlS, const Clock& = systemNow, bool conditional = false);
     /** Extends our lease; BUSY if somebody else took it over. */
-    static Result<LeaseInfo> renew (ObjectStore&, const std::string& key, const std::string& owner, int ttlS, const Clock& = systemNow);
+    static Result<LeaseInfo> renew (ObjectStore&, const std::string& key, const std::string& owner, int ttlS, const Clock& = systemNow, bool conditional = false);
     static void release (ObjectStore&, const std::string& key, const std::string& owner);
 };
 
@@ -137,9 +142,10 @@ public:
     RemoteStorage (std::shared_ptr<ObjectStore>, StorageKeys, std::string description, std::string owner, int leaseTtlS = 60);
     ~RemoteStorage();
 
-    /** Starts the uploader thread (lease renewal and head refresh included). */
+    /** Starts the uploader thread (head refresh) and the lease thread (renewal, independent of uploads). */
     void start();
-    /** Waits until everything queued is uploaded (or `timeout`), then releases the leases and stops the thread. true = nothing was left. */
+    /** Stops accepting snapshots, waits until what is queued is uploaded (or `timeout`), then cancels the upload in flight at its next part boundary
+        (waiting at most 5 s more), joins the threads and releases the leases of projects with nothing left to upload. true = nothing was left. */
     bool shutdown (std::chrono::seconds timeout);
     /** Waits for an empty queue only. */
     bool flush (std::chrono::seconds timeout);
@@ -153,6 +159,10 @@ public:
     void setIntervals (std::chrono::milliseconds headRefresh, std::chrono::milliseconds leaseRenew);
     void setRetryBackoff (std::chrono::milliseconds base)       { retryBase_ = base; }
     void setClock (ProjectLease::Clock c)                       { clock_ = std::move (c); }
+    /** auto | on | off (see StorageConfig::conditionalWrites); anything else is auto. Call before the first lease is taken. */
+    void setConditionalWrites (const std::string& mode);
+    /** Whether leases use conditional puts: resolves `auto` by probing the store once. */
+    bool conditionalWritesActive();
 
     // ---- writer lease ----
     Result<void> acquireLease (const std::string& tenant, const std::string& projectId);
@@ -202,12 +212,18 @@ private:
     using Key = std::pair<std::string, std::string>;
 
     void loop();
+    void leaseLoop();
+    void renewLeases();
+    /** An error unless this server may still publish for the project: the lease was lost or could not be renewed before it ran out.
+        Projects whose lease was never taken through this object (CLI push) are not checked. */
+    Result<void> checkLease (const Key&);
+    /** checkLease plus shutdown: polled between parts and before every object of a push. */
+    Result<void> uploadGuard (const Key&);
     bool processOne (bool ignoreBackoff);
     void housekeeping();
     void emit (const Key&);
     json statusLocked (const Key&) const;
-    Result<void> uploadMedia (const SnapshotJob&, std::string& warning);
-    void setHead (const ProjectHead&);
+    Result<void> uploadMedia (const SnapshotJob&, std::string& warning);    void setHead (const ProjectHead&);
 
     std::shared_ptr<ObjectStore> store_;
     StorageKeys keys_;
@@ -221,10 +237,19 @@ private:
     std::set<Key> inFlight_, flushTried_;
     std::map<std::string, std::map<std::string, ProjectHead>> heads_;
     std::set<std::string> knownMedia_;
-    std::thread thread_;
-    bool stop_ = false, started_ = false, flushing_ = false;
+    std::thread thread_, leaseThread_;
+    std::condition_variable leaseCv_;
+    std::mutex leaseOpMutex_;               // one lease operation (renew / release) at a time; taken before mutex_
+    std::atomic<bool> cancelUploads_ { false };
+    bool stop_ = false, started_ = false, flushing_ = false, closing_ = false;
     std::chrono::milliseconds headRefresh_ { 30000 }, leaseRenew_ { 0 }, retryBase_ { 2000 };
-    std::chrono::steady_clock::time_point lastRefresh_ {}, lastRenew_ {};
+    std::chrono::steady_clock::time_point lastRefresh_ {};
+
+    mutable std::mutex probeMutex_;
+    enum class ConditionalMode { autoDetect, on, off };
+    ConditionalMode conditionalMode_ = ConditionalMode::autoDetect;
+    std::optional<bool> conditionalProbed_;     // auto: does the store enforce preconditions (unset = not probed yet / inconclusive)
+    std::string conditionalNote_;               // the fallback warning, for describe()
     ProjectLease::Clock clock_ = ProjectLease::systemNow;
     StatusListener listener_;
 };
