@@ -5,6 +5,7 @@
 // The whole window against a scripted server: tabs, TCP rows, agent highlight (agent-cyan class), MCP panel, Undo agent / Accept.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { plural, setLocale } from '../src/i18n';
 
 let hasCanvas = false;
 try {
@@ -104,6 +105,7 @@ const mix = { muted: false };
 const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => {
+  setLocale('uk'); // the tests assert the Ukrainian texts, whatever navigator.language says
   FakeWebSocket.instances = [];
   FakeWebSocket.handler = answer;
   vi.stubGlobal('WebSocket', FakeWebSocket);
@@ -143,7 +145,7 @@ describe('the window', () => {
     expect(rows[0]!.querySelector('.name')!.textContent).toBe('Flute');
     expect(rows[1]!.querySelector('.sbtn.mute')!.classList.contains('on')).toBe(true);
     expect(rows[0]!.querySelector('.sbtn.fx')!.classList.contains('has')).toBe(true);
-    expect(document.querySelector('.ruler-row .head')!.textContent).toBe('TRACKS · 2');
+    expect(document.querySelector('.ruler-row .head')!.textContent).toBe('ДОРІЖКИ · 2');
     expect(document.querySelector('.clock .big')!.textContent).toBe('1.1.00');
     expect(document.querySelector('.clock .small')!.textContent).toBe('0:00.000 / 0:30.000');
     expect(document.querySelector('.transport')!.textContent).toContain('118.00');
@@ -178,8 +180,8 @@ describe('the window', () => {
     expect(document.querySelector('.log-row .tool.agent')!.textContent).toBe('item.split');
     expect(document.querySelector('.tabitem .dot')!.classList.contains('agent')).toBe(true);
 
-    const undoAgent = [...document.querySelectorAll<HTMLButtonElement>('.mcp-actions button')].find((b) => b.textContent!.startsWith('Undo агента'))!;
-    expect(undoAgent.textContent).toBe('Undo агента (2)');
+    const undoAgent = [...document.querySelectorAll<HTMLButtonElement>('.mcp-actions button')].find((b) => b.textContent!.startsWith('Скасувати дії агента'))!;
+    expect(undoAgent.textContent).toBe('Скасувати дії агента (2)');
     expect(undoAgent.disabled).toBe(false);
     const accept = document.querySelector<HTMLButtonElement>('.mcp-actions button.primary')!;
     expect(accept.disabled).toBe(false);
@@ -220,7 +222,7 @@ describe('the window', () => {
     ws.push({ t: 'event', type: 'project.changed', project_id: 'p_1', revision: 12, origin: { kind: 'mcp', session: 'mcp_1', label: 'Claude' }, undo_label: 'Claude: track.update', changes: [{ kind: 'track', id: 'trk_a', op: 'update' }] });
     await tick(300);
     const before = ws.sent.filter((m) => m.name === 'undo').length;
-    [...document.querySelectorAll<HTMLButtonElement>('.mcp-actions button')].find((b) => b.textContent!.startsWith('Undo агента'))!.click();
+    [...document.querySelectorAll<HTMLButtonElement>('.mcp-actions button')].find((b) => b.textContent!.startsWith('Скасувати дії агента'))!.click();
     await tick(200);
     expect(ws.sent.filter((m) => m.name === 'undo').length - before).toBe(2);
     const undos = ws.sent.filter((m) => m.name === 'undo');
@@ -277,7 +279,7 @@ describe('--audio none preview fallback', () => {
       },
     );
 
-    const playBtn = document.querySelector<HTMLButtonElement>('.transport button[title="Відтворення"], .transport .tbtn[aria-label="Відтворення"]') ?? [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.title === 'Відтворення' || b.getAttribute('aria-label') === 'Відтворення')!;
+    const playBtn = document.querySelector<HTMLButtonElement>('.transport button[title="Відтворення (Пробіл)"], .transport .tbtn[aria-label="Відтворення (Пробіл)"]') ?? [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.title === 'Відтворення (Пробіл)' || b.getAttribute('aria-label') === 'Відтворення (Пробіл)')!;
     playBtn.click();
     await tick(50);
     expect(runJob).toHaveBeenCalledTimes(1);
@@ -460,12 +462,11 @@ describe.skipIf(!hasCanvas)('canvas drawing', () => {
   });
 });
 
-describe('pluralUk', async () => {
-  const { pluralUk } = await import('../src/lib/units');
+describe('plural (uk)', () => {
   it('picks the Ukrainian plural form', () => {
-    const f = (n: number) => pluralUk(n, 'доріжка', 'доріжки', 'доріжок');
-    for (const n of [1, 21]) expect(f(n)).toBe('доріжка');
-    for (const n of [2, 4, 22]) expect(f(n)).toBe('доріжки');
-    for (const n of [0, 5, 11, 12, 14, 25, 111]) expect(f(n)).toBe('доріжок');
+    const f = (n: number) => plural(n, 'picker.tracks').replace(/\u00a0/g, ' ');
+    for (const n of [1, 21]) expect(f(n)).toBe(`${n} доріжка`);
+    for (const n of [2, 4, 22]) expect(f(n)).toBe(`${n} доріжки`);
+    for (const n of [0, 5, 11, 12, 14, 25]) expect(f(n)).toBe(`${n} доріжок`);
   });
 });

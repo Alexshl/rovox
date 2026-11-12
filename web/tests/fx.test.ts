@@ -4,6 +4,7 @@
 // @vitest-environment jsdom
 // The FX popover: expand a plugin, search its parameters, edit through fx.update, reset on double-click, toggle enabled.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLocale } from '../src/i18n';
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -113,6 +114,7 @@ const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
 const sentCmds = (ws: FakeWebSocket, name: string) => ws.sent.filter((m) => m.t === 'cmd' && m.name === name);
 
 beforeEach(() => {
+  setLocale('uk'); // the tests assert the Ukrainian texts, whatever navigator.language says
   FakeWebSocket.instances = [];
   vi.stubGlobal('WebSocket', FakeWebSocket);
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ token_required: false, authenticated: true, source_url: '', version: '0.1.0' }) })));
@@ -245,7 +247,7 @@ describe('FX popover', () => {
     (document.querySelector('.popover .fxtoggle') as HTMLElement).click();
     await tick();
     expect(sentCmds(ws, 'fx.update').at(-1)!.params).toEqual({ plugin_id: 'fx_eq', enabled: false });
-    expect(document.querySelector('.popover .fxtoggle')!.textContent).toBe('off');
+    expect(document.querySelector('.popover .fxtoggle')!.textContent).toBe('вимк.');
   });
   it('shows named states as a switch or a select instead of a slider and sends value = min + index', async () => {
     const { ws, heads } = await openFx();
@@ -260,7 +262,7 @@ describe('FX popover', () => {
     await tick();
     expect(sentCmds(ws, 'fx.update').at(-1)!.params).toMatchObject({ plugin_id: 'fx_comp', params: { on: 0 } });
     expect(sw.getAttribute('aria-pressed')).toBe('false');
-    expect(sw.textContent).toBe('off');
+    expect(sw.textContent).toBe('вимк.');
 
     const sel = rows[1]!.querySelector<HTMLSelectElement>('select.fxselect')!;
     expect([...sel.options].map((o) => o.textContent)).toEqual(['peak', 'rms', 'feedforward']);

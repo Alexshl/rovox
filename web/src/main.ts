@@ -15,6 +15,7 @@ import '@fontsource/ibm-plex-sans/cyrillic-600.css';
 import './styles/tokens.css';
 import './styles/base.css';
 
+import { onLocaleChange } from './i18n';
 import { clear } from './lib/dom';
 import { App } from './store/session';
 import { Shell, loginView } from './views/shell';
@@ -39,6 +40,11 @@ app.changed.on(() => {
     wasLogin = app.needsLogin;
     mount();
   }
+});
+
+// a language switch rebuilds the labels in place (the shell does it itself): no reload, the open projects and the playhead stay
+onLocaleChange(() => {
+  if (app.needsLogin) mount();
 });
 
 mount();

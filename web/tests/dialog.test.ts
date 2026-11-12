@@ -3,13 +3,18 @@
 
 // @vitest-environment jsdom
 // The in-app text dialog (replaces window.prompt) and the project picker.
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLocale } from '../src/i18n';
 import { textDialog } from '../src/views/dialog';
 import { projectMeta, projectPicker } from '../src/views/projects';
 import type { App } from '../src/store/session';
 
 const key = (el: Element, k: string, init: KeyboardEventInit = {}) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+beforeEach(() => {
+  setLocale('uk'); // the tests assert the Ukrainian texts, whatever navigator.language says
+});
 
 afterEach(() => {
   document.body.innerHTML = '';

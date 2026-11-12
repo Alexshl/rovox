@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Rovox contributors
 
 // In-app modal dialogs instead of window.prompt(): a scrim, focus trap, Esc to cancel, aria-modal.
+import { t } from '../i18n';
 import { h } from '../lib/dom';
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -66,8 +67,8 @@ export function textDialog(o: TextDialogOptions): Promise<string | null> {
   return new Promise((resolve) => {
     let result: string | null = null;
     const input = h('input', { attrs: { type: 'text', value: o.value ?? '', placeholder: o.placeholder ?? '', 'aria-label': o.label, autocomplete: 'off' } });
-    const ok = h('button', { class: 'btn primary', text: o.okText ?? 'OK' });
-    const cancel = h('button', { class: 'btn', text: 'Скасувати' });
+    const ok = h('button', { class: 'btn primary', text: o.okText ?? t('dialog.ok') });
+    const cancel = h('button', { class: 'btn', text: t('dialog.cancel') });
     const dialog = h(
       'div',
       { class: 'dialog text-dialog' },

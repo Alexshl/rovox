@@ -4,6 +4,7 @@
 // @vitest-environment jsdom
 // Keyboard and screen reader access of the window: volume sliders, menus, tabs, activity rows, toasts, arrange items.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLocale } from '../src/i18n';
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -91,6 +92,7 @@ const mix = { muted: false };
 const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => {
+  setLocale('uk'); // the tests assert the Ukrainian texts, whatever navigator.language says
   FakeWebSocket.instances = [];
   vi.stubGlobal('WebSocket', FakeWebSocket);
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ token_required: false, authenticated: true, source_url: '', version: '0.1.0' }) })));
@@ -182,7 +184,7 @@ describe('volume sliders', () => {
     expect(volumeSent(ws, 'trk_b').map((m) => m.params.volume_db)).toEqual([-0.5, -0.6, 0]);
     expect(fader.getAttribute('aria-valuetext')).toBe('0.0 dB');
     const master = document.querySelector<HTMLElement>('.strip.master canvas')!;
-    expect(master.getAttribute('aria-label')).toBe('Гучність: MASTER');
+    expect(master.getAttribute('aria-label')).toBe('Гучність: МАСТЕР');
   });
 });
 

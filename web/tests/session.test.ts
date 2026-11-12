@@ -5,6 +5,7 @@
 // App controller: Undo agent pinned to its project and revision, login re-check after failed handshakes, state kept across
 // reconnects, the socket heartbeat and the render dialog.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLocale } from '../src/i18n';
 import { RovoxSocket } from '../src/net/ws';
 
 class FakeWebSocket {
@@ -87,6 +88,7 @@ function answer(msg: Record<string, any>, ws: FakeWebSocket): void {
 const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => {
+  setLocale('uk'); // the tests assert the Ukrainian texts, whatever navigator.language says
   FakeWebSocket.instances = [];
   FakeWebSocket.handler = answer;
   activity = [];
@@ -221,7 +223,7 @@ describe('render dialog', () => {
     const label = scrim.querySelector('label')!;
     expect(scrim.querySelector(`#${label.getAttribute('for')}`)).not.toBeNull();
     const buttons = [...scrim.querySelectorAll('button')] as HTMLButtonElement[];
-    const render = buttons.find((b) => b.textContent === 'Render')!;
+    const render = buttons.find((b) => b.textContent === 'Рендер')!;
     render.click();
     await tick(10);
     expect(scrim.querySelector('.finding.error')!.textContent).toContain('network down');

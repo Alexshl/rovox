@@ -5,6 +5,7 @@
 // with a 150 ms jitter buffer. The audio context is created from a user gesture (autoplay policy).
 import workletUrl from './player.worklet.ts?worker&url';
 import { STREAM_RATE, DEFAULT_TARGET_MS } from './jitter';
+import { t } from '../i18n';
 import type { AudioPacket } from '../net/protocol';
 
 export interface AudioStats {
@@ -77,7 +78,7 @@ export class BrowserAudio {
   /** Must be called from a click handler. */
   async enable(): Promise<boolean> {
     if (!this.stats.supported) {
-      this.stats.error = 'WebCodecs Opus недоступний у цьому браузері';
+      this.stats.error = t('audio.noWebCodecs');
       this.emit();
       return false;
     }
@@ -170,7 +171,7 @@ export class BrowserAudio {
     const d = new AudioDecoder({
       output: (data) => this.onDecoded(data),
       error: (e) => {
-        this.stats.error = `decoder: ${e.message}`;
+        this.stats.error = t('audio.decoder', { message: e.message });
         this.emit();
       },
     });
