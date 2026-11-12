@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <sstream>
 
 namespace rovox
@@ -35,6 +36,7 @@ struct ParamDef
     int decimals = 1;
     float centre = 0.0f;                    // value that sits in the middle of the control (skew), 0 = linear
     std::vector<std::string> choices;       // value = index
+    bool automatable = true;                // false: changes the latency of the effect, so it is only read from the saved value (a latency cannot follow a curve)
 };
 
 ParamDef num (std::string id, std::string name, float min, float max, float def, std::string unit, int decimals = 1, float centre = 0.0f)
@@ -51,6 +53,13 @@ ParamDef choice (std::string id, std::string name, std::vector<std::string> choi
 {
     const auto top = (float) choices.size() - 1.0f;
     return { std::move (id), std::move (name), "", 0.0f, top, (float) def, 0, 0.0f, std::move (choices) };
+}
+
+/** Marks a parameter that changes the reported latency: it is not automatable (the plugin reads its saved value only). */
+ParamDef noAuto (ParamDef d)
+{
+    d.automatable = false;
+    return d;
 }
 
 juce::String formatValue (const ParamDef& d, float v)
@@ -111,11 +120,14 @@ public:
                                  [def = d] (const juce::String& s) { return parseValue (def, s); });
             ap->attachToCurrentValue (*values_.back());
             params_.push_back (ap);
+            fixed_.push_back (d.automatable ? nullptr
+                                            : std::make_unique<std::atomic<float>> (std::clamp ((float) (double) state.getProperty (juce::Identifier (d.id), d.def), d.min, d.max)));
         }
     }
 
     ~StockPlugin() override
     {
+        latencyWatch_.cancelPendingUpdate();
         notifyListenersOfDeletion();
 
         for (auto& ap : params_)
@@ -133,6 +145,7 @@ public:
     void initialise (const te::PluginInitialisationInfo& info) override
     {
         prepareDsp (info.sampleRate);
+        reportedLatency_ = latencySamples();
     }
 
     void reset() override                                   { resetDsp(); }
@@ -163,7 +176,7 @@ public:
     }
 
     /** Values in the unit of the parameter, with the automation of the moment. */
-    float value (size_t i) const                            { return params_[i]->getCurrentValue(); }
+    float value (size_t i) const                            { return fixed_[i] != nullptr ? fixed_[i]->load() : params_[i]->getCurrentValue(); }
     bool flag (size_t i) const                              { return value (i) >= 0.5f; }
     int choiceIndex (size_t i) const                        { return (int) std::lround (value (i)); }
 
@@ -174,10 +187,44 @@ public:
         for (auto& d : defs_)
             units[d.id] = d.choices.empty() ? json (d.unit) : json ("choice: " + [&] { std::string all; for (auto& c : d.choices) all += (all.empty() ? "" : "|") + c; return all; }());
 
-        return { { "units", units }, { "meters", meters() }, { "latency_samples", latencySamples() } };
+        json fixedIds = json::array();
+
+        for (auto& d : defs_)
+            if (! d.automatable)
+                fixedIds.push_back (d.id);
+
+        return { { "units", units }, { "meters", meters() }, { "latency_samples", latencySamples() }, { "non_automatable", fixedIds } };
     }
 
 protected:
+    void valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& property) override
+    {
+        te::Plugin::valueTreePropertyChanged (tree, property);
+
+        if (tree != state)
+            return;
+
+        for (size_t i = 0; i < defs_.size(); ++i)
+            if (fixed_[i] != nullptr && property == juce::Identifier (defs_[i].id))
+                fixed_[i]->store (std::clamp ((float) (double) tree.getProperty (property, defs_[i].def), defs_[i].min, defs_[i].max));
+
+        latencyWatch_.triggerAsyncUpdate();
+    }
+
+    /** Any thread: checks the reported latency on the message thread soon (see checkLatency). */
+    void requestLatencyCheck()                              { latencyWatch_.triggerAsyncUpdate(); }
+
+    /** Asks the host for a playback graph rebuild (delay compensation is computed when the graph is built) once the reported latency has changed.
+        Message thread. */
+    void checkLatency()
+    {
+        const int now = latencySamples();
+        const int before = reportedLatency_.exchange (now);
+
+        if (before >= 0 && before != now)
+            edit.restartPlayback();
+    }
+
     virtual void prepareDsp (double sampleRate) = 0;
     virtual void resetDsp() = 0;
     virtual void run (float* const* io, int numChannels, int numSamples, const te::PluginRenderContext&) = 0;
@@ -211,7 +258,21 @@ protected:
     std::vector<ParamDef> defs_;
     std::vector<std::unique_ptr<juce::CachedValue<float>>> values_;
     std::vector<te::AutomatableParameter::Ptr> params_;
+    std::vector<std::unique_ptr<std::atomic<float>>> fixed_;       // saved value of every non-automatable parameter (null for the others)
     double sr_ = 44100.0;
+
+private:
+    struct LatencyWatch : juce::AsyncUpdater
+    {
+        explicit LatencyWatch (StockPlugin& o) : owner (o) {}
+        ~LatencyWatch() override                { cancelPendingUpdate(); }
+        void handleAsyncUpdate() override       { owner.checkLatency(); }
+
+        StockPlugin& owner;
+    };
+
+    LatencyWatch latencyWatch_ { *this };
+    std::atomic<int> reportedLatency_ { -1 };       // the latency of the graph that is playing (-1 = not initialised yet)
 };
 
 //==============================================================================
@@ -310,12 +371,12 @@ private:
                  num ("attack", "Attack", 0.0f, 500.0f, 10.0f, "ms", 2, 30.0f),
                  num ("release", "Release", 0.0f, 5000.0f, 100.0f, "ms", 1, 300.0f),
                  num ("knee", "Knee", 0.0f, 30.0f, 6.0f, "dB", 1),
-                 num ("lookahead", "Pre-comp (lookahead)", 0.0f, 250.0f, 0.0f, "ms", 2, 20.0f),
+                 noAuto (num ("lookahead", "Pre-comp (lookahead)", 0.0f, 250.0f, 0.0f, "ms", 2, 20.0f)),     // the latency
                  num ("makeup", "Makeup gain", -12.0f, 36.0f, 0.0f, "dB", 1),
                  toggle ("auto_makeup", "Auto makeup", false),
                  num ("rms", "RMS size (0 = peak)", 0.0f, 1000.0f, 0.0f, "ms", 1, 20.0f),
                  num ("mix", "Wet (parallel mix)", 0.0f, 100.0f, 100.0f, "%", 0),
-                 toggle ("reaper_compat", "ReaComp mode", false),       // imported ReaComp: ReaComp's detector, envelope, knee and mix (src/core/StockFx.h)
+                 noAuto (toggle ("reaper_compat", "ReaComp mode", false)),       // imported ReaComp: ReaComp's detector, envelope, knee and mix (src/core/StockFx.h)
                  num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
                  toggle ("fx_delta", "FX delta (processed - input)", false),
                  num ("dry", "Dry (ReaComp mode)", -150.0f, 6.0f, -150.0f, "dB", 1),
@@ -443,10 +504,10 @@ private:
                  num ("release", "Release", 0.0f, 5000.0f, 100.0f, "ms", 1, 300.0f),
                  num ("hysteresis", "Hysteresis", 0.0f, 24.0f, 3.0f, "dB", 1),
                  num ("range", "Range (closed attenuation)", -100.0f, 0.0f, -80.0f, "dB", 1),
-                 toggle ("reaper_compat", "ReaGate mode", false),       // imported ReaGate: ReaGate's detector and gain trajectory (src/core/StockFx.h)
+                 noAuto (toggle ("reaper_compat", "ReaGate mode", false)),       // imported ReaGate: ReaGate's detector and gain trajectory (src/core/StockFx.h)
                  num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
                  toggle ("fx_delta", "FX delta (processed - input)", false),
-                 num ("pre_open", "Pre-open (ReaGate mode)", 0.0f, 250.0f, 0.0f, "ms", 1, 20.0f),
+                 noAuto (num ("pre_open", "Pre-open (ReaGate mode)", 0.0f, 250.0f, 0.0f, "ms", 1, 20.0f)),
                  num ("rms", "RMS size (ReaGate mode, 0 = peak)", 0.0f, 1000.0f, 0.0f, "ms", 1, 20.0f),
                  num ("lowpass", "Detector low-pass (ReaGate mode)", 0.0f, 20000.0f, 20000.0f, "Hz", 0),
                  num ("hipass", "Detector high-pass (ReaGate mode)", 0.0f, 20000.0f, 0.0f, "Hz", 0),
@@ -560,7 +621,7 @@ private:
         return { num ("input_gain", "Input gain", 0.0f, 24.0f, 0.0f, "dB", 1),
                  num ("ceiling", "Ceiling (true peak)", -24.0f, 0.0f, -1.0f, "dBTP", 2),
                  num ("release", "Release", 1.0f, 2000.0f, 80.0f, "ms", 1, 100.0f),
-                 toggle ("reaper_compat", "ReaLimit mode", false),      // imported ReaLimit: sample-peak limiter with ReaLimit's release (src/core/StockFx.h)
+                 noAuto (toggle ("reaper_compat", "ReaLimit mode", false)),      // imported ReaLimit: sample-peak limiter with ReaLimit's release (src/core/StockFx.h)
                  num ("fx_wet", "FX wet mix", 0.0f, 100.0f, 100.0f, "%", 1),      // generic Wet / Delta of an imported REAPER FX
                  toggle ("fx_delta", "FX delta (processed - input)", false),
                  num ("threshold", "Threshold (ReaLimit mode)", -60.0f, 12.0f, 0.0f, "dB", 2),
@@ -914,8 +975,10 @@ public:
 
     RovoxFir (te::PluginCreationInfo info) : StockPlugin (info, definitions())
     {
-        firParams_.points = parseCurve (toStd (state["curve"].toString()));
+        curve_ = parseCurve (toStd (state["curve"].toString()));
     }
+
+    ~RovoxFir() override                            { worker_.stopThread (10000); }
 
     juce::String getName() const override           { return "Rovox FIR EQ"; }
     juce::String getPluginType() override           { return xmlTypeName; }
@@ -950,7 +1013,7 @@ public:
 private:
     static std::vector<ParamDef> definitions()
     {
-        return { num ("fft_size", "FFT size", 64.0f, 65536.0f, 4096.0f, "", 0, 4096.0f),
+        return { noAuto (num ("fft_size", "FFT size", 64.0f, 65536.0f, 4096.0f, "", 0, 4096.0f)),
                  num ("gain", "Output gain", -96.0f, 12.0f, 0.0f, "dB", 2) };
     }
 
@@ -958,26 +1021,37 @@ private:
     {
         StockPlugin::valueTreePropertyChanged (tree, property);
 
-        if (tree == state && property == juce::Identifier ("curve"))
+        if (tree != state)
+            return;
+
+        if (property == juce::Identifier ("curve"))
         {
             auto points = parseCurve (toStd (state["curve"].toString()));
             const juce::SpinLock::ScopedLockType lock (lock_);
-            pending_ = std::move (points);
-            dirty_ = true;
+            curve_ = std::move (points);
+        }
+
+        // the design is built off the audio thread, once the edits have settled; process() picks the new design up by itself
+        if (prepared_.load())
+        {
+            if (! worker_.isThreadRunning())
+                worker_.startThread();
+
+            worker_.notify();
         }
     }
 
-    fx::ReaFirParams currentParams()
+    fx::ReaFirParams readParams() const
     {
-        if (dirty_.exchange (false))
+        fx::ReaFirParams p;
         {
             const juce::SpinLock::ScopedLockType lock (lock_);
-            firParams_.points = pending_;
+            p.points = curve_;
         }
 
-        firParams_.fftSize = (int) std::lround (value (0));
-        firParams_.outputGain = dbToLinOrZero (value (1));
-        return firParams_;
+        p.fftSize = (int) std::lround (value (0));
+        p.outputGain = dbToLinOrZero (value (1));
+        return p;
     }
 
     static double dbToLinOrZero (double db)         { return db <= -95.9 ? 0.0 : std::pow (10.0, db / 20.0); }
@@ -986,32 +1060,73 @@ private:
 
     void prepareDsp (double sr) override
     {
-        sr_ = sr;
-        fir_.prepare (sr);
-        applied_ = currentParams();
-        fir_.setParams (applied_);
+        // synchronous: an offline render has the exact design of its parameters before the first block
+        {
+            std::lock_guard<std::mutex> lock (buildMutex_);
+            sr_ = sr;
+            published_ = readParams();
+            fir_.prepare (sr);
+            fir_.setParams (published_);
+        }
+
+        prepared_ = true;
+    }
+
+    /** Worker thread: designs the filter for the current parameters when they differ from the installed ones and hands it to the audio thread. */
+    void rebuild()
+    {
+        {
+            std::lock_guard<std::mutex> lock (buildMutex_);
+            const auto p = readParams();
+
+            if (p == published_)
+                return;
+
+            published_ = p;
+            fir_.install (fx::ReaFir::design (p, sr_));
+        }
+
+        requestLatencyCheck();      // the latency may have changed: PDC needs a graph rebuild
     }
 
     void resetDsp() override                        { fir_.reset(); }
 
     void run (float* const* io, int n, int count, const te::PluginRenderContext&) override
     {
-        const auto p = currentParams();
-
-        if (! (p == applied_))
-        {
-            applied_ = p;
-            fir_.setParams (p);
-        }
-
         fir_.process (io, n, count);
     }
 
+    struct DesignWorker : juce::Thread
+    {
+        explicit DesignWorker (RovoxFir& o) : juce::Thread ("rovox fir design"), owner (o) {}
+
+        void run() override
+        {
+            while (! threadShouldExit())
+            {
+                wait (-1);
+
+                while (! threadShouldExit() && wait (40))       // debounce: build once the changes have stopped coming
+                {
+                }
+
+                if (threadShouldExit())
+                    break;
+
+                owner.rebuild();
+            }
+        }
+
+        RovoxFir& owner;
+    };
+
     fx::ReaFir fir_;
-    fx::ReaFirParams firParams_, applied_;
-    std::vector<fx::ReaFirPoint> pending_;
-    juce::SpinLock lock_;
-    std::atomic<bool> dirty_ { false };
+    fx::ReaFirParams published_;                    // the parameters of the installed design (under buildMutex_)
+    std::vector<fx::ReaFirPoint> curve_;            // the parsed curve property (under lock_)
+    mutable juce::SpinLock lock_;
+    std::mutex buildMutex_;
+    std::atomic<bool> prepared_ { false };
+    DesignWorker worker_ { *this };
 };
 
 } // namespace

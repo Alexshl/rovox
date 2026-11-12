@@ -306,6 +306,7 @@ public:
 
     ~JsfxPlugin() override
     {
+        pdcWatch_.cancelPendingUpdate();
         notifyListenersOfDeletion();
 
         for (auto& ap : params_)
@@ -349,6 +350,7 @@ public:
         float* zeroOut[2] = { scratch_[0].data(), scratch_[1].data() };
         ysfx_process_float (fx_.get(), zeroIn, zeroOut, 2, 2, 0);
         pdcSamples_ = ysfx_get_pdc_delay (fx_.get());
+        reportedPdc_ = (int) std::lround (pdcSamples_.load());
         resetPending_ = false;
         ready_ = true;
     }
@@ -414,6 +416,10 @@ public:
         }
 
         pdcSamples_ = ysfx_get_pdc_delay (fx_.get());
+
+        // the effect changed its pdc_delay while playing: the graph has to be rebuilt (on the message thread) for delay compensation to follow
+        if ((int) std::lround (pdcSamples_.load()) != reportedPdc_.load() && ! pdcCheckPending_.exchange (true))
+            pdcWatch_.triggerAsyncUpdate();
     }
 
     json extras() const
@@ -575,6 +581,27 @@ private:
     bool hasSample_ = true;
     std::atomic<bool> ready_ { false }, capturing_ { false }, resetPending_ { false };
     std::atomic<double> pdcSamples_ { 0.0 };
+
+    struct PdcWatch : juce::AsyncUpdater
+    {
+        explicit PdcWatch (JsfxPlugin& o) : owner (o) {}
+        ~PdcWatch() override                { cancelPendingUpdate(); }
+
+        void handleAsyncUpdate() override
+        {
+            owner.pdcCheckPending_ = false;
+            const int now = (int) std::lround (owner.pdcSamples_.load());
+
+            if (owner.reportedPdc_.exchange (now) != now)
+                owner.edit.restartPlayback();
+        }
+
+        JsfxPlugin& owner;
+    };
+
+    PdcWatch pdcWatch_ { *this };
+    std::atomic<int> reportedPdc_ { 0 };            // the delay the playing graph compensates
+    std::atomic<bool> pdcCheckPending_ { false };
 };
 } // namespace
 

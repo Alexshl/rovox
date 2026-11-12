@@ -873,3 +873,94 @@ ROVOX_TEST (stock, rea_delay_with_feedback_above_0_db_stays_finite_for_60_second
     CHECK (finite);
     CHECK (peak < 100.0);
 }
+
+//==============================================================================
+// Audio-thread safety of the FIR and delay compensation after a latency change
+ROVOX_TEST (stock, fir_process_does_no_design_work_and_a_published_design_is_picked_up_by_itself)
+{
+    const double fs = 48000.0;
+    fx::ReaFir f;
+    f.prepare (fs);
+    fx::ReaFirParams p;
+    p.points = { { 382.45, -12.0 }, { 3202.73, 0.0 } };
+    p.fftSize = 1024;
+    f.setParams (p);
+    CHECK (f.latencySamples() == 256);
+
+    const int designs = fx::ReaFir::designCountForTest();
+    std::vector<float> l (512, 0.0f), r (512, 0.0f);
+    float* io[2] = { l.data(), r.data() };
+
+    for (int b = 0; b < 200; ++b)
+    {
+        l[0] = r[0] = b == 0 ? 1.0f : 0.0f;
+        f.process (io, 2, 512);
+    }
+
+    CHECK (fx::ReaFir::designCountForTest() == designs);        // unchanged parameters: not a single design in the process path
+
+    // a design built elsewhere (a worker) is installed and used from the next block, with its own latency
+    fx::ReaFirParams q = p;
+    q.fftSize = 2048;
+    auto d = fx::ReaFir::design (q, fs);
+    CHECK (fx::ReaFir::designCountForTest() == designs + 1);
+    f.install (d);
+    CHECK (f.latencySamples() == 512);
+    CHECK (fx::ReaFir::latencyFor (q) == 512);
+
+    for (int b = 0; b < 10; ++b)
+        f.process (io, 2, 512);
+
+    CHECK (fx::ReaFir::designCountForTest() == designs + 1);
+}
+
+ROVOX_TEST (stock, comp_lookahead_change_keeps_parallel_tracks_sample_aligned_after_the_graph_rebuild)
+{
+    test::Env env;
+    const auto id = env.newProject ("stock");
+    const auto dir = test::makeTempDir ("stock-impulse");
+    std::vector<float> impulse (44100, 0.0f);
+    impulse[22050] = 0.5f;
+    test::writeWav (dir / "a.wav", { impulse }, 44100.0, 24);
+    test::writeWav (dir / "b.wav", { impulse }, 44100.0, 24);
+    auto plan = env.ok (id, "import.plan", { { "paths", { (dir / "a.wav").string(), (dir / "b.wav").string() } } });
+    env.ok (id, "import.apply", { { "plan_id", plan["plan_id"] } });
+    const auto tracks = env.ok (id, "track.list")["tracks"];
+    REQUIRE (tracks.size() == 2);
+
+    auto comp = env.ok (id, "fx.add", { { "track_id", tracks[0]["track_id"] }, { "plugin", { { "plugin_uid", "rovox:comp" } } } });
+    const auto compId = comp["plugin_id"].get<std::string>();
+    env.ok (id, "fx.update", { { "plugin_id", compId }, { "params", { { "lookahead", 10.0 } } } });
+
+    auto info = env.ok (id, "fx.params", { { "plugin_id", compId } })["fx"];
+    CHECK (info["latency_samples"].get<int>() == 441);
+    bool listed = false;
+
+    for (auto& n : info["non_automatable"])
+        listed = listed || n == "lookahead";
+
+    CHECK (listed);
+
+    RenderRequest req;
+    req.name = "aligned";
+    req.tailS = 0.0;
+    req.format.bitDepth = 32;
+    auto r = renderProject (env.project (id), req);
+    REQUIRE (r.ok());
+    Planar ch;
+    double sr = 0;
+    REQUIRE (test::readWav (env.project (id).rendersDir() / "aligned.wav", ch, sr));
+    REQUIRE (ch.size() == 2);
+
+    long first = -1, last = -1;
+
+    for (size_t i = 0; i < ch[0].size(); ++i)
+        if (std::abs (ch[0][i]) > 0.01f)
+        {
+            first = first < 0 ? (long) i : first;
+            last = (long) i;
+        }
+
+    REQUIRE (first >= 0);
+    CHECK (last - first <= 1);          // both impulses land on the same sample (a misaligned pair would be 441 samples apart)
+}

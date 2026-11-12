@@ -9,7 +9,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace rovox::fx
@@ -506,28 +509,47 @@ struct ReaFirParams
     bool operator== (const ReaFirParams&) const = default;
 };
 
+/** One finished FIR design for one set of parameters. The design itself never changes after design(); `history` / `pos` are the running state of the
+    single ReaFir that runs it (audio thread only), so a new design always starts from silence. */
+struct ReaFirDesign
+{
+    ReaFirParams params;                    // as designed (points sorted)
+    bool firActive = false;                 // false: an exact gain without latency
+    double gain = 1.0;                      // the exact gain of a flat curve
+    int half = 0;                           // FIR support is -half .. +half
+    std::vector<double> taps;               // 2 * half + 1
+    mutable std::array<std::vector<double>, 2> history;
+    mutable size_t pos = 0;
+};
+
 class ReaFir
 {
 public:
-    void prepare (double sampleRate);       // allocates
+    void prepare (double sampleRate);       // designs for the current parameters and installs (allocates)
     void reset();
-    void setParams (const ReaFirParams&);   // designs the FIR (allocates): not for the audio thread
-    void process (float* const* io, int numChannels, int numSamples);
+    void setParams (const ReaFirParams&);   // designs the FIR and installs it at once (allocates): not for the audio thread
+    void process (float* const* io, int numChannels, int numSamples);   // no allocation, no design work: it only reads the installed design
 
-    int latencySamples() const              { return firActive_ ? half_ : 0; }
-    bool isFlat() const                     { return ! firActive_; }
+    /** The design of a parameter set without touching a processor: for a worker / the message thread (allocates, up to 65536 points). */
+    static std::shared_ptr<const ReaFirDesign> design (const ReaFirParams&, double sampleRate);
+    /** Hands a finished design to process(), which picks it up at the next block. Not for the audio thread; replaced designs are freed here. */
+    void install (std::shared_ptr<const ReaFirDesign>);
+
+    int latencySamples() const;
+    bool isFlat() const;
+    static int latencyFor (const ReaFirParams&);        // the latency of a design of these parameters, without designing
     static bool curveIsFlat (const std::vector<ReaFirPoint>&);
     /** Curve gain in dB at a frequency. */
     static double curveGainDb (const std::vector<ReaFirPoint>&, double hz);
+    /** Number of designs made so far (all processors): a test hook to show that process() does no design work. */
+    static int designCountForTest();
 
 private:
-    double sampleRate_ = 44100.0, gain_ = 1.0;
-    bool firActive_ = false;
-    int half_ = 0;                          // FIR support is -half_ .. +half_
+    double sampleRate_ = 44100.0;
     ReaFirParams params_;
-    std::vector<double> taps_;              // 2 * half_ + 1
-    std::array<std::vector<double>, 2> history_;
-    size_t pos_ = 0;
+    std::atomic<const ReaFirDesign*> active_ { nullptr };
+    std::mutex keepMutex_;
+    std::vector<std::shared_ptr<const ReaFirDesign>> keep_;       // installed designs kept alive for the audio thread's raw pointer
 };
 
 } // namespace rovox::fx

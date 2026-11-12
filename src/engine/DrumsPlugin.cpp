@@ -168,6 +168,15 @@ public:
         scratchL_.assign ((size_t) blockSize_, 0.0f);
         scratchR_.assign ((size_t) blockSize_, 0.0f);
         events_.reserve (1024);
+
+        {
+            // every playback starts from the same sampler state (voices, round robin): a probe render before the real one must not leave traces
+            std::lock_guard<std::mutex> lock (samplerMutex_);
+
+            if (sampler_ != nullptr)
+                sampler_->reset();
+        }
+
         cv_.notify_all();
     }
 
@@ -298,7 +307,7 @@ private:
         if (fc.bufferForMidiMessages->isAllNotesOff && from == 0)
             sampler_->allNotesOff();
 
-        const double rate = loadedRate_.load();
+        const double rate = requestedRateA_.load();       // time stamps are in engine seconds: scale by the engine rate, not the rate the kit was decoded for
 
         for (auto& m : *fc.bufferForMidiMessages)
         {
@@ -308,7 +317,7 @@ private:
             // time stamps are seconds from the start of the block; a stamp that rounds up to its end is still inside
             const int pos = std::clamp (juce::roundToInt ((m.getTimeStamp() + fc.midiBufferOffset) * rate), 0, fc.bufferNumSamples - 1);
 
-            if (pos >= from && pos < from + count)
+            if (pos >= from && pos < from + count && events_.size() < events_.capacity())      // beyond the reserved capacity hits are dropped, never allocated for
                 events_.push_back ({ pos - from, m.getNoteNumber(), (int) m.getVelocity() });
         }
 

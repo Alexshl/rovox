@@ -155,7 +155,23 @@ public:
     {
         buffer_.resize (7200);
         const int bytes = lame_encode_flush (lame_, buffer_.data(), (int) buffer_.size());
-        const bool ok = bytes >= 0 && (bytes == 0 || std::fwrite (buffer_.data(), 1, (size_t) bytes, file_) == (size_t) bytes);
+        bool ok = bytes >= 0 && (bytes == 0 || std::fwrite (buffer_.data(), 1, (size_t) bytes, file_) == (size_t) bytes);
+
+        // the first frame of the stream is a reserved placeholder: fill it with the Info tag (encoder delay, padding, length) so players
+        // trim the delay, play gapless and show the right duration
+        if (ok)
+        {
+            const size_t tagSize = lame_get_lametag_frame (lame_, nullptr, 0);
+
+            if (tagSize > 0)
+            {
+                std::vector<unsigned char> tag (tagSize);
+                ok = lame_get_lametag_frame (lame_, tag.data(), tag.size()) == tagSize
+                     && std::fseek (file_, 0, SEEK_SET) == 0
+                     && std::fwrite (tag.data(), 1, tagSize, file_) == tagSize;
+            }
+        }
+
         const bool closed = std::fclose (file_) == 0;
         file_ = nullptr;
         return ok && closed;
