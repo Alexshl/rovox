@@ -35,6 +35,7 @@ struct GatewayOptions
 {
     std::string token;                          // empty = open
     std::vector<std::string> allowedOrigins;    // besides loopback names and the Host of the request itself
+    bool loopbackBind = false;                  // then the Host must be a loopback name too (DNS rebinding); HttpServer also checks this before the upgrade
     size_t maxClients = 16;
     std::string sourceUrl;
 };
@@ -56,7 +57,8 @@ public:
 
     /** Authorisation of an HTTP request / upgrade: `Authorization: Bearer`, cookie `rovox_token`, or `?token=`. */
     static bool tokenMatches (const std::string& expected, const std::string& authorization, const std::string& cookie, const std::string& query);
-    static bool originAllowed (const std::string& origin, const std::string& host, const std::vector<std::string>& allowed);
+    static bool originAllowed (const std::string& origin, const std::string& host, const std::vector<std::string>& allowed,
+                              bool loopbackBind = false);
 
 private:
     struct Sub

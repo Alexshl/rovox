@@ -803,6 +803,7 @@ ROVOX_TEST (web, websocket_auth_origin_snapshot_events_and_audio)
     { WsClient w; CHECK (w.open (port, {}) == 401); }
     { WsClient w; CHECK (w.open (port, { "Origin: http://evil.example", "Authorization: Bearer tok123" }) == 403); }
     { WsClient w; CHECK (w.open (port, {}, "/ws?token=wrong") == 401); }
+    { WsClient w; CHECK (w.open (port, { "Host: rebind.example", "Origin: http://rebind.example", "Authorization: Bearer tok123" }) == 403); }
 
     WsClient ws;
     REQUIRE (ws.open (port, { "Origin: http://localhost:" + std::to_string (port), "Authorization: Bearer tok123" }) == 101);
@@ -835,14 +836,14 @@ ROVOX_TEST (web, websocket_auth_origin_snapshot_events_and_audio)
     CHECK (event["origin"]["kind"] == "ui");
     CHECK (event["origin"]["session"] == session);
 
-    // a change made over HTTP as an MCP agent arrives with that origin
+    // a change made over HTTP arrives as an agent: the body cannot claim to be the UI or pick a label
     c.Post ("/api/projects/" + projectId + "/commands", bearer,
             json { { "name", "track.update" }, { "params", { { "track_id", trackId }, { "name", "Agent was here" } } },
-                   { "origin", { { "kind", "mcp" }, { "session", "mcp_9" }, { "label", "Claude" } } } }.dump(), "application/json");
+                   { "origin", { { "kind", "ui" }, { "session", "ws_1" }, { "label", "Claude" } } } }.dump(), "application/json");
     json agentEvent;
     REQUIRE (ws.waitFor ("event", agentEvent));
     CHECK (agentEvent["origin"]["kind"] == "mcp");
-    CHECK (agentEvent["origin"]["label"] == "Claude");
+    CHECK (agentEvent["origin"]["label"] == "http");
 
     // audio: play, receive Opus packets, 0x03 positions and 0x02 meters
     ws.sendText (R"({"t":"audio","on":true})");

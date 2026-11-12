@@ -351,3 +351,121 @@ ROVOX_TEST (upload, command_layer_over_http_with_a_running_message_loop)
     CHECK (revision >= 1);
     CHECK (f.env.run (projectId, "history.list").data["undo"][0]["origin"]["kind"] == "ui");
 }
+
+//==============================================================================
+// E10 hardening: origin/host guard, content type, body limits, auth counting, Upload-Length, hashing outside the lock
+
+ROVOX_TEST (upload, foreign_origin_foreign_host_and_non_json_posts_are_refused_without_a_token)
+{
+    Fixture f;
+    const std::string body = R"({"name":"x"})";
+
+    CHECK (f.client->Post ("/api/projects", httplib::Headers { { "Origin", "http://evil.example" } }, body, "application/json")->status == 403);
+    CHECK (f.client->Get ("/api/projects", httplib::Headers { { "Origin", "http://evil.example" } })->status == 403);
+
+    // DNS rebinding: the page's own origin equals the Host, but the server is bound to loopback
+    CHECK (f.client->Get ("/api/projects", httplib::Headers { { "Host", "rebind.example" }, { "Origin", "http://rebind.example" } })->status == 403);
+    CHECK (f.client->Get ("/api/projects", httplib::Headers { { "Host", "rebind.example" } })->status == 403);
+
+    // a "simple" cross-origin POST never reaches the JSON handlers
+    CHECK (f.client->Post ("/api/projects", body, "text/plain")->status == 415);
+    CHECK (f.client->Post ("/api/projects", body, "application/x-www-form-urlencoded")->status == 415);
+
+    // tus routes keep their own types
+    httplib::Headers h { { "Tus-Resumable", "1.0.0" }, { "Upload-Length", "10" } };
+    CHECK (f.client->Post ("/api/uploads", h, "", "")->status == 201);
+}
+
+ROVOX_TEST (upload, request_bodies_are_capped_except_on_upload_routes)
+{
+    ServerOptions so;
+    so.maxBodyBytes = 1024;
+    Fixture f (so);
+
+    auto big = f.client->Post ("/api/login", std::string (4096, 'a'), "application/json");
+    REQUIRE (big != nullptr);
+    CHECK (big->status == 413);
+
+    // uploads stream without the global cap
+    const auto data = patternData (4096, 3);
+    const auto loc = tusCreate (*f.client, data.size(), "ok.bin");
+    CHECK (f.client->Patch (loc, httplib::Headers { { "Upload-Offset", "0" } }, data, "application/offset+octet-stream")->status == 204);
+}
+
+ROVOX_TEST (upload, patch_past_upload_length_is_413_and_nothing_extra_is_written)
+{
+    Fixture f;
+    const auto loc = tusCreate (*f.client, 10, "short.bin");
+    auto r = f.client->Patch (loc, httplib::Headers { { "Upload-Offset", "0" } }, patternData (64, 5), "application/offset+octet-stream");
+    REQUIRE (r != nullptr);
+    CHECK (r->status == 413);
+
+    auto head = f.client->Get (loc);
+    REQUIRE (head != nullptr);
+    CHECK (head->get_header_value ("Upload-Offset") == "0");
+
+    // the writer itself refuses to pass the length
+    const auto id = loc.substr (loc.rfind ('/') + 1);
+    auto w = f.server->uploads().openWriter (id, 0);
+    REQUIRE (w.ok());
+    CHECK (w.value()->write ("0123456789", 10));
+    CHECK (! w.value()->write ("x", 1));
+    CHECK (w.value()->overflowed());
+    CHECK (fs::file_size (f.server->uploads().partPath (id)) == 10);
+}
+
+ROVOX_TEST (upload, wrong_query_tokens_count_and_a_right_login_is_never_locked_out)
+{
+    ServerOptions so;
+    so.token = "tok-right";
+    Fixture f (so);
+
+    for (int i = 0; i < 14; ++i)
+        f.client->Get ("/?token=wrong" + std::to_string (i));
+
+    auto guess = f.client->Post ("/api/login", R"({"token":"guess"})", "application/json");
+    REQUIRE (guess != nullptr);
+    CHECK (guess->status == 429);
+
+    auto right = f.client->Post ("/api/login", R"({"token":"tok-right"})", "application/json");
+    REQUIRE (right != nullptr);
+    CHECK (right->status == 200);
+    CHECK (right->get_header_value ("Set-Cookie").find ("rovox_token=tok-right") != std::string::npos);
+}
+
+ROVOX_TEST (upload, hashing_a_finished_upload_does_not_block_other_uploads)
+{
+    Fixture f;
+    const size_t total = 192u << 20;
+    const std::string chunk = patternData (1u << 20, 9);
+    Sha256 sha;
+
+    for (size_t i = 0; i < total / chunk.size(); ++i)
+        sha.update (chunk.data(), chunk.size());
+
+    auto info = f.server->uploads().create (total, { { "filename", "huge.bin" }, { "sha256", sha.hexDigest() } });
+    auto other = f.server->uploads().create (10, { { "filename", "small.bin" } });
+    REQUIRE (info.ok());
+    REQUIRE (other.ok());
+
+    auto w = f.server->uploads().openWriter (info.value().id, 0);
+    REQUIRE (w.ok());
+
+    for (size_t i = 0; i < total / chunk.size(); ++i)
+        REQUIRE (w.value()->write (chunk.data(), chunk.size()));
+
+    std::atomic<bool> finishing { true };
+    std::thread finisher ([&]
+    {
+        auto done = f.server->uploads().finishPatch (*w.value());
+        CHECK (done.ok());
+        finishing = false;
+    });
+
+    std::this_thread::sleep_for (std::chrono::milliseconds (30));
+    auto seen = f.server->uploads().info (other.value().id);
+    const bool stillHashing = finishing.load();
+    CHECK (seen.ok());
+    CHECK (stillHashing);               // the answer came while the big upload was being hashed
+    finisher.join();
+}

@@ -34,6 +34,7 @@ struct ServerOptions
     fs::path webDir;                    // the built web UI (index.html + assets); empty or missing = API only
     std::string sourceUrl = "https://github.com/rovox/rovox";   // AGPL section 13: GET /source
     std::vector<std::string> allowedOrigins;
+    size_t maxBodyBytes = 8u << 20;     // request bodies of everything but the upload routes (declared Content-Length; chunked bodies are refused there)
 };
 
 class HttpServer

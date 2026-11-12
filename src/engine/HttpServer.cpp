@@ -6,13 +6,17 @@
 #include "Gateway.h"
 #include "Ids.h"
 #include "Peaks.h"
+#include "RequestGuard.h"
 #include "Sha1.h"
 #include "Sha256.h"
 #include "Version.h"
 
 #include <httplib.h>
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
+#include <limits>
 
 #include <unistd.h>
 
@@ -96,7 +100,14 @@ HttpServer::HttpServer (EngineHost& host, ProjectManager& pm, CommandBus& bus, E
     uploads_ = std::make_unique<UploadStore> (host_.dataDir() / "uploads", options_.uploadLimits, std::move (listener));
     server_ = makeServerWithUpgrade ([this] (int fd, WsRequest req)
     {
-        if (auto* g = gateway_.load())
+        const auto header = [&req] (const char* name) { auto it = req.headers.find (name); return it == req.headers.end() ? std::string() : it->second; };
+
+        if (! guard::requestAllowed (guard::isLoopbackBind (options_.bind), header ("origin"), header ("host"), options_.allowedOrigins))
+        {
+            wsSendHttp (fd, 403, "Forbidden", "Origin or Host not allowed");
+            ::close (fd);
+        }
+        else if (auto* g = gateway_.load())
         {
             g->handleUpgrade (fd, std::move (req));
         }
@@ -173,7 +184,7 @@ void HttpServer::stop()
 void HttpServer::installRoutes()
 {
     auto& svr = *server_;
-    svr.set_payload_max_length (std::numeric_limits<size_t>::max());      // uploads are streamed; the per-file limit is enforced by the UploadStore
+    svr.set_payload_max_length (std::numeric_limits<size_t>::max());      // uploads are streamed (per-file limit: UploadStore); every other route is capped in the pre-routing handler, before the body is read
     svr.set_read_timeout (60, 0);
     svr.set_keep_alive_max_count (200);
 
@@ -183,7 +194,50 @@ void HttpServer::installRoutes()
 
     svr.set_pre_routing_handler ([this] (const httplib::Request& req, httplib::Response& res)
     {
-        if (options_.token.empty() || req.method == "OPTIONS" || req.path == "/healthz")
+        const auto deny = [&res] (int status, const char* code, const char* message)
+        {
+            reply (res, status, { { "ok", false }, { "error", { { "code", code }, { "message", message } } } });
+            return httplib::Server::HandlerResponse::Handled;
+        };
+
+        if (req.method == "OPTIONS" || req.path == "/healthz")
+            return httplib::Server::HandlerResponse::Unhandled;
+
+        const bool uploadPath = req.path.rfind ("/api/uploads", 0) == 0;
+        const bool apiPath = req.path.rfind ("/api/", 0) == 0;
+
+        // bodies are bounded before anything reads them (login is public); only uploads stream without a cap
+        if (! uploadPath)
+        {
+            const auto length = req.get_header_value ("Content-Length");
+            const bool chunked = req.get_header_value ("Transfer-Encoding").find ("chunked") != std::string::npos;
+            unsigned long long declared = 0;
+
+            try { declared = length.empty() ? 0 : std::stoull (length); }
+            catch (...) { declared = std::numeric_limits<unsigned long long>::max(); }
+
+            if (chunked || declared > options_.maxBodyBytes)
+                return deny (413, "PAYLOAD_TOO_LARGE", "request body is too large");
+        }
+
+        if (apiPath)
+        {
+            // CSRF and DNS rebinding: always, also without a token. Non-browser clients send no Origin.
+            if (! guard::requestAllowed (guard::isLoopbackBind (options_.bind), req.get_header_value ("Origin"), req.get_header_value ("Host"), options_.allowedOrigins))
+                return deny (403, "FORBIDDEN_ORIGIN", "Origin or Host not allowed");
+
+            // a "simple" cross-origin POST (text/plain, form) must not reach the JSON handlers
+            if (! uploadPath && (req.method == "POST" || req.method == "PUT" || req.method == "PATCH"))
+            {
+                auto type = req.get_header_value ("Content-Type");
+                std::transform (type.begin(), type.end(), type.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
+
+                if (type.rfind ("application/json", 0) != 0)
+                    return deny (415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
+            }
+        }
+
+        if (options_.token.empty())
             return httplib::Server::HandlerResponse::Unhandled;
 
         const auto auth = req.get_header_value ("Authorization");
@@ -201,19 +255,15 @@ void HttpServer::installRoutes()
 
         const bool protectedPath = req.path.rfind ("/api/", 0) == 0 || req.path == "/mcp" || req.path.rfind ("/mcp/", 0) == 0;
 
+        // a wrong ?token= counts like a wrong header or cookie, also on the page URL
+        if (! viaHeaderOrCookie && ! viaParam && req.has_param ("token") && ! protectedPath)
+            noteAuthFailure();
+
         if (! protectedPath || req.path == "/api/login" || req.path == "/api/session")
             return httplib::Server::HandlerResponse::Unhandled;     // the static shell and the login endpoint are public
 
         if (viaHeaderOrCookie || viaParam)
         {
-            // a cookie is ambient authority: state-changing requests must come from the page itself
-            if (req.method != "GET" && req.method != "HEAD" && viaHeaderOrCookie && auth.empty() && req.has_header ("Origin")
-                && ! Gateway::originAllowed (req.get_header_value ("Origin"), req.get_header_value ("Host"), options_.allowedOrigins))
-            {
-                reply (res, 403, { { "ok", false }, { "error", { { "code", "FORBIDDEN_ORIGIN" }, { "message", "Origin not allowed" } } } });
-                return httplib::Server::HandlerResponse::Handled;
-            }
-
             return httplib::Server::HandlerResponse::Unhandled;
         }
 
@@ -224,7 +274,7 @@ void HttpServer::installRoutes()
             return httplib::Server::HandlerResponse::Handled;
         }
 
-        if (! req.get_header_value ("Authorization").empty() || ! req.get_header_value ("Cookie").empty())
+        if (! req.get_header_value ("Authorization").empty() || ! req.get_header_value ("Cookie").empty() || req.has_param ("token"))
             noteAuthFailure();
 
         reply (res, 401, { { "ok", false }, { "error", { { "code", "UNAUTHORIZED" }, { "message", "missing or wrong token" } } } });
@@ -237,14 +287,15 @@ void HttpServer::installRoutes()
         const auto body = json::parse (req.body.empty() ? "{}" : req.body, nullptr, false);
         const auto given = body.is_object() && body.contains ("token") && body["token"].is_string() ? body["token"].get<std::string>() : std::string();
 
-        if (! options_.token.empty() && tooManyAuthFailures())
-        {
-            res.set_header ("Retry-After", "30");
-            return reply (res, 429, { { "ok", false }, { "error", { { "code", "RATE_LIMITED" }, { "message", "too many wrong tokens, try again in a minute" } } } });
-        }
-
+        // the token is checked first: a right token always logs in, even while wrong guesses are being rate limited
         if (! options_.token.empty() && ! Gateway::tokenMatches (options_.token, "Bearer " + given, "", ""))
         {
+            if (tooManyAuthFailures())
+            {
+                res.set_header ("Retry-After", "30");
+                return reply (res, 429, { { "ok", false }, { "error", { { "code", "RATE_LIMITED" }, { "message", "too many wrong tokens, try again in a minute" } } } });
+            }
+
             noteAuthFailure();
             return reply (res, 401, { { "ok", false }, { "error", { { "code", "UNAUTHORIZED" }, { "message", "wrong token" } } } });
         }
@@ -350,19 +401,12 @@ void HttpServer::installRoutes()
         reply (res, result.ok ? 200 : (result.error ? statusFor (result.error->code) : 500), result.toJson());
     };
 
+    // the origin comes from the route (REST = an agent over HTTP), never from the body: a client must not pass its edits off as the UI's
     auto contextFrom = [] (const json& body, const std::string& project)
     {
         CommandContext ctx;
         ctx.projectId = project;
         ctx.origin = { Origin::Kind::mcp, "http", "http" };
-
-        if (body.contains ("origin") && body["origin"].is_object())
-        {
-            const auto kind = body["origin"].value ("kind", "mcp");
-            ctx.origin.kind = kind == "ui" ? Origin::Kind::ui : (kind == "skill" ? Origin::Kind::skill : Origin::Kind::mcp);
-            ctx.origin.session = body["origin"].value ("session", "http");
-            ctx.origin.label = body["origin"].value ("label", "http");
-        }
 
         if (body.contains ("if_revision") && body["if_revision"].is_number_unsigned())
             ctx.ifRevision = body["if_revision"].get<std::uint64_t>();
@@ -434,14 +478,18 @@ void HttpServer::installRoutes()
             const auto size = fs::file_size (file);
             const auto ext = file.extension().string();
             const std::string mime = ext == ".mp3" ? "audio/mpeg" : (ext == ".flac" ? "audio/flac" : (ext == ".wav" ? "audio/wav" : "application/octet-stream"));
-            res.set_content_provider (size, mime, [file] (size_t offset, size_t length, httplib::DataSink& sink)
+            auto stream = std::make_shared<std::ifstream> (std::move (in));
+            res.set_content_provider (size, mime, [stream] (size_t offset, size_t length, httplib::DataSink& sink)
             {
-                std::ifstream f (file, std::ios::binary);
-                f.seekg ((std::streamoff) offset);
+                stream->clear();
+                stream->seekg ((std::streamoff) offset);
                 std::string buf (std::min<size_t> (length, 1 << 20), '\0');
-                f.read (buf.data(), (std::streamsize) buf.size());
-                sink.write (buf.data(), (size_t) f.gcount());
-                return true;
+                stream->read (buf.data(), (std::streamsize) buf.size());
+
+                if (stream->gcount() <= 0)
+                    return false;       // the file got shorter while it was served: close instead of looping forever
+
+                return sink.write (buf.data(), (size_t) stream->gcount());
             });
         });
     }
@@ -552,6 +600,14 @@ void HttpServer::installRoutes()
         if (! ioOk)
         {
             writer.value()->rollback();
+
+            if (writer.value()->overflowed())
+            {
+                res.set_header ("Connection", "close");     // the rest of the body is not read
+                res.status = 413;
+                return;
+            }
+
             res.status = 500;
             return;
         }

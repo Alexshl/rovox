@@ -187,6 +187,14 @@ UploadStore::Writer::~Writer()
 
 bool UploadStore::Writer::write (const char* data, size_t size)
 {
+    const auto remaining = length_ > start_ + written_ ? length_ - (start_ + written_) : 0;
+
+    if ((std::uint64_t) size > remaining)
+    {
+        overflow_ = true;           // nothing of this chunk reaches the disk
+        return false;
+    }
+
     size_t off = 0;
 
     while (off < size)
@@ -239,6 +247,7 @@ Result<std::unique_ptr<UploadStore::Writer>> UploadStore::openWriter (const std:
         return makeError (errc::io, "cannot open the upload file");
 
     w->start_ = u.value().offset;
+    w->length_ = u.value().length;
     w->id_ = id;
     w->store_ = this;
     patching_.insert (id);
@@ -250,10 +259,39 @@ Result<UploadInfo> UploadStore::finishPatch (Writer& w)
     UploadInfo done;
     bool completed = false;
     std::string batchDone;
+    bool mismatch = false;
+    std::string actualHash;
+
+    ::fsync (w.fd_);                // outside mutex_: patching_ keeps this upload exclusive, other uploads must stay responsive
+    std::string expectedHash;
+    bool needHash = false;
 
     {
         std::lock_guard<std::mutex> lock (mutex_);
-        ::fsync (w.fd_);
+        auto u = load (w.id_);
+
+        if (! u.ok())
+            return u.error();
+
+        if (u.value().offset > u.value().length)
+        {
+            w.rollback();
+            return makeError (errc::invalidParams, "more data than Upload-Length");
+        }
+
+        needHash = u.value().offset == u.value().length && ! u.value().sha256.empty();
+        expectedHash = u.value().sha256;
+    }
+
+    if (needHash)
+    {
+        const auto actual = sha256File (partPath (w.id_));
+        actualHash = actual.value_or ("");
+        mismatch = actual != expectedHash;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
         auto u = load (w.id_);
 
         if (! u.ok())
@@ -261,23 +299,12 @@ Result<UploadInfo> UploadStore::finishPatch (Writer& w)
 
         auto info = u.value();
 
-        if (info.offset > info.length)
-        {
-            w.rollback();
-            return makeError (errc::invalidParams, "more data than Upload-Length");
-        }
-
         if (info.offset == info.length)
         {
-            if (! info.sha256.empty())
+            if (mismatch)
             {
-                const auto actual = sha256File (partPath (w.id_));
-
-                if (actual != info.sha256)
-                {
-                    return makeError (errc::invalidParams, "the full-file SHA-256 does not match the one announced at creation",
-                                      json { { "expected", info.sha256 }, { "actual", actual.value_or ("") } });
-                }
+                return makeError (errc::invalidParams, "the full-file SHA-256 does not match the one announced at creation",
+                                  json { { "expected", expectedHash }, { "actual", actualHash } });
             }
 
             std::error_code ec;
