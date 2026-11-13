@@ -6,9 +6,11 @@
 // commands (track.create, fx.add, routing.send_create, item.create_midi) inside one undo step, so every rule of those commands holds.
 #include "Command.h"
 
+#include "InstrumentPacks.h"
 #include "PluginHost.h"
 #include "ProjectFormat.h"
 #include "ProjectManager.h"
+#include "Sf2Plugin.h"
 
 #include <algorithm>
 #include <fstream>
@@ -90,6 +92,25 @@ fs::path templatesDir (EngineHost& host, const std::string& tenant)
     return tenant == "local" ? host.dataDir() / "templates" : host.dataDir() / "tenants" / tenant / "templates";
 }
 
+/** An instrument of the shipped General MIDI pack (rovox:sf2) by bank and program. */
+json sf2Instrument (int bank, int program)
+{
+    return { { "plugin_uid", sf2PresetUid (InstrumentPacks::builtinId, bank, program) } };
+}
+
+/** A soloist (`soloist: true`, muted for the minus-one mix) over piano, bass and drums. */
+json accompanimentTemplate (const std::string& id, const std::string& name, const std::string& description, int soloProgram, const std::string& soloName, double bpm)
+{
+    return { { "id", id }, { "name", name }, { "version", 1 }, { "builtin", true }, { "description", description },
+             { "tags", { "midi", "instruments", "accompaniment" } }, { "tempo", { { "bpm", bpm } } },
+             { "tracks", json::array ({
+                 { { "role", "soloist" }, { "name", soloName }, { "soloist", true }, { "volume_db", -3.0 }, { "pan", 0.0 }, { "instrument", sf2Instrument (0, soloProgram) }, { "fx", json::array() }, { "sends", json::array() } },
+                 { { "role", "chords" }, { "name", "Piano" }, { "volume_db", -8.0 }, { "pan", -0.15 }, { "instrument", sf2Instrument (0, 0) }, { "fx", json::array() }, { "sends", json::array() } },
+                 { { "role", "bass" }, { "name", "Bass" }, { "volume_db", -6.0 }, { "pan", 0.0 }, { "instrument", sf2Instrument (0, 32) }, { "fx", json::array() }, { "sends", json::array() } },
+                 { { "role", "drums" }, { "name", "Drums" }, { "volume_db", -8.0 }, { "pan", 0.0 }, { "instrument", { { "plugin_uid", "rovox:drums" } } }, { "fx", json::array() }, { "sends", json::array() } } }) },
+             { "master", { { "volume_db", 0.0 }, { "fx", json::array() } } } };
+}
+
 json builtinTemplates()
 {
     return json::array ({
@@ -116,6 +137,18 @@ json builtinTemplates()
               { { "role", "keys" }, { "name", "Keys" }, { "volume_db", -8.0 }, { "pan", 0.2 }, { "instrument", { { "kind", "instrument" }, { "query", "organ" } } }, { "fx", json::array() },
                 { "sends", json::array ({ { { "to_role", "reverb" }, { "gain_db", -10.0 } } }) } },
               { { "role", "reverb" }, { "name", "Reverb" }, { "volume_db", 0.0 }, { "pan", 0.0 }, { "fx", json::array ({ { { "builtin", "reverb" } } }) }, { "sends", json::array() } } }) },
+          { "master", { { "volume_db", 0.0 }, { "fx", json::array() } } } },
+
+        accompanimentTemplate ("flute-piano", "Flute and piano", "A flute soloist over piano, bass (General MIDI presets of the built-in pack) and the Rovox drum kit. The soloist track is muted for the minus-one mix.",
+                               73, "flute", 100.0),
+        accompanimentTemplate ("sax-combo", "Sax combo", "A tenor sax soloist over piano, bass (General MIDI presets of the built-in pack) and the Rovox drum kit. The soloist track is muted for the minus-one mix.",
+                               66, "sax", 100.0),
+
+        { { "id", "ear-training" }, { "name", "Ear training" }, { "version", 1 }, { "builtin", true },
+          { "description", "One piano track (the soloist) for interval, chord and melody exercises, on a General MIDI preset of the built-in pack." },
+          { "tags", { "midi", "instruments", "ear-training" } }, { "tempo", { { "bpm", 80.0 } } },
+          { "tracks", json::array ({
+              { { "role", "soloist" }, { "name", "Piano" }, { "soloist", true }, { "volume_db", -3.0 }, { "pan", 0.0 }, { "instrument", sf2Instrument (0, 0) }, { "fx", json::array() }, { "sends", json::array() } } }) },
           { "master", { { "volume_db", 0.0 }, { "fx", json::array() } } } } });
 }
 
@@ -526,7 +559,7 @@ void registerTemplateCommands (CommandRegistry& r)
                     if (auto e = applyFx (trackId, f, plugins))
                         return *e;
 
-                created.push_back ({ { "role", tr.value ("role", "") }, { "track_id", trackId }, { "plugins", plugins } });
+                created.push_back ({ { "role", tr.value ("role", "") }, { "track_id", trackId }, { "plugins", plugins }, { "soloist", tr.value ("soloist", false) } });
             }
 
             // 3. sends (all tracks exist now)
@@ -600,6 +633,70 @@ void registerTemplateCommands (CommandRegistry& r)
             p.edit().state.setProperty (templateId, toJuce ((*t)["id"].get<std::string>() + "@" + std::to_string ((*t).value ("version", 1))), &p.edit().getUndoManager());
 
             return json { { "template", { { "id", (*t)["id"] }, { "version", (*t).value ("version", 1) } } }, { "tracks", created }, { "master_plugins", masterPlugins }, { "items", items } };
+        }));
+
+    // the new-mode of template.apply: a fresh project (optionally ephemeral with a TTL) with the template applied in one undo step
+    r.add (makeGlobalCommand ("template.new",
+        obj ({ { "template_id", strMin (1) }, { "name", str() }, { "ephemeral", boolean() }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 2592000 } } },
+               { "sample_rate", { { "type", "number" }, { "minimum", 8000 }, { "maximum", 192000 } } }, { "bindings", anyObject() } }, { "template_id" }),
+        anyObject(), true,
+        [&r] (ProjectManager& pm, const json& params, const CommandContext& ctx) -> Result<json>
+        {
+            const auto templateId = params["template_id"].get<std::string>();
+
+            if (! loadTemplate (pm.host(), ctx.tenant, templateId))
+                return makeError (errc::notFound, "no template " + templateId);
+
+            json newArgs;
+
+            for (auto key : { "name", "ephemeral", "ttl_s", "sample_rate" })
+                if (params.contains (key))
+                    newArgs[key] = params[key];
+
+            if (! newArgs.contains ("name"))
+                newArgs["name"] = templateId;
+
+            auto created = r.find ("project.new")->executeGlobal (pm, newArgs, ctx);
+
+            if (! created.ok())
+                return created.error();
+
+            const auto projectId = created.value()["project_id"].get<std::string>();
+            auto* project = pm.find (projectId, ctx.tenant);
+
+            if (project == nullptr)
+                return makeError (errc::internal, "the new project is not open");
+
+            auto ctxProject = ctx;
+            ctxProject.projectId = projectId;
+            auto& undo = project->edit().getUndoManager();
+            const std::string label = "template.new " + templateId;
+            undo.beginNewTransaction (toJuce (label));
+            project->collector().beginScope();
+            auto applied = r.find ("template.apply")->execute (*project, json { { "template_id", templateId }, { "bindings", params.value ("bindings", json::object()) } }, ctxProject);
+
+            if (! applied.ok())
+                undo.undoCurrentTransactionOnly();
+
+            auto changes = project->collector().endScope();
+
+            if (! applied.ok())
+            {
+                auto error = applied.error();
+                pm.remove (projectId, ctx.tenant);      // nothing of a half-made project is left behind
+                return error;
+            }
+
+            if (! changes.empty())
+            {
+                const auto revision = project->commit (ctx.origin, label, std::move (changes));
+                project->undoSteps().push_back ({ revision, label, nowIso8601(), ctx.origin });
+                project->redoSteps().clear();
+            }
+
+            auto out = std::move (applied.value());
+            out["project_id"] = projectId;
+            return out;
         }));
 }
 

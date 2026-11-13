@@ -1452,9 +1452,19 @@ Result<json> renderEdit (te::Edit& edit, const RenderContext& ctx, const RenderR
                                    + "|" + std::to_string (sr) + "|" + req.seed.value_or ("");
     inputHash.update (requestKey.data(), requestKey.size());
 
+    // the template the project was made from, written by template.apply as "<id>@<version>"
+    json templateMeta = nullptr;
+    {
+        const auto applied = toStd (edit.state.getProperty (juce::Identifier ("rovox:template")).toString());
+        const auto at = applied.rfind ('@');
+
+        if (at != std::string::npos && at > 0 && at + 1 < applied.size())
+            templateMeta = { { "id", applied.substr (0, at) }, { "version", std::atoi (applied.c_str() + at + 1) } };
+    }
+
     json meta { { "engine", { { "rovox", rovoxVersion() }, { "tracktion", tracktionVersion() }, { "juce", toStd (juce::SystemStats::getJUCEVersion()) } } },
                 { "source_revision", ctx.sourceRevision }, { "input_hash", inputHash.hexDigest() }, { "seed", req.seed ? json (*req.seed) : json (nullptr) },
-                { "instrument_packs", packs }, { "plugins", plugins }, { "range_s", { range.value().getStart().inSeconds(), range.value().getEnd().inSeconds() } } };
+                { "instrument_packs", packs }, { "template", templateMeta }, { "plugins", plugins }, { "range_s", { range.value().getStart().inSeconds(), range.value().getEnd().inSeconds() } } };
 
     for (auto& f : files)
     {
