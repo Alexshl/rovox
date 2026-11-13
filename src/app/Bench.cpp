@@ -6,6 +6,8 @@
 //   s2: s1 + synth (FourOsc) track with MIDI + 2 reverb tracks
 //   s3: 32 tracks x 3 fx (EQ + compressor + reverb)
 //   s4: 3 x s1 open; one plays in real time while two render offline concurrently
+//   s5: 16 tracks of 44.1 kHz media in a 48 kHz project, real-time playback; clip resampling quality from ROVOX_BENCH_RESAMPLING
+//       (sincBest | sincMedium | sincFast | lagrange; default sincBest)
 
 #include "Bench.h"
 
@@ -15,7 +17,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
+#include <optional>
+#include <string>
 #include <thread>
 
 #include <sys/resource.h>
@@ -31,6 +36,9 @@ namespace
 constexpr double kRate = 44100.0;
 constexpr int kBlock = 512;
 
+// Device / project rate; differs from kRate (the rate of the generated media) only in s5.
+double gDeviceRate = kRate;
+
 struct Scenario
 {
     std::string name;
@@ -39,6 +47,7 @@ struct Scenario
     int reverbTracks = 0;
     int projects = 1;
     double seconds = 20.0;
+    std::optional<te::ResamplingQuality> quality;
 };
 
 double nowMs()
@@ -157,9 +166,14 @@ std::unique_ptr<te::Edit> buildEdit (te::Engine& engine, const juce::File& dir, 
     for (int t = 0; t < sc.tracks; ++t)
     {
         for (int c = 0; c < sc.clips; ++c)
-            te::insertWaveClip (*tracks[(size_t) t], {}, src,
-                                { .time = { te::TimePosition::fromSeconds (c * clipLen), te::TimeDuration::fromSeconds (clipLen) } },
-                                te::DeleteExistingClips::no);
+        {
+            auto clip = te::insertWaveClip (*tracks[(size_t) t], {}, src,
+                                            { .time = { te::TimePosition::fromSeconds (c * clipLen), te::TimeDuration::fromSeconds (clipLen) } },
+                                            te::DeleteExistingClips::no);
+
+            if (clip != nullptr && sc.quality.has_value())
+                clip->state.setProperty (te::IDs::resamplingQuality, juce::VariantConverter<te::ResamplingQuality>::toVar (*sc.quality), nullptr);
+        }
 
         for (int k = 0; k < sc.fx; ++k)
             addPlugin (*edit, tracks[(size_t) t]->pluginList, fxTypes[k % 3], k);
@@ -199,7 +213,7 @@ te::Renderer::Parameters makeRenderParams (te::Edit& edit, const juce::File& des
     p.audioFormat = edit.engine.getAudioFileFormatManager().getWavFormat();
     p.bitDepth = 24;
     p.blockSizeForAudio = kBlock;
-    p.sampleRateForAudio = kRate;
+    p.sampleRateForAudio = gDeviceRate;
     p.time = { te::TimePosition::fromSeconds (0.0), te::TimeDuration::fromSeconds (seconds) };
     p.canRenderInMono = false;
     return p;
@@ -249,12 +263,12 @@ RtResult playRealtime (te::Engine& engine, te::Edit& edit, double seconds, int* 
     std::thread audio ([&]
     {
         using clock = std::chrono::steady_clock;
-        const auto period = std::chrono::nanoseconds ((long long) (1.0e9 * kBlock / kRate));
+        const auto period = std::chrono::nanoseconds ((long long) (1.0e9 * kBlock / gDeviceRate));
         r.periodUs = std::chrono::duration<double, std::micro> (period).count();
         juce::AudioBuffer<float> buf (2, kBlock);
         juce::MidiBuffer midi;
         auto next = clock::now();
-        times.reserve ((size_t) (seconds * kRate / kBlock) + 1024);
+        times.reserve ((size_t) (seconds * gDeviceRate / kBlock) + 1024);
 
         while (! stop)
         {
@@ -418,7 +432,8 @@ juce::var runScenario (te::Engine& engine, const juce::File& dir, const Scenario
     }
 
     return makeObject ({ { "scenario", juce::String (sc.name) }, { "tracks", sc.tracks }, { "clips_per_track", sc.clips }, { "fx_per_track", sc.fx },
-                         { "synth", sc.synth }, { "reverb_tracks", sc.reverbTracks }, { "projects_open", sc.projects },
+                         { "synth", sc.synth }, { "reverb_tracks", sc.reverbTracks }, { "device_rate_hz", gDeviceRate }, { "media_rate_hz", kRate },
+                         { "resampling_quality", sc.quality.has_value() ? juce::VariantConverter<te::ResamplingQuality>::toVar (*sc.quality) : juce::var ("default") }, { "projects_open", sc.projects },
                          { "build_ms", buildMs }, { "project_open_ms", openMs }, { "offline", offline }, { "realtime", rt },
                          { "rss_peak_mb", peakRssKb() / 1024.0 } });
 }
@@ -440,9 +455,30 @@ int runBench (const Options& o)
     else if (sc.name == "s2")   { sc.tracks = 8;  sc.fx = 2; sc.synth = true; sc.reverbTracks = 2; }
     else if (sc.name == "s3")   { sc.tracks = 32; sc.fx = 3; }
     else if (sc.name == "s4")   { sc.tracks = 8;  sc.fx = 2; sc.projects = 3; }
+    else if (sc.name == "s5")
+    {
+        sc.tracks = 16; sc.fx = 0;
+        gDeviceRate = 48000.0;
+        sc.quality = te::ResamplingQuality::sincBest;
+
+        if (const char* q = std::getenv ("ROVOX_BENCH_RESAMPLING"); q != nullptr && *q != 0)
+        {
+            const std::string name (q);
+
+            if (name == "sincBest")         sc.quality = te::ResamplingQuality::sincBest;
+            else if (name == "sincMedium")  sc.quality = te::ResamplingQuality::sincMedium;
+            else if (name == "sincFast")    sc.quality = te::ResamplingQuality::sincFast;
+            else if (name == "lagrange")    sc.quality = te::ResamplingQuality::lagrange;
+            else
+            {
+                std::cerr << "error: ROVOX_BENCH_RESAMPLING must be sincBest | sincMedium | sincFast | lagrange\n";
+                return 1;
+            }
+        }
+    }
     else
     {
-        std::cerr << "error: unknown scenario '" << sc.name << "' (s1 | s2 | s3 | s4)\n";
+        std::cerr << "error: unknown scenario '" << sc.name << "' (s1 | s2 | s3 | s4 | s5)\n";
         return 1;
     }
 
@@ -451,7 +487,7 @@ int runBench (const Options& o)
     EngineHost host (config);
 
     te::HostedAudioDeviceInterface::Parameters hp;
-    hp.sampleRate = kRate;
+    hp.sampleRate = gDeviceRate;
     hp.blockSize = kBlock;
     hp.inputChannels = 2;
     hp.outputChannels = 2;

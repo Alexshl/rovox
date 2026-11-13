@@ -168,7 +168,7 @@ int main (int argc, char** argv)
     renderChild->callback ([&] { std::exit (rovox::cli::runRenderChildCommand (o)); });
 
     auto* bench = app.add_subcommand ("bench", "Resource benchmark: open, offline render and real-time playback of a generated project");
-    bench->add_option ("--scenario", o.benchScenario, "s1 (8 tracks, EQ + compressor) | s2 (+ synth, reverbs) | s3 (32 tracks) | s4 (3 projects, 2 rendering while 1 plays)")
+    bench->add_option ("--scenario", o.benchScenario, "s1 (8 tracks, EQ + compressor) | s2 (+ synth, reverbs) | s3 (32 tracks) | s4 (3 projects, 2 rendering while 1 plays) | s5 (16 tracks 44.1 kHz in a 48 kHz project; ROVOX_BENCH_RESAMPLING)")
          ->check (CLI::IsMember ({ "s1", "s2", "s3", "s4" }))->capture_default_str();
     bench->add_option ("--seconds", o.benchSeconds, "Song length, and the length of the real-time playback")->capture_default_str();
     bench->add_flag ("--json", o.json, "Compact JSON only on stdout");
