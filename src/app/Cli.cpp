@@ -885,6 +885,7 @@ int runServe (const Options& o)
     mcpCfg.keyStore = &keys;
     mcpCfg.uploadBatchStatus = [&server] (const std::string& id, const std::string& tenant) { return server.uploads().batchStatus (id, tenant); };
     mcpCfg.uploadFinish = [&server] (const std::string& id, const std::string& tenant) { return server.uploads().finish (id, tenant); };
+    mcpCfg.uploads = &server.uploads();
     McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
     metricsJobs = &mcpStack.jobs;
     metricsGateway = &gateway;

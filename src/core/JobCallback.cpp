@@ -12,12 +12,7 @@
 
 #include <toml++/toml.h>
 
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
-
 #include <algorithm>
-#include <cstring>
 
 namespace rovox
 {
@@ -33,42 +28,6 @@ std::string lower (std::string s)
 {
     std::transform (s.begin(), s.end(), s.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
     return s;
-}
-
-bool privateV4 (const std::uint8_t* b)
-{
-    return b[0] == 0 || b[0] == 10 || b[0] == 127 || (b[0] == 169 && b[1] == 254) || (b[0] == 172 && (b[1] & 0xf0) == 16) || (b[0] == 192 && b[1] == 168)
-           || (b[0] == 100 && (b[1] & 0xc0) == 64) || (b[0] == 198 && (b[1] & 0xfe) == 18) || b[0] >= 224;
-}
-
-/** Every address the host resolves to (numeric strings). */
-std::vector<std::string> resolve (const std::string& host, int port)
-{
-    std::vector<std::string> out;
-    addrinfo hints {};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-
-    if (getaddrinfo (host.c_str(), std::to_string (port).c_str(), &hints, &res) != 0)
-        return out;
-
-    for (auto* a = res; a != nullptr; a = a->ai_next)
-    {
-        char buf[INET6_ADDRSTRLEN] = {};
-
-        if (a->ai_family == AF_INET)
-            inet_ntop (AF_INET, &reinterpret_cast<sockaddr_in*> (a->ai_addr)->sin_addr, buf, sizeof (buf));
-        else if (a->ai_family == AF_INET6)
-            inet_ntop (AF_INET6, &reinterpret_cast<sockaddr_in6*> (a->ai_addr)->sin6_addr, buf, sizeof (buf));
-        else
-            continue;
-
-        out.push_back (buf);
-    }
-
-    freeaddrinfo (res);
-    return out;
 }
 
 Error bad (const std::string& message, const std::string& path)
@@ -114,41 +73,6 @@ CallbackSettings CallbackSettings::load (const fs::path& tomlFile)
     return s;
 }
 
-bool isPrivateAddress (const std::string& ip)
-{
-    in_addr a4 {};
-
-    if (inet_pton (AF_INET, ip.c_str(), &a4) == 1)
-        return privateV4 (reinterpret_cast<const std::uint8_t*> (&a4));
-
-    in6_addr a6 {};
-
-    if (inet_pton (AF_INET6, ip.c_str(), &a6) != 1)
-        return true;        // not an address we can judge: treat as unsafe
-
-    const auto* b = a6.s6_addr;
-    static const std::uint8_t zeros[12] = {};
-
-    if (std::memcmp (b, zeros, 10) == 0 && b[10] == 0xff && b[11] == 0xff)          // ::ffff:a.b.c.d
-        return privateV4 (b + 12);
-
-    if (std::memcmp (b, zeros, 12) == 0)                                            // ::a.b.c.d (IPv4-compatible, deprecated), :: and ::1
-        return true;
-
-    static const std::uint8_t nat64[12] = { 0x00, 0x64, 0xff, 0x9b };
-
-    if (std::memcmp (b, nat64, 12) == 0)                                            // 64:ff9b::/96: the embedded IPv4 address decides
-        return privateV4 (b + 12);
-
-    if (b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && b[4] == 0x00 && b[5] == 0x01)        // 64:ff9b:1::/48 local-use NAT64
-        return true;
-
-    if (b[0] == 0x20 && b[1] == 0x02)                                               // 6to4 2002::/16: the embedded IPv4 address decides
-        return privateV4 (b + 2);
-
-    return (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) || (b[0] & 0xfe) == 0xfc || b[0] == 0xff;
-}
-
 Result<CallbackTarget> validateCallback (const json& callback, const CallbackSettings& settings, const HostResolver& resolver)
 {
     if (! callback.is_object() || ! callback.contains ("url") || ! callback["url"].is_string() || ! callback.contains ("secret_ref") || ! callback["secret_ref"].is_string())
@@ -177,7 +101,7 @@ Result<CallbackTarget> validateCallback (const json& callback, const CallbackSet
     if (std::find (settings.allowHosts.begin(), settings.allowHosts.end(), lower (host)) == settings.allowHosts.end())
         return bad ("the host of callback.url is not listed in [callbacks] allow_hosts of the server configuration", "/callback/url");
 
-    const auto addresses = resolver ? resolver (host, url.port) : resolve (host, url.port);
+    const auto addresses = resolver ? resolver (host, url.port) : resolveHost (host, url.port);
 
     if (addresses.empty())
         return bad ("the host of callback.url cannot be resolved", "/callback/url");

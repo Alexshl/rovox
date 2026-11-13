@@ -24,6 +24,7 @@
 namespace rovox
 {
 class KeyStore;
+class UploadStore;
 }
 
 namespace rovox::mcp
@@ -40,6 +41,8 @@ struct McpConfig
     int sessionTtlS = 1800;                 // idle HTTP sessions expire
     std::function<Result<json> (const std::string&, const std::string&)> uploadBatchStatus;   // (id, tenant); set by `serve`; enables upload.status
     std::function<Result<json> (const std::string&, const std::string&)> uploadFinish;   // (id, tenant); set by `serve`; enables upload.finish
+    UploadStore* uploads = nullptr;         // set by `serve`; enables upload.from_url (downloads into this store)
+    bool fetchAllowLoopback = false;        // test-only (never set from a request or a config file): upload.from_url may reach 127.0.0.0/8 and ::1
     std::function<bool()> audioActive;      // optional
     KeyStore* keyStore = nullptr;           // set by `serve` and `mcp`; enables key.* and tenant.* (admin tools, local operator only)
     std::string configFile;                 // TOML with [delivery.*] adapters; empty = $ROVOX_CONFIG, else <data>/config/rovox.toml
