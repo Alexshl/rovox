@@ -574,7 +574,9 @@ void registerTimeCommands (CommandRegistry& r)
     r.add (makeProjectCommand ("tempo.set",
         obj ({ { "points", { { "type", "array" }, { "minItems", 1 }, { "maxItems", 512 },
                              { "items", obj ({ { "bpm", { { "type", "number" }, { "minimum", 20 }, { "maximum", 400 } } }, { "bar", { { "type", "integer" }, { "minimum", 1 } } },
-                                               { "qn", numMin (0) } }, { "bpm" }) } } } }, { "points" }),
+                                               { "qn", numMin (0) } }, { "bpm" }) } } },
+               { "time_signature", obj ({ { "numerator", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 32 } } },
+                                          { "denominator", { { "type", "integer" }, { "enum", { 2, 4, 8, 16 } } } } }, { "numerator", "denominator" }) } }, { "points" }),
         anyObject(), true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
@@ -619,6 +621,11 @@ void registerTimeCommands (CommandRegistry& r)
 
             for (size_t i = 1; i < pts.size(); ++i)
                 ts.insertTempo (te::BeatPosition::fromBeats (pts[i].first), pts[i].second, 1.0f);
+
+            // the time signature at the start of the project (a signature change later in the piece is not supported here)
+            if (params.contains ("time_signature"))
+                if (auto* sig = ts.getTimeSig (0))
+                    sig->setStringTimeSig (juce::String (params["time_signature"]["numerator"].get<int>()) + "/" + juce::String (params["time_signature"]["denominator"].get<int>()));
 
             json out = json::array();
 

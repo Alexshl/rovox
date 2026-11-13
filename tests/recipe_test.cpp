@@ -5,6 +5,7 @@
 // recipes in the same registry as the JSON ones, errors that carry {step, code}, and steps that never have more rights than the caller.
 // Tenant ids are unique to this file (`rec_*`) because every test of the process shares one data directory.
 #include "Auth.h"
+#include "InstrumentPacks.h"
 #include "JobManager.h"
 #include "Mcp.h"
 #include "RenderJobs.h"
@@ -97,6 +98,42 @@ struct Harness
 json step (const std::string& tool, json arguments = json::object())
 {
     return { { "tool", tool }, { "arguments", std::move (arguments) } };
+}
+
+/** accompaniment.v1 needs the shipped General MIDI soundfont (the flute-piano template plays it); without it the test skips, ROVOX_REQUIRE_SF2=1 makes that a failure. */
+bool haveSoundfont()
+{
+    std::error_code ec;
+
+    if (fs::exists (InstrumentPacks::builtinSoundfont(), ec))
+        return true;
+
+    const bool require = std::getenv ("ROVOX_REQUIRE_SF2") != nullptr;
+    std::cerr << (require ? "    the image should have the General MIDI soundfont but it is missing\n" : "    skipped: no General MIDI soundfont installed\n");
+    CHECK (! require);
+    return false;
+}
+
+/** 8 bars of 3/4: a triad per bar, a bass note on the downbeat, a side-stick pulse and a melody note on beat 2 of every bar. */
+json waltzParts()
+{
+    json melody = json::array(), chords = json::array(), bass = json::array(), drums = json::array();
+
+    for (int bar = 0; bar < 8; ++bar)
+    {
+        const double at = bar * 3.0;
+        melody.push_back ({ { "pitch", 72 + (bar % 3) }, { "start_beats", at + 1.0 }, { "length_beats", 2.0 }, { "velocity", 90 } });
+
+        for (int pitch : { 57, 60, 64 })
+            chords.push_back ({ { "pitch", pitch }, { "start_beats", at }, { "length_beats", 3.0 }, { "velocity", 70 } });
+
+        bass.push_back ({ { "pitch", 45 }, { "start_beats", at }, { "length_beats", 1.0 }, { "velocity", 90 } });
+
+        for (int beat = 0; beat < 3; ++beat)
+            drums.push_back ({ { "pitch", beat == 0 ? 36 : 42 }, { "start_beats", at + beat }, { "length_beats", 0.25 }, { "velocity", beat == 0 ? 100 : 70 } });
+    }
+
+    return { { "melody", { { "notes", melody } } }, { "chords", { { "notes", chords } } }, { "bass", { { "notes", bass } } }, { "drums", { { "notes", drums } } } };
 }
 
 bool hasProject (Harness& h, const std::shared_ptr<mcp::Session>& s, const std::string& name)
@@ -269,4 +306,160 @@ ROVOX_TEST (recipe, steps_never_have_more_rights_than_the_caller)
 
     std::error_code ec;
     fs::remove_all (test::host().dataDir() / "tenants" / tenant, ec);
+}
+
+ROVOX_TEST (recipe, accompaniment_is_listed_with_its_params_schema)
+{
+    Harness h;
+    auto s = h.session();
+    auto got = h.tool (s, "recipe.get", { { "recipe_id", "accompaniment.v1" } });
+    REQUIRE (got["ok"] == true);
+    CHECK (got["data"]["recipe"]["procedural"] == true);
+    CHECK (got["data"]["recipe"]["params"]["required"].dump().find ("parts") != std::string::npos);
+    CHECK (got["data"]["recipe"]["params"]["properties"]["click"]["enum"].size() == 2);
+}
+
+ROVOX_TEST (recipe, accompaniment_without_chords_is_refused_before_anything_is_made)
+{
+    Harness h;
+    auto s = h.session();
+    const std::string name = "rec-acc-empty";
+
+    for (auto parts : { json::object(), json { { "chords", { { "notes", json::array() } } } }, json { { "melody", waltzParts()["melody"] } } })
+    {
+        auto r = h.tool (s, "recipe.run", { { "recipe_id", "accompaniment.v1" }, { "params", { { "name", name }, { "bpm", 90 }, { "time_signature", { { "numerator", 3 }, { "denominator", 4 } } }, { "parts", parts } } } });
+        CHECK (r["ok"] == false);
+        CHECK (r["error"]["code"] == "INVALID_PARAMS");
+    }
+
+    CHECK (! hasProject (h, s, "accompaniment " + name));
+    auto async = h.tool (s, "recipe.run", { { "recipe_id", "accompaniment.v1" }, { "async", true }, { "params", { { "bpm", 90 }, { "parts", json::object() } } } });
+    CHECK (async["ok"] == false);
+    CHECK (async["error"]["code"] == "INVALID_PARAMS");
+}
+
+ROVOX_TEST (recipe, accompaniment_makes_the_files_and_the_manifest_for_every_tempo_variant)
+{
+    if (! haveSoundfont())
+        return;
+
+    Harness h;
+    auto s = h.session();
+    auto r = h.tool (s, "recipe.run", { { "recipe_id", "accompaniment.v1" },
+                                        { "params", { { "name", "rec-acc-files" }, { "key", "A minor" }, { "bpm", 90 }, { "time_signature", { { "numerator", 3 }, { "denominator", 4 } } },
+                                                      { "tempo_variants_pct", { 100, 80 } }, { "parts", waltzParts() },
+                                                      { "outputs", { "minus_wav", "plus_wav", "click_wav", "midi" } } } } });
+    REQUIRE (r["ok"] == true);
+    const auto manifest = r["data"]["result"];
+
+    // one bar of 3/4 at 90 bpm: 3 x 60000 / 90 = 2000 ms; at 80 % (72 bpm) 2500 ms
+    CHECK (std::abs (manifest["intro_offset_ms"].get<double>() - 2000.0) <= 1.0);
+    REQUIRE (manifest["variants"].size() == 2);
+    CHECK (std::abs (manifest["variants"][0]["intro_offset_ms"].get<double>() - 2000.0) <= 1.0);
+    CHECK (std::abs (manifest["variants"][1]["intro_offset_ms"].get<double>() - 2500.0) <= 1.0);
+    CHECK (manifest["bars"] == 8);
+    CHECK (manifest["template"]["id"] == "flute-piano");
+    CHECK (manifest["instrument_packs"].size() >= 1);
+    CHECK (manifest["attributions"].size() == manifest["instrument_packs"].size());
+
+    // the beat grid: the count-in bar plus 8 bars, the first beat of the music right at the intro offset
+    const auto beats = manifest["variants"][0]["beats"];
+    REQUIRE (beats.size() == 27);
+    CHECK (beats[0]["t_ms"].get<double>() == 0.0);
+    CHECK (beats[0]["count_in"] == true);
+    CHECK (beats[3]["count_in"] == false);
+    CHECK (std::abs (beats[3]["t_ms"].get<double>() - 2000.0) <= 1.0);
+    CHECK (std::abs (manifest["variants"][1]["beats"][3]["t_ms"].get<double>() - 2500.0) <= 1.0);
+
+    for (auto& v : manifest["variants"])
+        for (auto* kind : { "minus_wav", "plus_wav", "click_wav" })
+        {
+            REQUIRE (v["files"].contains (kind));
+            CHECK (v["files"][kind]["url"].get<std::string>().size() > 0);
+            CHECK (v["files"][kind]["sha256"].get<std::string>().size() == 64);
+            CHECK (! v["files"][kind].contains ("abs_path"));
+        }
+
+    // 9 bars of 2 s (100 %) at least: the count-in is silence, not trimmed
+    CHECK (manifest["variants"][0]["files"]["minus_wav"]["duration_s"].get<double>() >= 18.0);
+    CHECK (manifest["variants"][1]["files"]["minus_wav"]["duration_s"].get<double>() >= 22.5);
+    CHECK (manifest["midi"].is_object());
+
+    // the steps ran as the recipe, and the project is ephemeral: it goes away by itself after ttl_s
+    const std::string project = manifest["ephemeral_project_id"];
+    auto listed = h.tool (s, "project.list", { { "include_ephemeral", true } });
+    bool ephemeral = false;
+
+    for (auto& p : listed["data"]["projects"])
+        if (p.value ("project_id", "") == project)
+            ephemeral = p.value ("ephemeral", false);
+
+    CHECK (ephemeral);
+    CHECK (h.tool (s, "project.activity", { { "project_id", project } })["data"].dump().find ("recipe:accompaniment.v1") != std::string::npos);
+    CHECK (h.tool (s, "project.delete", { { "project_id", project } })["ok"] == true);
+}
+
+ROVOX_TEST (recipe, accompaniment_two_runs_give_identical_wav_files)
+{
+    if (! haveSoundfont())
+        return;
+
+    Harness h;
+    auto s = h.session();
+    std::string sha[2], clickSha[2];
+
+    for (int i = 0; i < 2; ++i)
+    {
+        auto r = h.tool (s, "recipe.run", { { "recipe_id", "accompaniment.v1" },
+                                            { "params", { { "name", "rec-acc-same" }, { "bpm", 90 }, { "time_signature", { { "numerator", 3 }, { "denominator", 4 } } }, { "seed", 7 },
+                                                          { "parts", waltzParts() }, { "outputs", { "minus_wav", "click_wav" } } } } });
+        REQUIRE (r["ok"] == true);
+        const auto files = r["data"]["result"]["variants"][0]["files"];
+        sha[i] = files["minus_wav"]["sha256"];
+        clickSha[i] = files["click_wav"]["sha256"];
+        CHECK (sha[i].size() == 64);
+        CHECK (h.tool (s, "project.delete", { { "project_id", r["data"]["result"]["ephemeral_project_id"] } })["ok"] == true);
+    }
+
+    CHECK (sha[0] == sha[1]);
+    CHECK (clickSha[0] == clickSha[1]);
+}
+
+ROVOX_TEST (recipe, accompaniment_embedded_click_makes_no_click_file)
+{
+    if (! haveSoundfont())
+        return;
+
+    Harness h;
+    auto s = h.session();
+    auto r = h.tool (s, "recipe.run", { { "recipe_id", "accompaniment.v1" },
+                                        { "params", { { "name", "rec-acc-embedded" }, { "bpm", 90 }, { "time_signature", { { "numerator", 3 }, { "denominator", 4 } } }, { "click", "embedded" },
+                                                      { "count_in_bars", 2 }, { "parts", waltzParts() }, { "outputs", { "minus_wav", "click_wav" } } } } });
+    REQUIRE (r["ok"] == true);
+    const auto manifest = r["data"]["result"];
+    CHECK (manifest["click"] == "embedded");
+    CHECK (std::abs (manifest["intro_offset_ms"].get<double>() - 4000.0) <= 1.0);
+    CHECK (manifest["variants"][0]["files"].contains ("minus_wav"));
+    CHECK (! manifest["variants"][0]["files"].contains ("click_wav"));
+    CHECK (h.tool (s, "project.delete", { { "project_id", manifest["ephemeral_project_id"] } })["ok"] == true);
+}
+
+ROVOX_TEST (recipe, accompaniment_cancel_mid_run_removes_the_ephemeral_project)
+{
+    if (! haveSoundfont())
+        return;
+
+    Harness h;
+    auto s = h.session();
+    auto started = h.tool (s, "recipe.run", { { "recipe_id", "accompaniment.v1" }, { "async", true },
+                                              { "params", { { "name", "rec-acc-cancel" }, { "bpm", 90 }, { "time_signature", { { "numerator", 3 }, { "denominator", 4 } } },
+                                                            { "tempo_variants_pct", { 100, 90, 80 } }, { "parts", waltzParts() }, { "outputs", { "minus_wav", "plus_wav", "click_wav" } } } } });
+    REQUIRE (started["ok"] == true);
+    const std::string jobId = started["data"]["job_id"];
+    CHECK (h.tool (s, "job.cancel", { { "job_id", jobId } })["ok"] == true);
+
+    auto job = h.waitJob (s, jobId, 120);
+    CHECK (job["state"] == "cancelled");
+    CHECK (job["error"]["code"] == "CANCELLED");
+    CHECK (! hasProject (h, s, "accompaniment rec-acc-cancel"));
 }

@@ -710,6 +710,7 @@ Result<StartedJob> JobService::startBatch (const JobContextInfo& who, const json
                 entry["status"] = "succeeded";
                 entry["stats"] = r["stats"];
                 entry["loudness"] = r["loudness"];
+                entry["metadata"] = r["metadata"];
                 entry["usage"] = { { "audio_s", roundUsage (p->variantAudioS[i]) } };
 
                 for (auto f : r["files"])

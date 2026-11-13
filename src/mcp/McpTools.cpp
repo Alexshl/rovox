@@ -158,7 +158,7 @@ const CommandToolSpec commandTools[] = {
     { "marker.upsert", "Upsert markers", "Creates markers (no marker_id) or moves/renames existing ones (marker_id) in one undo step.", false },
     { "marker.delete", "Delete marker", "Deletes a marker.", false },
     { "tempo.get", "Get tempo", "The tempo points and the time signature.", true },
-    { "tempo.set", "Set tempo", "Replaces the tempo points; the first is the tempo at the start. Position later points with bar or qn.", false },
+    { "tempo.set", "Set tempo", "Replaces the tempo points; the first is the tempo at the start. Position later points with bar or qn. time_signature {numerator, denominator} sets the signature at the start.", false },
     { "time.convert", "Convert time", "Converts a time ({s} | {bar,beat,tick} | {qn} | {marker}) to seconds, quarter notes and bar.beat.tick under the project's tempo map.", true },
     { "fx.list", "List plugins", "The plugin chain of a track (or target=\"master\"), in order. The volume fader shows up as is_fader.", true },
     { "fx.add", "Add plugin", "Adds a built-in effect (builtin: equaliser, compressor, reverb, delay, chorus, phaser, lowpass) or an external plugin (plugin: {plugin_uid} from plugin.catalog) to a track or the master, before the fader. Instruments go on the track whose MIDI items they should play. The plugin is tested in a separate process first.", false },
