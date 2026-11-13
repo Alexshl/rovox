@@ -41,7 +41,7 @@ const std::map<std::string, std::vector<Scope>>& table()
                "routing.send_create", "routing.send_update", "routing.send_delete", "tempo.set", "transport.set", "undo", "redo", "agent.accept",
                "import.plan", "import.apply", "import.rpp", "template.apply", "template.new", "template.save", "template.delete", "recipe.save", "recipe.delete" }, { S::projectsWrite });
 
-        add ({ "render.preflight", "render.start", "render.preview", "analyze.audio" }, { S::render });
+        add ({ "render.preflight", "render.start", "render.batch", "render.preview", "analyze.audio" }, { S::render });
         add ({ "recipe.run" }, { S::render, S::projectsWrite });
         add ({ "delivery.send", "delivery.release" }, { S::delivery });
         add ({ "plugin.rescan", "plugin.tag", "plugin.unblacklist", "usage.report" }, { S::admin });

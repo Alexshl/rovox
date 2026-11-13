@@ -16,7 +16,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
+#include <chrono>
 #include <ctime>
+#include <set>
 #include <mutex>
 
 namespace rovox
@@ -118,10 +121,13 @@ struct JobService::Prepared
     std::vector<std::string> kinds;
     bool embedAudio = false;
     std::string target = "master";
+    std::vector<RenderRequest> variants;                // render.batch: one request per variant (range resolved), req is the common base
+    std::vector<double> variantAudioS;
 };
 
 JobService::JobService (ProjectManager& p, JobManager& j, MessageThreadExecutor& e)
-    : projects_ (p), jobs_ (j), executor_ (e), callbacks_ ([&j] (const std::string& jobId, const json& state) { j.setCallbackState (jobId, state); }) {}
+    : projects_ (p), jobs_ (j), executor_ (e), callbacks_ ([&j] (const std::string& jobId, const json& state) { j.setCallbackState (jobId, state); }),
+      jobFiles_ (p.host().dataDir()) {}
 
 //==============================================================================
 namespace
@@ -250,6 +256,48 @@ Result<std::shared_ptr<JobService::Prepared>> JobService::prepare (const JobCont
         if (! range.ok())
             return range.error();
 
+        if (kind == "batch")
+        {
+            const auto& list = args.contains ("variants") ? args["variants"] : args["clips"];
+            std::set<std::string> names;
+
+            for (size_t i = 0; i < list.size(); ++i)
+            {
+                const auto where = (args.contains ("variants") ? "/variants/" : "/clips/") + std::to_string (i);
+
+                if (! list[i].is_object() || ! list[i].contains ("name") || ! list[i]["name"].is_string() || list[i]["name"].get<std::string>().empty())
+                    return bad ("every variant needs a non-empty name", where + "/name");
+
+                if (! names.insert (list[i]["name"].get<std::string>()).second)
+                    return bad ("variant names must be unique", where + "/name");
+
+                json merged = args;
+
+                for (auto k : { "variants", "clips", "callback", "client_request_id" })
+                    merged.erase (k);
+
+                for (auto it = list[i].begin(); it != list[i].end(); ++it)
+                    merged[it.key()] = it.value();
+
+                RenderRequest r;
+
+                if (auto v = parseRenderArgs (*project, merged, r); ! v.ok())
+                    return Error { v.error().code, v.error().message, json { { "path", where + v.error().details.value ("path", std::string()) } } };
+
+                auto vr = resolveRange (project->edit(), r.range);
+
+                if (! vr.ok())
+                    return Error { vr.error().code, vr.error().message, json { { "path", where + "/range" } } };
+
+                r.range.startS = vr.value().getStart().inSeconds();
+                r.range.endS = vr.value().getEnd().inSeconds();
+                r.range.startBar.reset();
+                r.range.endBar.reset();
+                prep->variantAudioS.push_back (*r.range.endS - *r.range.startS);
+                prep->variants.push_back (std::move (r));
+            }
+        }
+
         auto& cap = prep->cap;
         cap.projectId = project->id();
         cap.tenant = project->tenant();
@@ -336,6 +384,17 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
 {
     ReservationId reservation = 0;
 
+    if (kind == "render" || kind == "preview" || kind == "batch")
+        fn = [this, inner = std::move (fn), tenant = who.tenant] (JobContext& jc) -> Result<json>
+        {
+            auto result = inner (jc);
+
+            if (result.ok())
+                publishJobFiles (tenant, jc.id(), result.value());
+
+            return result;
+        };
+
     if (meteredAudioS >= 0)
     {
         if (! quotas().configured())
@@ -408,26 +467,114 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
     return StartedJob { s.id, s.created };
 }
 
+Result<std::optional<CallbackTarget>> JobService::checkCallback (const json& args, bool allowed)
+{
+    if (! args.contains ("callback"))
+        return std::optional<CallbackTarget> {};
+
+    if (! allowed)
+        return makeError (errc::invalidParams, "callback is a render.start parameter", json { { "path", "/callback" } });
+
+    const auto settings = CallbackSettings::load (configFile_);
+    auto target = validateCallback (args["callback"], settings);
+
+    if (! target.ok())
+        return target.error();
+
+    callbacks_.setSecrets (settings.secrets);
+    return std::optional<CallbackTarget> { target.value() };
+}
+
+void JobService::publishJobFiles (const std::string& tenant, const std::string& jobId, json& result)
+{
+    if (! result.is_object())
+        return;
+
+    const auto expires = (std::int64_t) std::chrono::duration_cast<std::chrono::seconds> (std::chrono::system_clock::now().time_since_epoch()).count() + fileUrlTtlS;
+    std::set<std::string> used;
+
+    auto publishOne = [&] (json& f)
+    {
+        if (! f.is_object())
+            return;
+
+        const fs::path abs = f.value ("abs_path", "");
+
+        if (abs.empty())
+            return;
+
+        // a file name of a job is [A-Za-z0-9._-], at most 128 characters; render names may hold spaces and non-ASCII letters
+        std::string name = abs.filename().string(), ext = abs.extension().string();
+
+        for (auto& ch : name)
+            if (! (std::isalnum ((unsigned char) ch) && (unsigned char) ch < 128) && ch != '.' && ch != '_' && ch != '-')
+                ch = '_';
+
+        if (ext.size() > 16 || ext.find_first_not_of ("._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") != std::string::npos)
+            ext.clear();
+
+        if (name.empty() || name[0] == '.')
+            name = "f" + name;
+
+        if (name.size() > 128)
+            name = name.substr (0, 128 - ext.size()) + ext;
+
+        const auto stem = ext.empty() || name.size() <= ext.size() ? name : name.substr (0, name.size() - ext.size());
+
+        for (int n = 2; ! used.insert (name).second; ++n)
+            name = stem.substr (0, std::min<size_t> (stem.size(), 120 - ext.size())) + "-" + std::to_string (n) + ext;
+
+        if (! jobFiles_.publish (tenant, jobId, name, abs).ok())
+            return;
+
+        const auto path = jobFiles_.signedPath (tenant, jobId, name, expires);
+
+        if (path.empty())
+            return;
+
+        if (f.contains ("url"))
+            f["api_url"] = f["url"];
+
+        f["url"] = path;
+        f["expires_at"] = expires;
+    };
+
+    if (result.contains ("files") && result["files"].is_array())
+    {
+        for (auto& f : result["files"])
+            publishOne (f);
+
+        if (result.contains ("file") && result["file"].is_object() && ! result["files"].empty())
+            result["file"] = result["files"][0];
+    }
+
+    if (result.contains ("clip"))
+        publishOne (result["clip"]);
+
+    // render.batch lists the files again per variant
+    if (result.contains ("variants") && result["variants"].is_array() && result.contains ("files") && result["files"].is_array())
+        for (auto& v : result["variants"])
+        {
+            json mine = json::array();
+
+            for (auto& f : result["files"])
+                if (f.value ("variant", -1) == v.value ("index", -2))
+                    mine.push_back (f);
+
+            v["files"] = mine;
+        }
+}
+
 //==============================================================================
 Result<StartedJob> JobService::startRender (const JobContextInfo& who, const json& args, bool preflightOnly)
 {
     // a callback is checked before anything else, so that a refused one never starts (or reuses) a job
-    std::optional<CallbackTarget> callback;
+    auto checked = checkCallback (args, ! preflightOnly);
 
-    if (args.contains ("callback"))
-    {
-        if (preflightOnly)
-            return makeError (errc::invalidParams, "callback is a render.start parameter", json { { "path", "/callback" } });
+    if (! checked.ok())
+        return checked.error();
 
-        const auto settings = CallbackSettings::load (configFile_);
-        auto target = validateCallback (args["callback"], settings);
-
-        if (! target.ok())
-            return target.error();
-
-        callbacks_.setSecrets (settings.secrets);
-        callback = target.value();
-    }
+    const auto callback = checked.value();
 
     // idempotency first: a repeated request must not take another snapshot
     if (args.contains ("client_request_id"))
@@ -475,6 +622,121 @@ Result<StartedJob> JobService::startRender (const JobContextInfo& who, const jso
     callback ? json { { "state", "pending" }, { "attempts", 0 } } : json (nullptr),
     callback ? std::function<void (const JobInfo&)> ([this, target = *callback] (const JobInfo& done) { callbacks_.enqueue (done, target); }) : nullptr,
     p->cap.endS - p->cap.startS);
+}
+
+Result<StartedJob> JobService::startBatch (const JobContextInfo& who, const json& args)
+{
+    const char* key = args.contains ("variants") ? "variants" : (args.contains ("clips") ? "clips" : nullptr);
+
+    if (key == nullptr || ! args[key].is_array() || args[key].empty())
+        return bad ("variants must be a non-empty array of {name, ...render arguments}", "/variants");
+
+    if (args[key].size() > maxBatchVariants)
+        return bad ("a batch has at most " + std::to_string (maxBatchVariants) + " variants", std::string ("/") + key);
+
+    auto checked = checkCallback (args, true);
+
+    if (! checked.ok())
+        return checked.error();
+
+    const auto callback = checked.value();
+
+    if (args.contains ("client_request_id"))
+        for (auto& j : jobs_.list ({ .project = who.projectId, .tenant = who.tenant, .kind = "batch" }))
+            if (j.clientRequestId == args.value ("client_request_id", ""))
+                return StartedJob { j.id, false };
+
+    auto prep = prepare (who, args, "batch", false);
+
+    if (! prep.ok())
+        return prep.error();
+
+    auto p = prep.value();
+    double totalAudioS = 0.0;
+
+    for (auto s : p->variantAudioS)
+        totalAudioS += s;
+
+    return submit (who, "batch", "render", 0, args, [this, p, who] (JobContext& jc) -> Result<json>
+    {
+        const size_t n = p->variants.size();
+        json variants = json::array(), files = json::array();
+        int failed = 0;
+        Error firstError;
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (jc.cancelled())
+                return makeError (errc::cancelled, "cancelled");
+
+            auto req = p->variants[i];
+            const auto label = "variant " + std::to_string (i + 1) + "/" + std::to_string (n) + " " + req.name;
+            req.hooks.shouldCancel = [&jc] { return jc.cancelled(); };
+            req.hooks.onProgress = [&jc, i, n, label] (double f, const std::string& stage) { jc.progress (((double) i + f) / (double) n, label + ": " + stage); };
+
+            RenderContext ctx;
+            ctx.rendersDir = p->cap.dir / "renders";
+            ctx.projectId = p->cap.projectId;
+            ctx.sourceRevision = p->cap.revision;
+            ctx.projectSampleRate = p->cap.sampleRate;
+
+            auto result = p->childDir.empty() ? renderEdit (*p->snapshot, ctx, req)
+                                              : renderInChild (p->childDir, projects_.host().dataDir(), ctx, req, [this, who, &jc] (const json& info)
+                                                {
+                                                    json event = info;
+                                                    event["type"] = "plugin.crashed";
+                                                    event["project_id"] = who.projectId;
+                                                    event["job_id"] = jc.id();
+                                                    projects_.hub().publish (who.tenant, who.projectId, event);
+                                                });
+
+            json entry { { "index", (int) i }, { "name", req.name } };
+
+            if (! result.ok())
+            {
+                if (result.error().code == errc::cancelled)
+                    return result.error();
+
+                if (failed++ == 0)
+                    firstError = result.error();
+
+                entry["status"] = "failed";
+                entry["error"] = result.error().toJson();
+                entry["usage"] = { { "audio_s", 0.0 } };
+            }
+            else
+            {
+                const json r = result.value();
+                entry["status"] = "succeeded";
+                entry["stats"] = r["stats"];
+                entry["loudness"] = r["loudness"];
+                entry["usage"] = { { "audio_s", roundUsage (p->variantAudioS[i]) } };
+
+                for (auto f : r["files"])
+                {
+                    f["variant"] = (int) i;
+                    f["variant_name"] = req.name;
+                    files.push_back (std::move (f));
+                }
+            }
+
+            variants.push_back (std::move (entry));
+        }
+
+        if (failed == (int) n)
+            return firstError;
+
+        json out { { "status", "succeeded" }, { "count", (int) n }, { "failed", failed }, { "source_revision", p->cap.revision }, { "variants", variants }, { "files", files } };
+
+        if (! p->cap.ephemeral)
+            uploadRenders (projects_.storage(), who.tenant, who.projectId, out);
+
+        jc.progress (1.0, "done");
+        return out;
+    },
+    callback ? json { { "state", "pending" }, { "attempts", 0 } } : json (nullptr),
+    callback ? std::function<void (const JobInfo&)> ([this, target = *callback] (const JobInfo& done) { callbacks_.enqueue (done, target); }) : nullptr,
+    totalAudioS);
 }
 
 //==============================================================================

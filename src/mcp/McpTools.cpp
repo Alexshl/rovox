@@ -482,6 +482,35 @@ void McpServer::buildTools()
 
     {
         ToolDef t;
+        t.name = "render.batch";
+        t.title = "Render batch";
+        t.description = "One job renders N variants of a project (progress i/N, cancel, one result list). Every variant has a unique name and may override any render.start argument "
+                        "(range, scope, track_ids, format, target_lufs, tail_s, ...); the top-level arguments are the defaults. A mute set is a tracks/stems render of the tracks to keep. "
+                        "The quota is admitted once for the summed audio of all variants. A failing variant is listed with its error and the rest still render. "
+                        "result.files lists every file with its `variant`, each with a signed `url` and `expires_at`.";
+        auto batchSchema = renderSchema (false);
+        batchSchema["properties"].erase ("name");
+        batchSchema["properties"]["variants"] = { { "type", "array" }, { "minItems", 1 }, { "maxItems", JobService::maxBatchVariants },
+                                                  { "items", { { "type", "object" }, { "properties", { { "name", str ("Unique file name without extension") } } }, { "required", { "name" } },
+                                                               { "additionalProperties", true } } } };
+        batchSchema["required"] = { "project_id", "variants" };
+        t.inputSchema = batchSchema;
+        t.annotations = { { "readOnlyHint", false }, { "destructiveHint", false } };
+        t.mayBlock = true;
+        t.handler = [waitForJob, jobWait, jobContext] (ToolCall& c) -> ToolOutput
+        {
+            auto started = c.server.jobService().startBatch (jobContext (c, c.args["project_id"]), c.args);
+
+            if (! started.ok())
+                return ToolOutput::failure (started.error(), std::nullopt, c.args["project_id"]);
+
+            return waitForJob (c, started.value().jobId, started.value().created, jobWait (c.args, 0, 60), c.args["project_id"], true);
+        };
+        add (std::move (t));
+    }
+
+    {
+        ToolDef t;
         t.name = "render.preview";
         t.title = "Render preview";
         t.description = "Short clip of a range plus numeric analysis in one call: loudness (LUFS, true peak, RMS, crest), spectrum bands, per-bar loudness and optionally per-track presence. "

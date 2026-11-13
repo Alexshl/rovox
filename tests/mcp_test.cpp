@@ -1062,7 +1062,9 @@ ROVOX_TEST (mcp, preview_gives_a_clip_and_analysis_and_keeps_at_most_ten_files)
     CHECK_NEAR (res["clip"]["duration_s"].get<double>(), 16.0, 0.05);       // 8 bars at 120 BPM in 4/4
     CHECK (res["clip"]["container"] == "mp3");
     CHECK (fs::exists (res["clip"]["abs_path"].get<std::string>()));
-    CHECK (res["clip"]["url"].get<std::string>().find ("/previews/pv_") != std::string::npos);
+    CHECK (res["clip"]["api_url"].get<std::string>().find ("/previews/pv_") != std::string::npos);
+    CHECK (res["clip"]["url"].get<std::string>().rfind ("/files/", 0) == 0);
+    CHECK (res["clip"]["expires_at"].get<std::int64_t>() > 0);
     CHECK (res["loudness"]["integrated_lufs"].get<double>() > -40.0);
     CHECK (res["spectrum_bands_db"].contains ("sub_20_60"));
     CHECK (res["spectrum_bands_db"].contains ("high_6k_20k"));
@@ -3043,4 +3045,81 @@ ROVOX_TEST (mcp, without_a_key_store_there_are_no_key_tools)
     auto listed = listedTools (h, *h.session);
     CHECK (listed.count ("key.create") == 0);
     CHECK (listed.count ("tenant.list") == 0);
+}
+
+ROVOX_TEST (mcp, render_batch_renders_every_variant_with_progress_and_signed_urls)
+{
+    Harness h;
+    const auto id = sineTracks (h.env, { -20.0, -26.0 }, 6.0);
+
+    auto r = h.tool ("render.batch", { { "project_id", id }, { "format", { { "container", "wav" }, { "bit_depth", 16 } } }, { "tail_s", 0.0 },
+                                       { "variants", json::array ({ { { "name", "batch a" }, { "range", { { "start", { { "s", 0.0 } } }, { "end", { { "s", 2.0 } } } } } },
+                                                                    { { "name", "batch b" }, { "range", { { "start", { { "s", 1.0 } } }, { "end", { { "s", 4.0 } } } } } } }) },
+                                       { "wait_s", 60 } });
+    REQUIRE (r["ok"] == true);
+    REQUIRE (r["data"]["state"] == "succeeded");
+    const json res = r["data"]["result"];
+    CHECK (res["count"] == 2);
+    CHECK (res["failed"] == 0);
+    REQUIRE (res["variants"].size() == 2);
+    REQUIRE (res["files"].size() == 2);
+    CHECK (res["variants"][0]["name"] == "batch a");
+    CHECK (res["variants"][1]["files"].size() == 1);
+    CHECK_NEAR (res["variants"][0]["files"][0]["duration_s"].get<double>(), 2.0, 0.05);
+    CHECK_NEAR (res["variants"][1]["files"][0]["duration_s"].get<double>(), 3.0, 0.05);
+    CHECK (res["variants"][1]["files"][0]["url"].get<std::string>().rfind ("/files/local/", 0) == 0);
+    CHECK_NEAR (res["usage"]["audio_s"].get<double>(), 5.0, 0.01);
+    CHECK (fs::exists (res["files"][0]["abs_path"].get<std::string>()));
+
+    // duplicate names and a bad variant are refused before a job exists
+    auto dup = h.tool ("render.batch", { { "project_id", id }, { "variants", json::array ({ { { "name", "x" } }, { { "name", "x" } } }) } });
+    CHECK (dup["ok"] == false);
+    auto none = h.tool ("render.batch", { { "project_id", id }, { "variants", json::array() } });
+    CHECK (none["ok"] == false);
+}
+
+ROVOX_TEST (mcp, render_file_url_downloads_the_same_bytes_and_refuses_other_tenants_and_tampering)
+{
+    HttpFixture f;
+    const auto id = sineTracks (f.h.env, { -20.0 }, 3.0);
+    auto r = f.h.tool ("render.start", { { "project_id", id }, { "name", "my mix" }, { "tail_s", 0.0 }, { "format", { { "container", "wav" }, { "bit_depth", 16 } } }, { "wait_s", 60 } });
+    REQUIRE (r["ok"] == true);
+    REQUIRE (r["data"]["state"] == "succeeded");
+    const json file = r["data"]["result"]["file"];
+    const auto url = file["url"].get<std::string>();
+    REQUIRE (url.rfind ("/files/local/", 0) == 0);
+    CHECK (url.find ("my_mix.wav") != std::string::npos);
+    CHECK (file["expires_at"].get<std::int64_t>() > 0);
+
+    std::ifstream in (file["abs_path"].get<std::string>(), std::ios::binary);
+    const std::string expected ((std::istreambuf_iterator<char> (in)), std::istreambuf_iterator<char>());
+    REQUIRE (! expected.empty());
+
+    const auto status = f.h.onClient ([&]
+    {
+        httplib::Client c ("127.0.0.1", f.server.port());
+        std::vector<std::pair<int, std::string>> out;
+        auto get = [&] (const std::string& path) { auto res = c.Get (path); out.emplace_back (res ? res->status : 0, res ? res->body : std::string()); };
+        get (url);
+        get (url);                                                              // multi-use
+        auto other = url;
+        other.replace (std::string ("/files/").size(), 5, "other");             // another tenant
+        get (other);
+        auto tampered = url;
+        tampered.back() = tampered.back() == '0' ? '1' : '0';
+        get (tampered);
+        auto expired = url;
+        const auto at = expired.find ("exp=") + 4;
+        expired.replace (at, expired.find ('&') - at, "1");
+        get (expired);
+        return out;
+    });
+
+    REQUIRE (status.size() == 5);
+    CHECK (status[0].first == 200);
+    CHECK (status[0].second == expected);
+    CHECK (status[1].first == 200);
+    CHECK (status[2].first == 403);
+    CHECK (status[3].first == 403);
+    CHECK (status[4].first == 403);
 }
