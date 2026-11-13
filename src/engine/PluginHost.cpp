@@ -173,6 +173,10 @@ int runPluginProbeChild (const std::string& descXmlFile, bool presetsOnly)
         inst->processBlock (buf, none);
     }
 
+    // VST3 plugins announce a changed latency through restartComponent, which JUCE delivers on the message thread
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+        mm->runDispatchLoopUntil (100);
+
     info["latency_samples"] = inst->getLatencySamples();
 
     if (desc.isInstrument)

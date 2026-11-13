@@ -47,7 +47,10 @@ ARG ROVOX_BUILD_JOBS=
 RUN apt-get update \
  && apt-get install -y --no-install-recommends calf-plugins zynaddsubfx-lv2 lsp-plugins-lv2 x42-plugins avldrums.lv2 avldrums.lv2-soundfont \
       dpf-plugins-vst3 dragonfly-reverb-vst3 lsp-plugins-vst3 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ # Debian's arm64 lsp-plugins-vst3 puts its 64-bit AArch64 binary under Contents/armv8l-linux; VST3 hosts look in aarch64-linux
+ && if [ -d /usr/lib/vst3/lsp-plugins.vst3/Contents/armv8l-linux ] && [ ! -e /usr/lib/vst3/lsp-plugins.vst3/Contents/aarch64-linux ] && [ "$(uname -m)" = aarch64 ]; then \
+      ln -s armv8l-linux /usr/lib/vst3/lsp-plugins.vst3/Contents/aarch64-linux; fi
 # VST3 (Debian trixie) only for the tests: the scan, factory programs and render (DPF MVerb, Kars, Nekobi), latency / PDC (LSP); not shipped in the runtime image
 ENV ROVOX_REQUIRE_LV2=1 ROVOX_REQUIRE_VST3=1
 WORKDIR /src
