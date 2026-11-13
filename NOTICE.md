@@ -101,6 +101,21 @@ The converted kit is a derivative (a stereo mix-down of the multi-microphone rec
 returned in the plugin state (`attribution`) and is written into the kit's `kit.json`. Anything that publishes audio made with this kit (for example
 a delivered render) must keep that credit.
 
+## SoundFont instruments (`rovox:sf2`)
+
+The built-in SoundFont instrument `rovox:sf2` plays the presets of instrument packs (`src/core/InstrumentPacks`, `rovox packs list`) with FluidSynth
+(libfluidsynth3, LGPL-2.1-or-later, linked dynamically; the Docker build stage installs `libfluidsynth-dev`, the runtime image `libfluidsynth3`).
+The runtime image ships one soundfont so that the agent has General MIDI instruments out of the box:
+
+| Package | Provides | License |
+|---|---|---|
+| musescore-general-soundfont-small | MuseScore General Lite (`/usr/share/sounds/sf3/MuseScore_General_Lite.sf3`), the built-in pack `gm-musescore-lite` | MIT |
+
+Credit: "MuseScore General Lite soundfont by S. Christian Collins and the MuseScore project, MIT License" (plugin state `attribution`, catalog `pack.attribution`).
+The GPL-2.0 soundfont `timgm6mb-soundfont` (an alternative dependency of libfluidsynth3) is not installed in the runtime image and is not listed in the catalog.
+Further packs are directories with a `pack.json` below `ROVOX_INSTRUMENTS_PATH`; a pack whose `server_use_ok` is not `true` is hidden from tenants that
+are restricted to free plugins. `tools/make_test_sf2.py` writes a tiny soundfont of sine samples (own work, AGPL-3.0-or-later) for the tests.
+
 ## rovox-skills (`skills/`)
 
 Python 3 standard library only; no third-party dependency is installed. Optional extras (`analysis`: numpy, soundfile, librosa) are not part of

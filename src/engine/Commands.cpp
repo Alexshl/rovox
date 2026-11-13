@@ -10,6 +10,7 @@
 #include "ProjectManager.h"
 #include "Quota.h"
 #include "JsfxPlugin.h"
+#include "Sf2Plugin.h"
 #include "StockPlugins.h"
 
 #include <cmath>
@@ -500,7 +501,31 @@ void registerFxCommands (CommandRegistry& r)
                     if (jsfxKey.empty() && params["plugin"].contains (field) && params["plugin"][field].is_string() && isJsfxUid (params["plugin"][field].get<std::string>()))
                         jsfxKey = params["plugin"][field].get<std::string>();
 
-                if (! jsfxKey.empty())
+                std::string sf2Key;
+
+                for (const char* field : { "plugin_uid", "uid", "name" })
+                    if (sf2Key.empty() && params["plugin"].contains (field) && params["plugin"][field].is_string() && isSf2Uid (params["plugin"][field].get<std::string>()))
+                        sf2Key = params["plugin"][field].get<std::string>();
+
+                if (! sf2Key.empty())
+                {
+                    // a preset of an instrument pack (plugin_uid "rovox:sf2/<pack>/<bank>-<program>", listed by plugin.catalog): built in, the licence gate applies
+                    const auto preset = parseSf2PresetUid (sf2Key);
+
+                    if (! preset)
+                        return makeError (errc::invalidParams, "plugin_uid must be rovox:sf2/<pack>/<bank>-<program> (plugin.catalog kind=instrument lists them), got " + sf2Key, json { { "path", "/plugin" } });
+
+                    if (auto allowed = PluginCatalog::requireLicence (ctx.tenant, p.host().catalog().find (sf2Key), sf2Key); ! allowed.ok())
+                        return allowed.error();
+
+                    auto created = createSf2Plugin (p.edit(), *preset);
+
+                    if (! created.ok())
+                        return created.error();
+
+                    plugin = created.value();
+                }
+                else if (! jsfxKey.empty())
                 {
                     // REAPER JS effects (plugin_uid "jsfx:<path below ROVOX_JSFX_PATH>") are built in: no probe, no child process; the licence gate still applies
                     if (auto allowed = PluginCatalog::requireLicence (ctx.tenant, p.host().catalog().find (jsfxKey), jsfxKey); ! allowed.ok())

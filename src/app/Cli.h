@@ -45,6 +45,9 @@ struct Options
     std::string benchScenario = "s1";
     double benchSeconds = 20.0;
 
+    // packs verify
+    std::string packId;
+
     // hidden child commands (plugin-probe, render-child)
     std::string probeFile, snapshotDir, requestFile;
     bool presetsOnly = false;
@@ -68,6 +71,8 @@ int runKeyList (const Options&);
 int runKeyRevoke (const Options&);
 int runKeyRotate (const Options&);
 int runMcp (const Options&);          // in-process, or (with --connect) a stdio proxy to a running server
+int runPacksList (const Options&);    // instrument packs (SoundFonts played by rovox:sf2): list, and check files and hashes (exit 2 on a problem)
+int runPacksVerify (const Options&);
 int runPluginProbe (const Options&);
 int runRenderChildCommand (const Options&);
 

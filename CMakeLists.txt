@@ -70,6 +70,8 @@ find_package(OpenSSL REQUIRED)
 pkg_check_modules(EBUR128 REQUIRED IMPORTED_TARGET libebur128)
 pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 pkg_check_modules(TOMLPP REQUIRED IMPORTED_TARGET tomlplusplus)
+# FluidSynth (LGPL-2.1+, linked dynamically): the SoundFont player of the built-in rovox:sf2 instrument (src/engine/Sf2Plugin)
+pkg_check_modules(FLUIDSYNTH REQUIRED IMPORTED_TARGET fluidsynth)
 find_library(ROVOX_LAME_LIB NAMES mp3lame REQUIRED)
 find_path(ROVOX_LAME_INCLUDE lame/lame.h REQUIRED)
 

@@ -38,6 +38,7 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/RenderJobs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Review.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RppImport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Sf2Plugin.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/StockPlugins.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Scopes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Templates.cpp
@@ -71,5 +72,6 @@ target_link_libraries(rovox_engine INTERFACE
     juce::juce_recommended_warning_flags
     PkgConfig::HTTPLIB
     PkgConfig::OPUS
+    PkgConfig::FLUIDSYNTH
     ${ROVOX_LAME_LIB}
     "-latomic")
