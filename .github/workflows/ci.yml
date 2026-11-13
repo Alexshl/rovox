@@ -58,6 +58,27 @@ jobs:
       - name: Smoke test
         run: docker run --rm rovox-skills:ci list
 
+  # The sidecar with real notation tools (LilyPond, abcmidi, verovio); its tests run during the image build with
+  # ROVOX_REQUIRE_NOTATION=1. Separate job: nothing depends on it, so it never blocks the main build.
+  skills-notation-image:
+    needs: license
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the skills-notation image target
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: skills-notation
+          load: true
+          tags: rovox-skills:notation
+          cache-from: type=gha,scope=skills-notation
+          cache-to: type=gha,scope=skills-notation,mode=max
+      - name: Smoke test
+        run: docker run --rm rovox-skills:notation list
+
   # Native runners for both architectures (no QEMU). The Docker `runtime` target configures, compiles and runs ctest
   # inside the image build (see docker/Dockerfile), so a failing test fails this job.
   build:

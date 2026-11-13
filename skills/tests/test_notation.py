@@ -359,6 +359,34 @@ else:
         self.assertEqual(r["error"]["code"], "INVALID_PARAMS")
 
 
+@unittest.skipUnless(os.environ.get("ROVOX_REQUIRE_NOTATION") == "1", "real LilyPond, abcmidi and verovio are only required in the skills-notation image (ROVOX_REQUIRE_NOTATION=1)")
+class RealToolTests(Base):
+    """With ROVOX_REQUIRE_NOTATION=1 a missing tool is a failure, not a skip; the real programs engrave and import."""
+
+    def test_tools_are_installed(self):
+        from rovox_skills.notation import engrave
+        self.assertTrue(engrave.lilypond_available(), "musicxml2ly and lilypond must be on PATH")
+        self.assertTrue(engrave.verovio_available(), "the verovio Python module must be installed")
+        self.assertTrue(abc.available(), "abc2midi must be on PATH")
+
+    def test_lilypond_makes_a_pdf(self):
+        r = call("notation.engrave", {"file": WALTZ, "engine": "lilypond", "format": "pdf", "output": os.path.join(self.dir, "w.pdf")})
+        self.assertTrue(r["ok"], r)
+        with open(r["data"]["path"], "rb") as f:
+            self.assertEqual(f.read(5), b"%PDF-")
+
+    def test_verovio_makes_an_svg(self):
+        r = call("notation.engrave", {"file": WALTZ, "engine": "verovio", "format": "svg", "output": os.path.join(self.dir, "w.svg")})
+        self.assertTrue(r["ok"], r)
+        with open(r["data"]["path"], "rb") as f:
+            self.assertIn(b"<svg", f.read(2000))
+
+    def test_abc2midi_imports_a_tune(self):
+        r = call("notation.import", {"file": self.write("t.abc", AbcTests.TUNE)})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([n["pitch"] for n in r["data"]["melody"]["notes"]], [60, 62])
+
+
 def _smf():
     def vlq(n):
         out = [n & 0x7F]
