@@ -27,6 +27,7 @@ inline constexpr const char* preflightFailed     = "PREFLIGHT_FAILED";
 inline constexpr const char* unsupported         = "UNSUPPORTED";
 inline constexpr const char* io                  = "IO_ERROR";
 inline constexpr const char* cancelled           = "CANCELLED";
+inline constexpr const char* interrupted         = "INTERRUPTED";
 inline constexpr const char* notImplemented      = "NOT_IMPLEMENTED";
 inline constexpr const char* serverRestarted     = "SERVER_RESTARTED";
 inline constexpr const char* resyncRequired      = "RESYNC_REQUIRED";

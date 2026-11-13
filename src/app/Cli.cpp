@@ -34,13 +34,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <memory>
 #include <csignal>
 #include <random>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -646,13 +649,35 @@ fs::path resolveWebDir (const Options& o)
 class ServeTimer : public juce::Timer
 {
 public:
-    ServeTimer (ProjectManager& p, UploadStore* u, mcp::McpServer* m = nullptr) : projects (p), uploads (u), mcpServer (m) {}
+    /** `onStop`: runs once on its own thread after SIGTERM/SIGINT (the message loop keeps running meanwhile: jobs may need it), then the loop is stopped. */
+    ServeTimer (ProjectManager& p, UploadStore* u, mcp::McpServer* m = nullptr, std::function<void()> onStop = nullptr)
+        : projects (p), uploads (u), mcpServer (m), stopHook (std::move (onStop)) {}
+
+    ~ServeTimer() override { joinStop(); }
+
+    void joinStop()
+    {
+        if (stopThread.joinable())
+            stopThread.join();
+    }
 
     void timerCallback() override
     {
         if (stopRequested)
         {
-            juce::MessageManager::getInstance()->stopDispatchLoop();
+            stopTimer();
+
+            if (! stopHook)
+            {
+                juce::MessageManager::getInstance()->stopDispatchLoop();
+                return;
+            }
+
+            stopThread = std::thread ([this]
+            {
+                stopHook();
+                juce::MessageManager::callAsync ([] { juce::MessageManager::getInstance()->stopDispatchLoop(); });
+            });
             return;
         }
 
@@ -675,8 +700,21 @@ public:
     ProjectManager& projects;
     UploadStore* uploads;
     mcp::McpServer* mcpServer;
+    std::function<void()> stopHook;
+    std::thread stopThread;
     int ticks = 0;
 };
+
+/** Gives running jobs `o.drainTimeoutS` to finish; the rest end `interrupted`. Dirty projects are autosaved afterwards by closeAll (to <project>/autosave/, never over the project files). */
+void drainJobs (JobManager& jobs, const Options& o, std::ostream& log)
+{
+    const auto timeout = std::chrono::milliseconds (std::llround (std::max (0.0, o.drainTimeoutS) * 1000.0));
+    log << "rovox draining: running jobs have " << o.drainTimeoutS << " s to finish" << std::endl;
+    const int cut = jobs.drain (timeout);
+
+    if (cut > 0)
+        log << "rovox drain: " << cut << " job" << (cut == 1 ? "" : "s") << " interrupted" << std::endl;
+}
 } // namespace
 
 namespace
@@ -794,6 +832,34 @@ int runServe (const Options& o)
     so.authenticator = &authenticator;
     so.sessionKeyFile = cfg.dataDir / "auth" / "session.key";
 
+    // live numbers for /metrics; the objects below are created after the server, so they are reached through pointers set once they exist
+    std::atomic<JobManager*> metricsJobs { nullptr };
+    std::atomic<Gateway*> metricsGateway { nullptr };
+    so.metrics.wsClients = [&metricsGateway] { auto* g = metricsGateway.load(); return g != nullptr ? g->clientCount() : 0; };
+    so.metrics.jobsByState = [&metricsJobs]
+    {
+        std::map<std::string, int> counts;
+
+        for (auto st : { JobState::queued, JobState::running, JobState::succeeded, JobState::failed, JobState::cancelled, JobState::interrupted })
+            counts[toString (st)] = 0;
+
+        if (auto* jobs = metricsJobs.load())
+            for (auto& j : jobs->list())
+                ++counts[toString (j.state)];
+
+        return counts;
+    };
+    so.metrics.tenants = [&metricsJobs]
+    {
+        std::set<std::string> tenants { "local" };
+
+        if (auto* jobs = metricsJobs.load())
+            for (auto& j : jobs->list())
+                tenants.insert (j.tenant);
+
+        return std::vector<std::string> (tenants.begin(), tenants.end());
+    };
+
     so.webDir = resolveWebDir (o);
     so.allowedOrigins = o.allowOrigins;
     so.allowedHosts = allowedHosts (o);
@@ -819,6 +885,8 @@ int runServe (const Options& o)
     mcpCfg.uploadBatchStatus = [&server] (const std::string& id, const std::string& tenant) { return server.uploads().batchStatus (id, tenant); };
     mcpCfg.uploadFinish = [&server] (const std::string& id, const std::string& tenant) { return server.uploads().finish (id, tenant); };
     McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
+    metricsJobs = &mcpStack.jobs;
+    metricsGateway = &gateway;
     server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .authenticator = &authenticator, .allowedOrigins = o.allowOrigins, .allowedHosts = so.allowedHosts, .loopbackBind = loopback }); });
 
     if (auto started = server.start(); ! started.ok())
@@ -838,10 +906,16 @@ int runServe (const Options& o)
     std::atomic<bool> catalogScanDone { false };
     std::thread catalogScan ([&host, &catalogScanDone] { host.catalog().rescan(); catalogScanDone = true; });
 
-    ServeTimer timer (pm, &server.uploads(), &mcpStack.server);
+    // SIGTERM: /readyz goes 503 first, then running jobs get the drain timeout; the loop stops only when that is over
+    ServeTimer timer (pm, &server.uploads(), &mcpStack.server, [&]
+    {
+        server.setDraining (true);
+        drainJobs (mcpStack.jobs, o, std::cout);
+    });
     timer.startTimer (200);
     juce::MessageManager::getInstance()->runDispatchLoop();
     timer.stopTimer();
+    timer.joinStop();
 
     std::cout << "rovox shutting down" << std::endl;
     host.catalog().cancelScan();            // a scan of many plugins must not hold up the shutdown ...
@@ -1422,10 +1496,11 @@ int runMcp (const Options& o)
         juce::MessageManager::callAsync ([] { juce::MessageManager::getInstance()->stopDispatchLoop(); });
     });
 
-    ServeTimer timer (pm, nullptr, &stack.server);
+    ServeTimer timer (pm, nullptr, &stack.server, [&] { drainJobs (stack.jobs, o, std::cerr); });     // stdout carries the protocol
     timer.startTimer (200);
     juce::MessageManager::getInstance()->runDispatchLoop();
     timer.stopTimer();
+    timer.joinStop();
 
     stack.server.shutdown();
 

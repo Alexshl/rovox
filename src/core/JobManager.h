@@ -24,10 +24,11 @@
 namespace rovox
 {
 
-enum class JobState { queued, running, succeeded, failed, cancelled };
+/** `interrupted`: the job was cut short by a server drain (SIGTERM); its error code is INTERRUPTED. */
+enum class JobState { queued, running, succeeded, failed, cancelled, interrupted };
 
 const char* toString (JobState);
-inline bool isFinished (JobState s) { return s == JobState::succeeded || s == JobState::failed || s == JobState::cancelled; }
+inline bool isFinished (JobState s) { return s == JobState::succeeded || s == JobState::failed || s == JobState::cancelled || s == JobState::interrupted; }
 
 struct JobInfo
 {
@@ -97,8 +98,15 @@ public:
     JobManager (std::filesystem::path dir, JobPools = {}, ChangeFn = nullptr);
     ~JobManager();
 
-    struct Submitted { std::string id; bool created = true; };
+    /** `error` is set when the job was refused (BUSY while draining): `id` then names a record that is already `failed` and never runs. */
+    struct Submitted { std::string id; bool created = true; std::optional<Error> error; };
     Submitted submit (JobSpec, JobFn);
+
+    /** Graceful stop (SIGTERM): from now on submit() is refused with BUSY and queued jobs end `interrupted` at once; running jobs get until
+        `timeout` to finish, the rest are cancelled, end `interrupted` (unless they finished anyway) and are waited for a few more seconds.
+        Returns how many jobs were cut short. Call shutdown() afterwards. */
+    int drain (std::chrono::milliseconds timeout);
+    bool draining() const;
 
     /** Queued jobs are cancelled at once; a running job sees cancelled() and normally finishes within a second.
         Returns false for an unknown or already finished job. */
@@ -136,6 +144,7 @@ private:
     std::vector<std::string> evictedForReport_, evictedForPersist_;     // under mutex_: evicted ids whose revision bookkeeping is pruned by report() / persist()
     std::map<std::string, std::unique_ptr<Pool>> pools_;
     bool stopping_ = false;
+    bool draining_ = false;
 
     std::mutex persistMutex_;                       // serialises file writes; never taken while mutex_ is held
     std::map<std::string, std::uint64_t> persistedRevision_;

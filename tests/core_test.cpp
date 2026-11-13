@@ -333,6 +333,97 @@ ROVOX_TEST (core, jobs_persist_the_final_state_and_never_announce_queued_after_i
         CHECK (f.path().extension() == ".json");            // no .tmp left behind
 }
 
+ROVOX_TEST (core, job_drain_lets_a_short_job_finish_interrupts_a_long_one_and_refuses_new_jobs)
+{
+    const auto dir = test::makeTempDir ("jobdrain") / "jobs";
+    std::string longId, shortId, queuedId;
+
+    {
+        JobManager jobs (dir, JobPools { 1, 1, 1 });
+        std::atomic<bool> longStarted { false };
+
+        JobSpec longSpec;
+        longSpec.kind = "render";
+        longSpec.pool = "render";
+        longId = jobs.submit (longSpec, [&] (JobContext& jc) -> Result<json>
+        {
+            longStarted = true;
+
+            while (! jc.cancelled())
+                std::this_thread::sleep_for (std::chrono::milliseconds (10));
+
+            return makeError (errc::cancelled, "cancelled");
+        }).id;
+
+        JobSpec shortSpec;
+        shortSpec.kind = "analysis";
+        shortSpec.pool = "analysis";
+        shortId = jobs.submit (shortSpec, [] (JobContext&) -> Result<json>
+        {
+            std::this_thread::sleep_for (std::chrono::milliseconds (100));
+            return json { { "ok", true } };
+        }).id;
+
+        JobSpec queuedSpec = longSpec;      // behind the long one in the single render worker: never starts
+        queuedId = jobs.submit (queuedSpec, [] (JobContext&) -> Result<json> { return json { { "never", true } }; }).id;
+
+        for (int i = 0; i < 500 && ! longStarted; ++i)
+            std::this_thread::sleep_for (std::chrono::milliseconds (10));
+
+        REQUIRE (longStarted);
+        CHECK (! jobs.draining());
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const int cut = jobs.drain (std::chrono::milliseconds (400));
+        const auto took = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+        CHECK (jobs.draining());
+        CHECK (cut == 2);
+        CHECK (took >= 0.35);
+        CHECK (took < 4.0);
+
+        const auto longJob = jobs.get (longId);
+        REQUIRE (longJob.has_value());
+        CHECK (longJob->state == JobState::interrupted);
+        REQUIRE (longJob->error.has_value());
+        CHECK (longJob->error->code == errc::interrupted);
+
+        const auto shortJob = jobs.get (shortId);
+        REQUIRE (shortJob.has_value());
+        CHECK (shortJob->state == JobState::succeeded);
+
+        const auto queuedJob = jobs.get (queuedId);
+        REQUIRE (queuedJob.has_value());
+        CHECK (queuedJob->state == JobState::interrupted);
+
+        // a submit during the drain is refused with BUSY and never runs
+        std::atomic<bool> ran { false };
+        const auto refused = jobs.submit (shortSpec, [&] (JobContext&) -> Result<json> { ran = true; return json::object(); });
+        REQUIRE (refused.error.has_value());
+        CHECK (refused.error->code == errc::busy);
+        const auto refusedJob = jobs.get (refused.id);
+        REQUIRE (refusedJob.has_value());
+        CHECK (refusedJob->state == JobState::failed);
+        CHECK (! ran);
+
+        jobs.shutdown();
+    }
+
+    // the final states are on disk, and a restart does not rewrite them to SERVER_RESTARTED
+    JobManager again (dir);
+    REQUIRE (again.get (longId).has_value());
+    CHECK (again.get (longId)->state == JobState::interrupted);
+    CHECK (again.get (longId)->error->code == errc::interrupted);
+    CHECK (again.get (shortId)->state == JobState::succeeded);
+}
+
+ROVOX_TEST (core, job_drain_with_nothing_running_returns_at_once)
+{
+    JobManager jobs ("");
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK (jobs.drain (std::chrono::seconds (30)) == 0);
+    CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() < 2.0);
+}
+
 ROVOX_TEST (core, job_lookup_refuses_ids_that_are_paths_and_a_bad_record_does_not_stop_the_start)
 {
     const auto root = test::makeTempDir ("jobget");

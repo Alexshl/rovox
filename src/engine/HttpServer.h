@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Rovox contributors
 
-// Minimal HTTP surface of `rovox serve` (tasks 100/140): /healthz, the command layer over HTTP, project and render
+// Minimal HTTP surface of `rovox serve` (tasks 100/140): /healthz, /readyz, /metrics, the command layer over HTTP, project and render
 // downloads, and the tus 1.0 upload endpoints. MCP and WebSocket arrive in M2/M3; they will use the same CommandBus.
 #pragma once
 
@@ -14,6 +14,7 @@
 #include <atomic>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <memory>
 #include <thread>
@@ -25,6 +26,15 @@ namespace rovox
 
 class Gateway;
 struct WsRequest;
+
+/** Live numbers for GET /metrics, supplied by the owner of the objects (all optional; a missing source drops its metric). Called on request threads. */
+struct MetricsSources
+{
+    std::function<int()> wsClients;                                 // connected WebSocket clients
+    std::function<int()> mcpSessions;                               // open MCP sessions
+    std::function<std::map<std::string, int>()> jobsByState;        // job state name -> count
+    std::function<std::vector<std::string>()> tenants;              // tenants that have anything to report (CPU use)
+};
 
 struct ServerOptions
 {
@@ -38,6 +48,7 @@ struct ServerOptions
     std::string sourceUrl = "https://github.com/rovox/rovox";   // AGPL section 13: GET /source
     std::vector<std::string> allowedOrigins;
     std::vector<std::string> allowedHosts;      // extra Host values accepted on a loopback bind (reverse proxy)
+    MetricsSources metrics;
     size_t maxBodyBytes = 8u << 20;     // request bodies of everything but the upload routes (declared Content-Length; chunked bodies are refused there)
 };
 
@@ -59,6 +70,10 @@ public:
     /** The WebSocket gateway answering `GET /ws` (set before start()); without one the upgrade is refused. */
     void setGateway (Gateway* g) { gateway_ = g; }
 
+    /** Graceful stop: GET /readyz answers 503 from now on (/healthz stays 200 until the server stops). Safe to call from any thread. */
+    void setDraining (bool on)  { draining_ = on; }
+    bool draining() const       { return draining_; }
+
 private:
     void installRoutes();
 
@@ -75,6 +90,7 @@ private:
     std::thread thread_;
     int port_ = 0;
     std::atomic<Gateway*> gateway_ { nullptr };
+    std::atomic<bool> draining_ { false };
     PeakStore peakStore_;
     std::mutex authMutex_;
     std::deque<std::chrono::steady_clock::time_point> authFailures_;     // rate limit on wrong tokens (task 350)
