@@ -38,8 +38,8 @@ struct McpConfig
     bool reaperCompat = false;              // extra tool names of the old mcp__reaper__ bridge (list_projects, update_tracks, ...)
     std::vector<std::string> allowedOrigins;    // HTTP: Origin values accepted besides loopback
     int sessionTtlS = 1800;                 // idle HTTP sessions expire
-    std::function<Result<json> (const std::string&)> uploadBatchStatus;     // set by `serve`; enables upload.status
-    std::function<Result<json> (const std::string&)> uploadFinish;          // set by `serve`; enables upload.finish
+    std::function<Result<json> (const std::string&, const std::string&)> uploadBatchStatus;   // (id, tenant); set by `serve`; enables upload.status
+    std::function<Result<json> (const std::string&, const std::string&)> uploadFinish;   // (id, tenant); set by `serve`; enables upload.finish
     std::function<bool()> audioActive;      // optional
     KeyStore* keyStore = nullptr;           // set by `serve` and `mcp`; enables key.* and tenant.* (admin tools, local operator only)
     std::string configFile;                 // TOML with [delivery.*] adapters; empty = $ROVOX_CONFIG, else <data>/config/rovox.toml

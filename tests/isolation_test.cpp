@@ -158,12 +158,14 @@ ROVOX_TEST (isolation, no_tool_gives_tenant_b_the_data_or_the_control_of_tenant_
     res.track = track["data"]["track_id"];
 
     // an audio clip, so that there is an item and a render to reach for
-    const auto dir = test::makeTempDir ("iso-media");
+    const auto dir = test::host().dataDir() / "tenants" / "iso_a" / "media";       // a tenant imports only from its own subtree
+    fs::create_directories (dir);
     test::writeWav (dir / "a.wav", { test::sine (440.0, -20.0, 2.0, 44100.0) }, 44100.0, 24);
-    auto plan = h.tool (a, "import.plan", { { "project_id", res.project }, { "paths", json::array ({ (dir / "a.wav").string() }) } });
+    auto plan = h.tool (a, "import.plan", { { "project_id", res.project }, { "paths", json::array ({ (dir / "a.wav").string() }) }, { "wait_s", 30 } });
 
-    if (plan["ok"] == true)
-        h.tool (a, "import.apply", { { "project_id", res.project }, { "plan_id", plan["data"]["plan_id"] } });
+    REQUIRE (plan["ok"] == true);
+    REQUIRE (plan["data"].contains ("result"));
+    CHECK (h.tool (a, "import.apply", { { "project_id", res.project }, { "plan_id", plan["data"]["result"]["plan_id"] } })["ok"] == true);
 
     auto got = h.tool (a, "project.get", { { "project_id", res.project } });
     REQUIRE (got["ok"] == true);
@@ -176,6 +178,8 @@ ROVOX_TEST (isolation, no_tool_gives_tenant_b_the_data_or_the_control_of_tenant_
     auto render = h.tool (a, "render.start", { { "project_id", res.project }, { "name", "iso" } });
     if (render["ok"] == true)
         res.job = render["data"]["job_id"];
+    else
+        std::cerr << "    render.start: " << render.dump() << "\n";
 
     CHECK (! res.job.empty());
 
@@ -359,8 +363,8 @@ ROVOX_TEST (isolation, upload_tools_do_not_show_or_materialise_another_tenants_b
     const auto dir = test::makeTempDir ("iso-uploads");
     UploadStore store (dir);
     mcp::McpConfig cfg;
-    cfg.uploadBatchStatus = [&store] (const std::string& id) { return store.batchStatus (id); };
-    cfg.uploadFinish = [&store] (const std::string& id) { return store.finish (id); };
+    cfg.uploadBatchStatus = [&store] (const std::string& id, const std::string& tenant) { return store.batchStatus (id, tenant); };
+    cfg.uploadFinish = [&store] (const std::string& id, const std::string& tenant) { return store.finish (id, tenant); };
     Harness h (cfg);
     auto a = h.session ("iso_ua");
     auto b = h.session ("iso_ub");

@@ -816,8 +816,8 @@ int runServe (const Options& o)
 
     auto mcpCfg = mcpConfig (o);
     mcpCfg.keyStore = &keys;
-    mcpCfg.uploadBatchStatus = [&server] (const std::string& id) { return server.uploads().batchStatus (id); };
-    mcpCfg.uploadFinish = [&server] (const std::string& id) { return server.uploads().finish (id); };
+    mcpCfg.uploadBatchStatus = [&server] (const std::string& id, const std::string& tenant) { return server.uploads().batchStatus (id, tenant); };
+    mcpCfg.uploadFinish = [&server] (const std::string& id, const std::string& tenant) { return server.uploads().finish (id, tenant); };
     McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
     server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .authenticator = &authenticator, .allowedOrigins = o.allowOrigins, .allowedHosts = so.allowedHosts, .loopbackBind = loopback }); });
 

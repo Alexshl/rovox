@@ -2364,7 +2364,8 @@ ROVOX_TEST (mcp, licence_gate_covers_uid_file_and_rpp_paths_of_other_tenants)
     CHECK (byFile["error"]["code"] == "FORBIDDEN_LICENSE");
 
     // an RPP with a JS effect of unknown licence is refused as a whole
-    const auto dir = test::makeTempDir ("mcp-lic-rpp");
+    const auto dir = test::host().dataDir() / "tenants" / "acme" / "lic-rpp";        // a tenant imports only from its own subtree
+    fs::create_directories (dir);
     std::ofstream (dir / "js.RPP") << "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  TEMPO 120 4 4 0\n  <TRACK {AAAAAAAA-0000-0000-0000-0000000000A1}\n    NAME \"JS\"\n"
                                       "    ISBUS 0 0\n    <FXCHAIN\n      BYPASS 0 0 0\n      <JS licgain \"\"\n        -6\n      >\n      FXID {11111111-1111-1111-1111-111111111111}\n    >\n  >\n>\n";
     auto imported = h.tool ("import.rpp", { { "project_id", acmeProject }, { "path", (dir / "js.RPP").string() } }, acme.get());

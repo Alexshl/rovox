@@ -453,7 +453,7 @@ Result<json> UploadStore::batchStatus (const std::string& batchId, const std::st
                { "completed_files", complete }, { "complete", complete == (int) files.size() } };
 
     if (complete == (int) files.size() && placedAll)
-        out["materialised_path"] = materialisedDir (batchId).string();
+        out["materialised_path"] = materialisedDir (batchId, owner).string();
 
     return out;
 }
@@ -546,9 +546,12 @@ bool validBatchId (const std::string& id)
 }
 } // namespace
 
-fs::path UploadStore::materialisedDir (const std::string& id) const
+fs::path UploadStore::materialisedDir (const std::string& id, const std::string& tenant) const
 {
-    return root_ / id;
+    if (tenantBase_.empty() || tenant.empty() || tenant == "local")
+        return root_ / id;
+
+    return tenantBase_ / "tenants" / tenant / "uploads" / id;       // inside the tenant's own subtree: import.plan may read it, its storage quota counts it
 }
 
 std::vector<UploadInfo> UploadStore::membersOf (const std::string& id)      // call with mutex_ held
@@ -592,7 +595,7 @@ Result<json> UploadStore::finish (const std::string& id, const std::string& tena
             if (! m.complete)
                 return makeError (errc::preconditionFailed, "upload " + m.id + " is not complete yet", json { { "upload_id", m.id }, { "offset", m.offset }, { "length", m.length } });
 
-        const auto dir = materialisedDir (id);
+        const auto dir = materialisedDir (id, members.front().tenant);
         std::error_code ec;
         std::set<std::string> used;
 
@@ -648,7 +651,7 @@ Result<json> UploadStore::finish (const std::string& id, const std::string& tena
     }
 
     // hashes are computed outside the lock (multi-GB files) and cached in the state file
-    const auto dir = materialisedDir (id);
+    const auto dir = materialisedDir (id, members.front().tenant);
     json files = json::array();
     std::vector<std::string> rels;
 
@@ -766,7 +769,7 @@ int UploadStore::cleanup (std::int64_t now)
         if (now - newest[key] > limits_.ttl.count())
         {
             if (dirsGone.insert (key).second)
-                fs::remove_all (materialisedDir (key), ec);
+                fs::remove_all (materialisedDir (key, u.tenant), ec);
 
             fs::remove (completedPath (u.id), ec);
             fs::remove (jsonPath (u.id), ec);

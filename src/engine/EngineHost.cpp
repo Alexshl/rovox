@@ -185,8 +185,8 @@ EngineHost::~EngineHost()
 
 Result<fs::path> EngineHost::checkPath (const fs::path& p, const std::string& tenant) const
 {
-    if (! config_.restrictPaths)
-        return p;
+    if (! config_.restrictPaths && tenant == "local")
+        return p;                                               // only the operator is ever unrestricted; any other tenant stays inside its own subtree
 
     if (tenant != "local" && ! isValidTenantId (tenant))
         return makeError (errc::forbiddenPath, "path is outside the allowed directories: " + p.string(), json { { "path", p.string() } });

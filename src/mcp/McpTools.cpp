@@ -392,6 +392,16 @@ void McpServer::buildTools()
         return JobContextInfo { c.session.tenant, projectId, c.session.origin(), c.session.principal.keyId, c.session.principal.quotaProfile };
     };
 
+    // a project of another tenant looks exactly like one that does not exist
+    auto ownsProject = [] (ToolCall& c, const std::string& projectId)
+    {
+        for (auto& p : c.server.projects().list (c.session.tenant, true))
+            if (p.id == projectId)
+                return true;
+
+        return false;
+    };
+
     auto renderSchema = [] (bool preflight)
     {
         json p {
@@ -621,11 +631,15 @@ void McpServer::buildTools()
         t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "state", { { "type", "string" }, { "enum", { "queued", "running", "succeeded", "failed", "cancelled" } } } },
                                   { "kind", str() }, { "limit", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 200 } } } });
         t.annotations = { { "readOnlyHint", true } };
-        t.handler = [] (ToolCall& c) -> ToolOutput
+        t.handler = [ownsProject] (ToolCall& c) -> ToolOutput
         {
             JobManager::Filter f;
             f.tenant = c.session.tenant;
             f.project = c.args.value ("project_id", "");
+
+            if (! f.project.empty() && ! ownsProject (c, f.project))
+                return ToolOutput::failure (makeError (errc::notFound, "no open project " + f.project));
+
             f.kind = c.args.value ("kind", "");
 
             if (c.args.contains ("state"))
@@ -694,9 +708,13 @@ void McpServer::buildTools()
                         "Every project tool response already carries external_changes for edits made by others since your last call.";
         t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "since_revision", integer() } }, { "project_id", "since_revision" });
         t.annotations = { { "readOnlyHint", true } };
-        t.handler = [] (ToolCall& c) -> ToolOutput
+        t.handler = [ownsProject] (ToolCall& c) -> ToolOutput
         {
             const std::string projectId = c.args["project_id"];
+
+            if (! ownsProject (c, projectId))
+                return ToolOutput::failure (makeError (errc::notFound, "no open project " + projectId));
+
             auto d = c.server.diffSince (projectId, c.args["since_revision"].get<std::uint64_t>());
 
             if (! d.ok())
@@ -770,14 +788,10 @@ void McpServer::buildTools()
         t.annotations = { { "readOnlyHint", true } };
         t.handler = [fn = config_.uploadBatchStatus] (ToolCall& c) -> ToolOutput
         {
-            auto r = fn (c.args["batch_id"]);
+            auto r = fn (c.args["batch_id"], c.session.tenant);       // another tenant's batch looks exactly like a missing one
 
             if (! r.ok())
                 return ToolOutput::failure (r.error());
-
-            // another tenant's batch looks exactly like a missing one
-            if (r.value().value ("tenant", "local") != c.session.tenant)
-                return ToolOutput::failure (makeError (errc::notFound, "no such batch"));
 
             return ToolOutput::success (r.value());
         };
@@ -793,7 +807,7 @@ void McpServer::buildTools()
                         "Returns {path, files:[{relpath, bytes, sha256}], detected: zoom_r20|rpp|audio}; pass path to import.plan (or import.rpp for rpp). Idempotent.";
         t.inputSchema = schema ({ { "batch_id", str() }, { "upload_id", str() } });
         t.annotations = { { "idempotentHint", true } };
-        t.handler = [fn = config_.uploadFinish, status = config_.uploadBatchStatus] (ToolCall& c) -> ToolOutput
+        t.handler = [fn = config_.uploadFinish] (ToolCall& c) -> ToolOutput
         {
             const auto batch = c.args.value ("batch_id", "");
             const auto upload = c.args.value ("upload_id", "");
@@ -801,18 +815,10 @@ void McpServer::buildTools()
             if (batch.empty() == upload.empty())
                 return ToolOutput::failure (makeError (errc::invalidParams, "pass exactly one of batch_id or upload_id"));
 
-            // a batch is checked before anything is materialised (finish moves files); a single upload can only be checked on the result
-            if (! batch.empty() && status)
-                if (auto owner = status (batch); owner.ok() && owner.value().value ("tenant", "local") != c.session.tenant)
-                    return ToolOutput::failure (makeError (errc::notFound, "no such upload or batch"));
-
-            auto r = fn (batch.empty() ? upload : batch);
+            auto r = fn (batch.empty() ? upload : batch, c.session.tenant);     // the store checks the owner before it moves anything
 
             if (! r.ok())
                 return ToolOutput::failure (r.error());
-
-            if (r.value().value ("tenant", "local") != c.session.tenant)
-                return ToolOutput::failure (makeError (errc::notFound, "no such upload or batch"));
 
             return ToolOutput::success (r.value());
         };
@@ -1095,8 +1101,11 @@ void McpServer::buildTools()
         t.description = "Reviews of this tenant, newest first, optionally of one project or one status (pending | approved | rejected | changes_requested | expired).";
         t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "status", { { "type", "string" }, { "enum", { "pending", "approved", "rejected", "changes_requested", "expired" } } } } });
         t.annotations = { { "readOnlyHint", true } };
-        t.handler = [reviewOf] (ToolCall& c) -> ToolOutput
+        t.handler = [reviewOf, ownsProject] (ToolCall& c) -> ToolOutput
         {
+            if (const auto pid = c.args.value ("project_id", std::string()); ! pid.empty() && ! ownsProject (c, pid))
+                return ToolOutput::failure (makeError (errc::notFound, "no open project " + pid));
+
             auto r = reviewOf (c).list (c.session.tenant, c.args.value ("project_id", ""), c.args.value ("status", ""));
 
             if (! r.ok())

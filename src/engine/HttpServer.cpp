@@ -146,6 +146,7 @@ HttpServer::HttpServer (EngineHost& host, ProjectManager& pm, CommandBus& bus, E
         hub_.publish (status.ok() ? status.value().value ("tenant", "local") : std::string ("local"), "", { { "type", "upload.batch_completed" }, { "batch_id", id } });
     };
     uploads_ = std::make_unique<UploadStore> (host_.dataDir() / "uploads", options_.uploadLimits, std::move (listener));
+    uploads_->setTenantBase (host_.dataDir());
     server_ = makeServerWithUpgrade ([this] (int fd, WsRequest req)
     {
         const auto header = [&req] (const char* name) { auto it = req.headers.find (name); return it == req.headers.end() ? std::string() : it->second; };

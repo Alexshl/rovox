@@ -99,7 +99,10 @@ public:
     Result<json> finish (const std::string& batchOrUploadId, const std::string& tenant = {});
 
     /** Where the files of a batch / upload are materialised (the directory exists only after finish). */
-    std::filesystem::path materialisedDir (const std::string& batchOrUploadId) const;
+    std::filesystem::path materialisedDir (const std::string& batchOrUploadId, const std::string& tenant = "local") const;
+
+    /** The data dir: with it set, a non-local tenant's uploads are materialised in `<base>/tenants/<tenant>/uploads/<id>`; without it (tests, CLI) everything stays under the store's root. */
+    void setTenantBase (std::filesystem::path base) { tenantBase_ = std::move (base); }
 
     /** Removes unfinished uploads older than the TTL, and finished ones (with their materialised files) older than the TTL after completion. Returns how many. */
     int cleanup (std::int64_t now);
@@ -117,7 +120,7 @@ private:
     static bool validId (const std::string&);
     std::vector<UploadInfo> membersOf (const std::string& batchOrUploadId);
 
-    std::filesystem::path root_;
+    std::filesystem::path root_, tenantBase_;
     UploadLimits limits_;
     Listener listener_;
     std::mutex mutex_;
