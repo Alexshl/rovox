@@ -9,7 +9,8 @@
 namespace rovox::mcp
 {
 
-StdioTransport::StdioTransport (McpServer& s, std::istream& in, std::ostream& out) : server_ (s), in_ (in), out_ (out) {}
+StdioTransport::StdioTransport (McpServer& s, std::istream& in, std::ostream& out, Principal principal)
+    : server_ (s), in_ (in), out_ (out), principal_ (std::move (principal)) {}
 
 void StdioTransport::write (const json& j)
 {
@@ -20,7 +21,7 @@ void StdioTransport::write (const json& j)
 
 void StdioTransport::run()
 {
-    auto session = server_.createSession();
+    auto session = server_.createSession (principal_);
     std::atomic<bool> done { false };
 
     // server-initiated notifications (events, resource updates) of this session

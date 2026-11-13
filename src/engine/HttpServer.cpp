@@ -6,6 +6,7 @@
 #include "Gateway.h"
 #include "Ids.h"
 #include "Peaks.h"
+#include "Quota.h"
 #include "RequestGuard.h"
 #include "Sha1.h"
 #include "Sha256.h"
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <limits>
 
@@ -36,6 +38,10 @@ int statusFor (const std::string& code)
     if (code == errc::unsupported)          return 501;
     if (code == errc::forbiddenPath)        return 403;
     if (code == errc::forbiddenLicense)     return 403;
+    if (code == errc::unauthorized)         return 401;
+    if (code == errc::forbiddenScope)       return 403;
+    if (code == errc::quotaExceeded)        return 429;
+    if (code == errc::rateLimited)          return 429;
     return 500;
 }
 
@@ -45,9 +51,42 @@ void reply (httplib::Response& res, int status, const json& body)
     res.set_content (body.dump (-1, ' ', false, json::error_handler_t::replace), "application/json");
 }
 
+/** Retry-After (whole seconds, at least 1) from `retry_after_s` in an error's details, when there is one. */
+void setRetryAfter (httplib::Response& res, const Error& e)
+{
+    if (e.details.is_object() && e.details.contains ("retry_after_s") && e.details["retry_after_s"].is_number())
+        res.set_header ("Retry-After", std::to_string (std::max (1, (int) std::ceil (e.details["retry_after_s"].get<double>()))));
+}
+
 void replyError (httplib::Response& res, const Error& e)
 {
+    if (statusFor (e.code) == 429)
+        setRetryAfter (res, e);
+
     reply (res, statusFor (e.code), { { "ok", false }, { "error", e.toJson() } });
+}
+
+AuthRequest authRequestFrom (const httplib::Request& req)
+{
+    AuthRequest a;
+    a.authorization = req.get_header_value ("Authorization");
+    a.cookie = req.get_header_value ("Cookie");
+    a.remoteAddr = req.remote_addr;
+    a.method = req.method;
+    a.path = req.path;
+
+    // `?token=` opens the page URL (GET) only; it is never a credential for a state-changing request
+    if (req.method == "GET" && req.has_param ("token"))
+        a.queryToken = req.get_param_value ("token");
+
+    for (const auto& h : req.headers)
+    {
+        auto name = h.first;
+        std::transform (name.begin(), name.end(), name.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
+        a.headers[name] = h.second;
+    }
+
+    return a;
 }
 
 /** tus "Upload-Metadata: key base64value,key2 base64value2" */
@@ -75,9 +114,9 @@ std::map<std::string, std::string> parseTusMetadata (const std::string& header)
     return out;
 }
 
-std::string sessionCookie (const std::string& token)
+std::string sessionCookie (const std::string& signedValue)
 {
-    return "rovox_token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000";
+    return "rovox_session=" + signedValue + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000";
 }
 
 void tusHeaders (httplib::Response& res)
@@ -94,6 +133,22 @@ std::string safeFileName (const std::string& n)
 HttpServer::HttpServer (EngineHost& host, ProjectManager& pm, CommandBus& bus, EventHub& hub, ServerOptions o)
     : host_ (host), projects_ (pm), bus_ (bus), hub_ (hub), options_ (std::move (o))
 {
+    if (options_.authenticator != nullptr)
+    {
+        auth_ = options_.authenticator;
+    }
+    else
+    {
+        ownAuth_ = std::make_unique<Authenticator> (nullptr, options_.token);
+        auth_ = ownAuth_.get();
+
+        if (options_.sessionKeyFile.empty())
+            options_.sessionKeyFile = host_.dataDir() / "auth" / "session.key";
+    }
+
+    if (! options_.sessionKeyFile.empty())
+        auth_->setSessionKeyFile (options_.sessionKeyFile);
+
     UploadStore::Listener listener;
     listener.onCompleted = [this] (const UploadInfo& u) { hub_.publish ("local", "", { { "type", "upload.completed" }, { "upload", u.toJson() } }); };
     listener.onBatchCompleted = [this] (const std::string& id) { hub_.publish ("local", "", { { "type", "upload.batch_completed" }, { "batch_id", id } }); };
@@ -192,6 +247,18 @@ void HttpServer::installRoutes()
     svr.set_default_headers ({ { "Cross-Origin-Opener-Policy", "same-origin" }, { "Cross-Origin-Embedder-Policy", "require-corp" },
                                { "Cross-Origin-Resource-Policy", "same-origin" }, { "X-Content-Type-Options", "nosniff" } });
 
+    // the caller of a request that passed pre-routing (resolved again here, cheap); answers 401 itself when there is none
+    auto principalFor = [this] (const httplib::Request& req, httplib::Response& res) -> std::optional<Principal>
+    {
+        auto r = auth_->resolve (authRequestFrom (req));
+
+        if (r.ok())
+            return r.value();
+
+        replyError (res, r.error());
+        return std::nullopt;
+    };
+
     svr.set_pre_routing_handler ([this] (const httplib::Request& req, httplib::Response& res)
     {
         const auto deny = [&res] (int status, const char* code, const char* message)
@@ -243,34 +310,49 @@ void HttpServer::installRoutes()
             }
         }
 
-        if (options_.token.empty())
+        if (auth_->open())
             return httplib::Server::HandlerResponse::Unhandled;
 
-        const auto auth = req.get_header_value ("Authorization");
-        const auto cookie = req.get_header_value ("Cookie");
-        const bool viaHeaderOrCookie = Gateway::tokenMatches (options_.token, auth, cookie, "");
-        const bool viaParam = req.method == "GET" && req.has_param ("token") && Gateway::tokenMatches (options_.token, "", "", "token=" + req.get_param_value ("token"));
+        auto resolved = auth_->resolve (authRequestFrom (req));
 
         // opening the printed URL http://host:4810/?token=... sets the session cookie and drops the token from the address bar
-        if (req.path == "/" && viaParam)
+        if (req.path == "/" && req.method == "GET" && req.has_param ("token"))
         {
-            res.set_header ("Set-Cookie", sessionCookie (options_.token));
-            res.set_redirect ("/");
-            return httplib::Server::HandlerResponse::Handled;
+            AuthRequest viaQuery;
+            viaQuery.queryToken = req.get_param_value ("token");
+
+            if (auto r = auth_->resolve (viaQuery); r.ok())
+            {
+                res.set_header ("Set-Cookie", sessionCookie (auth_->issueSession (r.value())));
+                res.set_redirect ("/");
+                return httplib::Server::HandlerResponse::Handled;
+            }
         }
 
         const bool protectedPath = req.path.rfind ("/api/", 0) == 0 || req.path == "/mcp" || req.path.rfind ("/mcp/", 0) == 0;
 
         // a wrong ?token= counts like a wrong header or cookie, also on the page URL
-        if (! viaHeaderOrCookie && ! viaParam && req.has_param ("token") && ! protectedPath)
+        if (! resolved.ok() && req.has_param ("token") && ! protectedPath)
             noteAuthFailure();
 
         if (! protectedPath || req.path == "/api/login" || req.path == "/api/session")
             return httplib::Server::HandlerResponse::Unhandled;     // the static shell and the login endpoint are public
 
-        if (viaHeaderOrCookie || viaParam)
+        if (resolved.ok())
         {
-            return httplib::Server::HandlerResponse::Unhandled;
+            // MCP POSTs are rate limited in McpHttp (which answers in JSON-RPC); counting them here too would halve the limit
+            if (! apiPath)
+                return httplib::Server::HandlerResponse::Unhandled;
+
+            const auto decision = quotas().checkRate (resolved.value());
+
+            if (decision.allowed)
+                return httplib::Server::HandlerResponse::Unhandled;
+
+            const auto error = QuotaService::rateLimitedError (decision);
+            setRetryAfter (res, error);
+            reply (res, 429, { { "ok", false }, { "error", error.toJson() } });
+            return httplib::Server::HandlerResponse::Handled;
         }
 
         if (tooManyAuthFailures())
@@ -283,18 +365,24 @@ void HttpServer::installRoutes()
         if (! req.get_header_value ("Authorization").empty() || ! req.get_header_value ("Cookie").empty() || req.has_param ("token"))
             noteAuthFailure();
 
+        if (const auto challenge = auth_->challengeHeader(); ! challenge.empty())
+            res.set_header ("WWW-Authenticate", challenge);
+
         reply (res, 401, { { "ok", false }, { "error", { { "code", "UNAUTHORIZED" }, { "message", "missing or wrong token" } } } });
         return httplib::Server::HandlerResponse::Handled;
     });
 
-    // login for the web UI: POST {"token": "..."} -> HttpOnly SameSite=Strict cookie
+    // login for the web UI: POST {"token": "<server token or rvx_ key>"} -> HttpOnly SameSite=Strict signed session cookie (never the token itself)
     svr.Post ("/api/login", [this] (const httplib::Request& req, httplib::Response& res)
     {
         const auto body = json::parse (req.body.empty() ? "{}" : req.body, nullptr, false);
         const auto given = body.is_object() && body.contains ("token") && body["token"].is_string() ? body["token"].get<std::string>() : std::string();
 
         // the token is checked first: a right token always logs in, even while wrong guesses are being rate limited
-        if (! options_.token.empty() && ! Gateway::tokenMatches (options_.token, "Bearer " + given, "", ""))
+        const auto presented = "Bearer " + given;
+        auto principal = auth_->resolve (std::string_view (presented));
+
+        if (! principal.ok())
         {
             if (tooManyAuthFailures())
             {
@@ -306,17 +394,28 @@ void HttpServer::installRoutes()
             return reply (res, 401, { { "ok", false }, { "error", { { "code", "UNAUTHORIZED" }, { "message", "wrong token" } } } });
         }
 
-        if (! options_.token.empty())
-            res.set_header ("Set-Cookie", sessionCookie (options_.token));
+        if (const auto cookie = auth_->issueSession (principal.value()); ! cookie.empty())
+            res.set_header ("Set-Cookie", sessionCookie (cookie));
 
         reply (res, 200, { { "ok", true } });
     });
 
     svr.Get ("/api/session", [this] (const httplib::Request& req, httplib::Response& res)
     {
-        const bool ok = options_.token.empty() || Gateway::tokenMatches (options_.token, req.get_header_value ("Authorization"), req.get_header_value ("Cookie"), "");
-        reply (res, 200, { { "token_required", ! options_.token.empty() }, { "authenticated", ok }, { "version", rovoxVersion() }, { "commit", rovoxGitSha() },
-                           { "source_url", options_.sourceUrl }, { "audio", toString (host_.audioMode()) } });
+        const auto principal = auth_->resolve (authRequestFrom (req));
+        json body { { "token_required", ! auth_->open() }, { "authenticated", principal.ok() }, { "version", rovoxVersion() }, { "commit", rovoxGitSha() },
+                    { "source_url", options_.sourceUrl }, { "audio", toString (host_.audioMode()) } };
+
+        if (principal.ok())
+        {
+            const auto& p = principal.value();
+            body["tenant"] = p.tenant;
+            body["key_id"] = p.keyId;
+            body["scopes"] = p.scopes.names();
+            body["auth_mode"] = p.authMode;
+        }
+
+        reply (res, 200, body);
     });
 
     // AGPL section 13: where the running source code can be obtained, with the commit this binary was built from
@@ -344,11 +443,17 @@ void HttpServer::installRoutes()
     }
 
     // min/max peaks of an item, for the waveform drawing: GET /api/projects/{id}/peaks/{item_id}?bins=N&t0=..&t1=..  (t relative to the item)
-    svr.Get (R"(/api/projects/([^/]+)/peaks/([^/]+))", [this] (const httplib::Request& req, httplib::Response& res)
+    svr.Get (R"(/api/projects/([^/]+)/peaks/([^/]+))", [this, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
         CommandContext ctx;
         ctx.projectId = req.matches[1];
         ctx.origin = { Origin::Kind::ui, "http", "peaks" };
+        ctx.setPrincipal (*principal);
         auto future = bus_.submit ("item.source", { { "item_id", req.matches[2].str() } }, ctx);
 
         if (future.wait_for (std::chrono::seconds (30)) != std::future_status::ready)
@@ -415,14 +520,11 @@ void HttpServer::installRoutes()
 
     // the origin comes from the route (REST = an agent over HTTP), never from the body: a client must not pass its edits off as the UI's
     // the session (the undo-coalescing key) comes from the credential plus an optional short X-Rovox-Client name, so two REST clients do not share a gesture
-    auto contextFrom = [this] (const httplib::Request& req, const json& body, const std::string& project)
+    auto contextFrom = [] (const httplib::Request& req, const Principal& principal, const json& body, const std::string& project)
     {
         CommandContext ctx;
         ctx.projectId = project;
-        std::string session = "http:anon";
-
-        if (! options_.token.empty())
-            session = "http:" + sha256Hex (options_.token).substr (0, 8);
+        std::string session = principal.keyId.empty() ? "http:anon" : "http:" + principal.keyId;
 
         auto client = req.get_header_value ("X-Rovox-Client");
         const bool valid = ! client.empty() && client.size() <= 32 && std::all_of (client.begin(), client.end(), [] (unsigned char c) { return std::isalnum (c) || c == '-' || c == '_' || c == '.'; });
@@ -431,6 +533,7 @@ void HttpServer::installRoutes()
             session += ":" + client;
 
         ctx.origin = { Origin::Kind::mcp, session, "http" };
+        ctx.setPrincipal (principal);
 
         if (body.contains ("if_revision") && body["if_revision"].is_number_unsigned())
             ctx.ifRevision = body["if_revision"].get<std::uint64_t>();
@@ -440,47 +543,77 @@ void HttpServer::installRoutes()
         return ctx;
     };
 
-    svr.Get ("/api/projects", [runCommand] (const httplib::Request&, httplib::Response& res)
+    svr.Get ("/api/projects", [runCommand, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
-        runCommand ("project.list", json::object(), {}, res);
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
+        CommandContext ctx;
+        ctx.setPrincipal (*principal);
+        runCommand ("project.list", json::object(), ctx, res);
     });
 
-    svr.Post ("/api/projects", [runCommand] (const httplib::Request& req, httplib::Response& res)
+    svr.Post ("/api/projects", [runCommand, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
         const auto body = json::parse (req.body.empty() ? "{}" : req.body, nullptr, false);
 
         if (body.is_discarded())
             return reply (res, 400, { { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "body is not JSON" } } } });
 
-        runCommand ("project.new", body, {}, res);
+        CommandContext ctx;
+        ctx.setPrincipal (*principal);
+        runCommand ("project.new", body, ctx, res);
     });
 
-    svr.Get (R"(/api/projects/([^/]+))", [runCommand] (const httplib::Request& req, httplib::Response& res)
+    svr.Get (R"(/api/projects/([^/]+))", [runCommand, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
         CommandContext ctx;
+        ctx.setPrincipal (*principal);
         ctx.projectId = req.matches[1];
         runCommand ("project.info", json::object(), ctx, res);
     });
 
-    svr.Post (R"(/api/projects/([^/]+)/commands)", [runCommand, contextFrom] (const httplib::Request& req, httplib::Response& res)
+    svr.Post (R"(/api/projects/([^/]+)/commands)", [runCommand, contextFrom, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
         const auto body = json::parse (req.body, nullptr, false);
 
         if (body.is_discarded() || ! body.is_object() || ! body.contains ("name") || ! body["name"].is_string())
             return reply (res, 400, { { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "body must be {\"name\": ..., \"params\": {...}}" } } } });
 
-        runCommand (body["name"].get<std::string>(), body.value ("params", json::object()), contextFrom (req, body, req.matches[1]), res);
+        runCommand (body["name"].get<std::string>(), body.value ("params", json::object()), contextFrom (req, *principal, body, req.matches[1]), res);
     });
 
     for (const char* dirName : { "renders", "previews" })
     {
         const std::string dir = dirName;
-        svr.Get ("/api/projects/([^/]+)/" + dir + "/([^/]+)", [this, dir] (const httplib::Request& req, httplib::Response& res)
+        svr.Get ("/api/projects/([^/]+)/" + dir + "/([^/]+)", [this, dir, principalFor] (const httplib::Request& req, httplib::Response& res)
         {
+            const auto principal = principalFor (req, res);
+
+            if (! principal)
+                return;
+
             const auto name = safeFileName (req.matches[2]);
             std::optional<fs::path> projectDir;      // the mutex-guarded snapshot: this runs on an HTTP thread, not the message thread
 
-            for (auto& summary : projects_.list ("local", true))
+            for (auto& summary : projects_.list (principal->tenant, true))
                 if (summary.id == req.matches[1])
                     projectDir = summary.dir;
 
@@ -492,7 +625,7 @@ void HttpServer::installRoutes()
             // a render that only exists in the bucket (this server started with an empty cache) is fetched on first use
             if (dir == "renders" && projects_.storage() != nullptr)
                 if (std::error_code probe; ! fs::exists (file, probe))
-                    projects_.storage()->fetchRender ("local", req.matches[1], name, file);
+                    projects_.storage()->fetchRender (principal->tenant, req.matches[1], name, file);
 
             std::ifstream in (file, std::ios::binary);
 
@@ -530,9 +663,13 @@ void HttpServer::installRoutes()
         res.status = 204;
     });
 
-    svr.Post ("/api/uploads", [this] (const httplib::Request& req, httplib::Response& res)
+    svr.Post ("/api/uploads", [this, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
         tusHeaders (res);
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
 
         if (! req.has_header ("Upload-Length"))
             return reply (res, 400, { { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "Upload-Length is required" } } } });
@@ -541,6 +678,10 @@ void HttpServer::installRoutes()
 
         try { length = std::stoull (req.get_header_value ("Upload-Length")); }
         catch (...) { return reply (res, 400, { { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "bad Upload-Length" } } } }); }
+
+        // the tenant's storage quota is checked before the first byte is accepted (the owner of the upload is recorded by E11-04)
+        if (auto quota = quotas().checkStorage (principal->tenant, (std::int64_t) std::min<std::uint64_t> (length, (std::uint64_t) std::numeric_limits<std::int64_t>::max()), principal->quotaProfile); ! quota.ok())
+            return replyError (res, quota.error());
 
         auto created = uploads_->create (length, parseTusMetadata (req.get_header_value ("Upload-Metadata")));
 

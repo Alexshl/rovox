@@ -3,6 +3,7 @@
 
 // Runs the real `rovox` binary (path in $ROVOX_CLI_BIN, set by CTest) against synthetic projects.
 
+#include "KeyStore.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <thread>
 
@@ -880,7 +882,8 @@ ROVOX_TEST (web, static_ui_cookie_login_path_policy_and_source)
     auto bounce = c.Get ("/?token=tok123");
     REQUIRE (bounce != nullptr);
     CHECK (bounce->status == 302);
-    CHECK (bounce->get_header_value ("Set-Cookie").find ("rovox_token=tok123") != std::string::npos);
+    CHECK (bounce->get_header_value ("Set-Cookie").find ("rovox_session=") != std::string::npos);
+    CHECK (bounce->get_header_value ("Set-Cookie").find ("tok123") == std::string::npos);      // the cookie is signed, it never holds the token
 
     // AGPL section 13
     auto source = c.Get ("/source");
@@ -1049,4 +1052,187 @@ ROVOX_TEST (web, websocket_auth_origin_snapshot_events_and_audio)
 
     kill (server.pid, SIGTERM);
     CHECK (waitExit (server, 10) == 0);
+}
+
+//==============================================================================
+// E11-02: authentication wiring (REST, WebSocket, MCP stdio)
+
+namespace
+{
+KeyStore::CreateSpec keySpec (const std::string& tenant, ScopeSet scopes)
+{
+    KeyStore::CreateSpec s;
+    s.label = "cli-test";
+    s.tenant = tenant;
+    s.scopes = scopes;
+    return s;
+}
+} // namespace
+
+ROVOX_TEST (web, keys_cookie_session_scopes_and_legacy_token_regression)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("authdata");
+    KeyStore keys (data / "auth" / "keys.json");
+    auto reader = keys.create (keySpec ("cli-acme", ScopeSet::of ({ Scope::catalogRead })));
+    REQUIRE (reader.ok());
+    const auto readerKey = reader.value().key;
+    const auto readerId = reader.value().record["id"].get<std::string>();
+
+    auto server = spawn ({ "serve", "--port", "0", "--token", "tok123" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const int port = portOf (server);
+    REQUIRE (port > 0);
+    httplib::Client c ("127.0.0.1", port);
+
+    // the legacy token still works as a header, a query parameter on GET and the old cookie
+    CHECK (c.Get ("/api/projects")->status == 401);
+    CHECK (c.Get ("/api/projects", httplib::Headers { { "Authorization", "Bearer tok123" } })->status == 200);
+    CHECK (c.Get ("/api/projects?token=tok123")->status == 200);
+    CHECK (c.Get ("/api/projects", httplib::Headers { { "Cookie", "rovox_token=tok123" } })->status == 200);
+    CHECK (c.Get ("/api/projects", httplib::Headers { { "Authorization", "Bearer tok124" } })->status == 401);
+
+    // the login cookie is signed and never holds the token
+    auto login = c.Post ("/api/login", R"({"token":"tok123"})", "application/json");
+    REQUIRE (login != nullptr);
+    CHECK (login->status == 200);
+    const auto setCookie = login->get_header_value ("Set-Cookie");
+    CHECK (setCookie.rfind ("rovox_session=", 0) == 0);
+    CHECK (setCookie.find ("tok123") == std::string::npos);
+    const auto cookie = setCookie.substr (0, setCookie.find (';'));
+    CHECK (c.Get ("/api/projects", httplib::Headers { { "Cookie", cookie } })->status == 200);
+
+    // a forged or altered cookie is refused
+    auto forged = cookie;
+    forged.back() = forged.back() == '0' ? '1' : '0';
+    CHECK (c.Get ("/api/projects", httplib::Headers { { "Cookie", forged } })->status == 401);
+    CHECK (c.Get ("/api/projects", httplib::Headers { { "Cookie", "rovox_session=legacy.99999999999.00" } })->status == 401);
+
+    // /api/session says who is asking, without secrets
+    auto session = c.Get ("/api/session", httplib::Headers { { "Cookie", cookie } });
+    REQUIRE (session != nullptr);
+    const auto sj = json::parse (session->body);
+    CHECK (sj["authenticated"] == true);
+    CHECK (sj["tenant"].get<std::string>() == "local");
+    CHECK (sj["key_id"].get<std::string>() == "legacy");
+    CHECK (sj["auth_mode"].get<std::string>() == "legacy");
+    CHECK (session->body.find ("tok123") == std::string::npos);
+
+    // an API key: its own tenant and scopes, and a 403 for what it lacks
+    httplib::Headers asReader { { "Authorization", "Bearer " + readerKey } };
+    auto readerSession = c.Get ("/api/session", asReader);
+    REQUIRE (readerSession != nullptr);
+    const auto rj = json::parse (readerSession->body);
+    CHECK (rj["tenant"].get<std::string>() == "cli-acme");
+    CHECK (rj["key_id"].get<std::string>() == readerId);
+    CHECK (rj["auth_mode"].get<std::string>() == "token");
+    REQUIRE (rj["scopes"].size() == 1);
+    CHECK (rj["scopes"][0].get<std::string>() == "catalog:read");
+    CHECK (readerSession->body.find (readerKey) == std::string::npos);
+
+    auto render = c.Post ("/api/projects/p_none/commands", asReader, R"({"name":"render.start","params":{}})", "application/json");
+    REQUIRE (render != nullptr);
+    CHECK (render->status == 403);
+    CHECK (render->body.find ("FORBIDDEN_SCOPE") != std::string::npos);
+
+    // the key logs in too: the cookie carries its id, not the key
+    auto keyLogin = c.Post ("/api/login", json { { "token", readerKey } }.dump(), "application/json");
+    REQUIRE (keyLogin != nullptr);
+    CHECK (keyLogin->status == 200);
+    const auto keyCookie = keyLogin->get_header_value ("Set-Cookie");
+    CHECK (keyCookie.find (readerKey) == std::string::npos);
+    CHECK (keyCookie.find ("rovox_session=" + readerId + ".") == 0);
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
+ROVOX_TEST (web, websocket_of_a_revoked_key_is_closed_within_two_seconds)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("wsrevoke");
+    KeyStore keys (data / "auth" / "keys.json");
+    auto created = keys.create (keySpec ("cli-wsrev", ScopeSet::of ({ Scope::catalogRead, Scope::projectsRead })));
+    REQUIRE (created.ok());
+
+    auto server = spawn ({ "serve", "--port", "0" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const int port = portOf (server);
+    REQUIRE (port > 0);
+
+    WsClient ws;
+    REQUIRE (ws.open (port, { "Authorization: Bearer " + created.value().key }) == 101);
+    ws.sendText (R"({"t":"hello","client":"test/0"})");
+    json welcome;
+    REQUIRE (ws.waitFor ("welcome", welcome));
+
+    REQUIRE (keys.revoke (created.value().record["id"].get<std::string>()).ok());
+    const auto t0 = std::chrono::steady_clock::now();
+    bool closed = false;
+
+    while (! closed && std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() < 3.0)
+    {
+        int op = 0;
+        std::vector<uint8_t> payload;
+
+        if (ws.readFrame (op, payload, 100))
+        {
+            closed = op == 8;
+        }
+        else
+        {
+            char ch;
+            closed = ::recv (ws.fd, &ch, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
+        }
+    }
+
+    CHECK (closed);
+    CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() <= 2.5);
+
+    // and the revoked key no longer opens a new socket
+    { WsClient again; CHECK (again.open (port, { "Authorization: Bearer " + created.value().key }) == 401); }
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
+ROVOX_TEST (cli, mcp_tenant_flag_gives_every_scope_but_admin)
+{
+    if (! haveCli())
+        return;
+
+    const std::string input =
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})" "\n"
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"usage.summary","arguments":{}}})" "\n"
+        R"({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"usage.report","arguments":{}}})" "\n";
+    int code = -1;
+    auto m = run ({ "mcp", "--tenant", "acme" }, test::makeTempDir ("tenantdata"), 60, code, input);
+    CHECK (code == 0);
+
+    std::map<int, json> byId;
+    std::istringstream lines (m.out);
+    std::string l;
+
+    while (std::getline (lines, l))
+    {
+        auto j = json::parse (l, nullptr, false);
+
+        if (j.is_object() && j.contains ("id") && j["id"].is_number_integer())
+            byId[j["id"].get<int>()] = j;
+    }
+
+    REQUIRE (byId.count (2) == 1);
+    REQUIRE (byId.count (3) == 1);
+    CHECK (byId[2].dump().find ("acme") != std::string::npos);
+    CHECK (byId[3].dump().find ("FORBIDDEN_SCOPE") != std::string::npos);
+
+    // not a valid tenant id: refused before anything starts
+    int bad = -1;
+    run ({ "mcp", "--tenant", "Not Valid!" }, test::makeTempDir ("tenantbad"), 20, bad);
+    CHECK (bad == 1);
 }

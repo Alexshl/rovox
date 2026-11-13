@@ -3,11 +3,14 @@
 
 #include "McpHttp.h"
 
+#include "Quota.h"
 #include "RequestGuard.h"
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <set>
 
@@ -87,6 +90,36 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
     auto limits = std::make_shared<Limits>();
     const auto maxSessions = options.maxSessions, maxStreams = options.maxStreams;
 
+    Authenticator* const auth = options.authenticator;
+
+    // who is calling: the same resolution as the pre-routing handler; answers 401 itself when there is nobody
+    auto callerOf = [auth] (const httplib::Request& req, httplib::Response& res, const json& id) -> std::optional<Principal>
+    {
+        if (auth == nullptr)
+            return Principal::local();
+
+        AuthRequest a;
+        a.authorization = req.get_header_value ("Authorization");
+        a.cookie = req.get_header_value ("Cookie");
+        a.remoteAddr = req.remote_addr;
+        a.method = req.method;
+        a.path = req.path;
+
+        if (req.method == "GET" && req.has_param ("token"))
+            a.queryToken = req.get_param_value ("token");
+
+        auto resolved = auth->resolve (a);
+
+        if (resolved.ok())
+            return resolved.value();
+
+        if (const auto challenge = auth->challengeHeader(); ! challenge.empty())
+            res.set_header ("WWW-Authenticate", challenge);
+
+        replyJson (res, 401, rpcError (id, -32000, "missing or wrong token"));
+        return std::nullopt;
+    };
+
     auto guard = [options] (const httplib::Request& req, httplib::Response& res) -> bool
     {
         // the same rule as REST and WebSocket (guard::requestAllowed): DNS rebinding and cross-origin pages
@@ -107,7 +140,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
         return true;
     };
 
-    svr.Post ("/mcp", [&server, guard, limits, maxSessions, maxStreams] (const httplib::Request& req, httplib::Response& res)
+    svr.Post ("/mcp", [&server, guard, callerOf, auth, limits, maxSessions, maxStreams] (const httplib::Request& req, httplib::Response& res)
     {
         if (! guard (req, res))
             return;
@@ -119,6 +152,19 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
         if (! body.is_object())
             return replyJson (res, 400, rpcError (nullptr, -32600, "batching is not supported in MCP 2025-06-18; send one message per POST"));
+
+        const auto caller = callerOf (req, res, body.value ("id", json (nullptr)));
+
+        if (! caller)
+            return;
+
+        if (auth != nullptr)
+            if (const auto decision = quotas().checkRate (*caller); ! decision.allowed)
+            {
+                const auto error = QuotaService::rateLimitedError (decision);
+                res.set_header ("Retry-After", std::to_string (std::max (1, (int) std::ceil (decision.retryAfterS))));
+                return replyJson (res, 429, rpcError (body.value ("id", json (nullptr)), -32000, error.message));
+            }
 
         const bool isInit = body.value ("method", "") == "initialize";
         std::shared_ptr<Session> session;
@@ -152,7 +198,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
                     limits->sessionIds.erase (victim->id);
                 }
 
-                session = server.createSession();
+                session = server.createSession (*caller);
                 limits->sessionIds.insert (session->id);
                 busy = markBusy (session);
             }
@@ -168,7 +214,8 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
             session = server.findSession (id);
 
-            if (! session)
+            // another key presenting this session id must not learn that it exists, let alone use it
+            if (! session || session->principal.keyId != caller->keyId)
                 return replyJson (res, 404, rpcError (body.value ("id", json (nullptr)), -32001, "unknown or expired session; initialize again"));
 
             busy = markBusy (session);
@@ -257,9 +304,14 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
         replyJson (res, 200, *response);
     });
 
-    svr.Get ("/mcp", [&server, guard, limits, maxStreams] (const httplib::Request& req, httplib::Response& res)
+    svr.Get ("/mcp", [&server, guard, callerOf, limits, maxStreams] (const httplib::Request& req, httplib::Response& res)
     {
         if (! guard (req, res))
+            return;
+
+        const auto caller = callerOf (req, res, json (nullptr));
+
+        if (! caller)
             return;
 
         if (req.get_header_value ("Accept").find ("text/event-stream") == std::string::npos)
@@ -267,7 +319,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
 
         auto session = server.findSession (req.get_header_value ("Mcp-Session-Id"));
 
-        if (! session)
+        if (! session || session->principal.keyId != caller->keyId)
             return replyJson (res, 404, rpcError (nullptr, -32001, "unknown or expired session; initialize again"));
 
         if (limits->streams.fetch_add (1) >= (int) maxStreams)
@@ -324,14 +376,19 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
         });
     });
 
-    svr.Delete ("/mcp", [&server, guard] (const httplib::Request& req, httplib::Response& res)
+    svr.Delete ("/mcp", [&server, guard, callerOf] (const httplib::Request& req, httplib::Response& res)
     {
         if (! guard (req, res))
             return;
 
+        const auto caller = callerOf (req, res, json (nullptr));
+
+        if (! caller)
+            return;
+
         auto session = server.findSession (req.get_header_value ("Mcp-Session-Id"));
 
-        if (! session)
+        if (! session || session->principal.keyId != caller->keyId)
             return replyJson (res, 404, rpcError (nullptr, -32001, "unknown or expired session"));
 
         server.closeSession (session->id);

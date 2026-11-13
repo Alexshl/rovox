@@ -8,7 +8,10 @@
 #include "Result.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <initializer_list>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,6 +21,7 @@ namespace rovox
 {
 
 class KeyStore;
+struct KeyRecord;
 
 enum class Scope : std::uint32_t
 {
@@ -91,11 +95,22 @@ std::string newKeyId();
 std::string newKeySecret();
 
 //==============================================================================
+/** Everything a transport knows about the credentials of one request. Fields that do not apply stay empty. */
+struct AuthRequest
+{
+    std::string authorization;                      // the Authorization header value ("Bearer ...")
+    std::string cookie;                             // the Cookie header
+    std::string queryToken;                         // ?token= (only where the transport allows it)
+    std::string remoteAddr, method, path;
+    std::map<std::string, std::string> headers;     // lower-case names
+};
+
 class Authenticator
 {
 public:
-    /** `keys` may be null (no key store); `legacyToken` empty = none. Neither is owned beyond the call lifetime of the Authenticator. */
-    Authenticator (KeyStore* keys, std::string legacyToken);
+    /** `keys` may be null (no key store); `legacyToken` empty = none. Neither is owned beyond the call lifetime of the Authenticator.
+        `configFile` is kept for the external auth modes (E9-01); it is not read yet. */
+    Authenticator (KeyStore* keys, std::string legacyToken, std::filesystem::path configFile = {});
 
     /** True when there is no legacy token and no keys: every request is the local operator (today's loopback behaviour). */
     bool open() const;
@@ -104,12 +119,36 @@ public:
         Fails with UNAUTHORIZED; neither the message nor the details ever contain the secret. */
     Result<Principal> resolve (std::string_view presented) const;
 
+    /** Tries, in order: the Authorization header, the signed `rovox_session` cookie, the old `rovox_token` cookie (legacy token only), `?token=`. */
+    Result<Principal> resolve (const AuthRequest&) const;
+
     /** True if the principal is still valid (key neither revoked nor expired); for long-lived connections (WS, MCP sessions). */
     bool stillValid (const Principal&) const;
 
+    /** Where the secret of the session cookie lives (<data>/auth/session.key, 32 random bytes, 0600). Without a file the secret is kept in memory only. */
+    void setSessionKeyFile (std::filesystem::path file);
+
+    /** `<key_id>.<exp>.<hex HMAC-SHA256>` for `rovox_session`; empty for the open mode (nothing to log in to). */
+    std::string issueSession (const Principal&, std::int64_t ttlSeconds = 30 * 24 * 3600) const;
+
+    /** Value of `WWW-Authenticate` on a 401; empty in the token mode. */
+    std::string challengeHeader() const;
+    /** OAuth protected-resource metadata (E11-08); nullopt = the route is not registered. */
+    std::optional<json> resourceMetadata() const;
+
+    const std::filesystem::path& configFile() const     { return configFile_; }
+
 private:
+    std::string sessionKey() const;                     // creates the secret on first use
+    Result<Principal> fromSession (std::string_view cookieValue) const;
+    Principal principalOf (const KeyRecord&) const;
+
     KeyStore* keys_;
     std::string legacyToken_;
+    std::filesystem::path configFile_;
+    mutable std::mutex keyMutex_;
+    std::filesystem::path sessionKeyFile_;
+    mutable std::string sessionKey_;
 };
 
 } // namespace rovox
