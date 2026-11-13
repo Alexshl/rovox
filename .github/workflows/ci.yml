@@ -164,7 +164,7 @@ jobs:
           # stdio: the container itself is the server command
           # the server command goes through a wrapper: the Inspector CLI would read `-i` / `--rm` after `docker run` as its own options
           printf '#!/bin/sh\nexec docker run -i --rm rovox:ci mcp\n' > /tmp/rovox-stdio.sh && chmod +x /tmp/rovox-stdio.sh
-          npx --yes "$INSPECTOR" --cli /tmp/rovox-stdio.sh --method tools/list --format json | tee /tmp/inspector-stdio.json
+          npx --yes "$INSPECTOR" --cli /tmp/rovox-stdio.sh --method tools/list | tee /tmp/inspector-stdio.json
           jq -e '.tools | length > 0' /tmp/inspector-stdio.json
           # HTTP: against a running container, with the bearer token (exit codes: 0 ok, 3 auth, 4 unreachable, 5 tool error)
           token="ci-$(openssl rand -hex 16)"
@@ -173,9 +173,9 @@ jobs:
           trap 'docker logs rovox-insp || true; docker rm -f rovox-insp || true' EXIT
           for i in $(seq 1 60); do curl -fs http://127.0.0.1:4812/healthz >/dev/null && break; sleep 2; done
           # --header is variadic in the 0.17 CLI: it must come last, or it swallows the options after it
-          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --transport http --method tools/list --format json --header "Authorization: Bearer $token" | tee /tmp/inspector-http-tools.json
+          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --transport http --method tools/list --header "Authorization: Bearer $token" | tee /tmp/inspector-http-tools.json
           jq -e '.tools | length > 0' /tmp/inspector-http-tools.json
-          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --transport http --method tools/call --tool-name project.list --format json --header "Authorization: Bearer $token" | tee /tmp/inspector-http-call.json
+          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --transport http --method tools/call --tool-name project.list --header "Authorization: Bearer $token" | tee /tmp/inspector-http-call.json
           jq -e '.structuredContent.ok == true' /tmp/inspector-http-call.json
 
       - name: Skills sidecar e2e (analysis.tempo_map on a 120 BPM click, tempo.get on the core)
