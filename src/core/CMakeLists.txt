@@ -4,6 +4,7 @@
 add_library(rovox_core STATIC
     ActivityLog.cpp
     Auth.cpp
+    ExternalAuth.cpp
     KeyStore.cpp
     Quota.cpp
     Usage.cpp

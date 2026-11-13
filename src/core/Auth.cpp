@@ -3,6 +3,7 @@
 
 #include "Auth.h"
 
+#include "ExternalAuth.h"
 #include "Hmac.h"
 #include "KeyStore.h"
 #include "Sha256.h"
@@ -306,11 +307,13 @@ std::string hashKeySecret (const std::string& secret)
 
 //==============================================================================
 Authenticator::Authenticator (KeyStore* keys, std::string legacyToken, std::filesystem::path configFile)
-    : keys_ (keys), legacyToken_ (std::move (legacyToken)), configFile_ (std::move (configFile)) {}
+    : keys_ (keys), legacyToken_ (std::move (legacyToken)), configFile_ (std::move (configFile)), external_ (std::make_unique<ExternalAuth> (configFile_)) {}
+
+Authenticator::~Authenticator() = default;
 
 bool Authenticator::open() const
 {
-    if (requireCredentials_.load())
+    if (requireCredentials_.load() || external_->mode() != AuthMode::token)
         return false;
 
     const bool inUse = keys_ != nullptr && keys_->inUse();
@@ -354,6 +357,15 @@ Result<Principal> Authenticator::resolve (std::string_view presented) const
     if (! legacyToken_.empty() && constantTimeEquals (token, legacyToken_))
         return legacyPrincipal();
 
+    // native keys are valid in the mode `token` only; they are not even forwarded to an identity provider
+    if (const auto mode = external_->mode(); mode != AuthMode::token)
+    {
+        if (mode == AuthMode::introspection && token.rfind (keyPrefix, 0) != 0)
+            return external_->fromBearer (token);
+
+        return unauthorized();
+    }
+
     if (keys_ == nullptr)
         return unauthorized();
 
@@ -383,6 +395,10 @@ Result<Principal> Authenticator::resolve (const AuthRequest& req) const
         return p;
     }
 
+    // trusted_proxy: a signed request from an allowlisted address; X-Rovox-* from anywhere else is ignored
+    if (auto proxied = external_->fromProxy (req))
+        return *proxied;
+
     if (! req.authorization.empty())
         if (auto r = resolve (std::string_view (req.authorization)); r.ok())
             return r;
@@ -408,7 +424,7 @@ Result<Principal> Authenticator::resolve (const AuthRequest& req) const
 bool Authenticator::stillValid (const Principal& p) const
 {
     if (p.authMode != "token")
-        return true;
+        return true;        // external principals are re-checked on every request
 
     if (keys_ == nullptr)
         return false;
@@ -511,6 +527,9 @@ Result<Principal> Authenticator::fromSession (std::string_view value) const
     if (keyId == "legacy")
         return legacyToken_.empty() ? Result<Principal> (unauthorized()) : Result<Principal> (legacyPrincipal());
 
+    if (external_->mode() != AuthMode::token)
+        return unauthorized();      // a session of a native key does not outlive the switch to an external mode
+
     if (keys_ == nullptr)
         return unauthorized();
 
@@ -524,12 +543,12 @@ Result<Principal> Authenticator::fromSession (std::string_view value) const
 
 std::string Authenticator::challengeHeader() const
 {
-    return {};
+    return external_->challengeHeader();
 }
 
 std::optional<json> Authenticator::resourceMetadata() const
 {
-    return std::nullopt;
+    return external_->resourceMetadata();
 }
 
 } // namespace rovox

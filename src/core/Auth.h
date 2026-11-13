@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <initializer_list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -24,6 +25,7 @@ namespace rovox
 {
 
 class KeyStore;
+class ExternalAuth;
 struct KeyRecord;
 
 enum class Scope : std::uint32_t
@@ -71,7 +73,7 @@ struct Principal
     std::string client;             // calling application
     ScopeSet scopes = ScopeSet::all();
     std::string quotaProfile;       // empty = the tenant's default; `local` is unlimited
-    std::string authMode = "local"; // local | open | legacy | token
+    std::string authMode = "local"; // local | open | legacy | token | trusted_proxy | introspection
 
     bool has (Scope s) const        { return scopes.has (s); }
 
@@ -112,8 +114,10 @@ class Authenticator
 {
 public:
     /** `keys` may be null (no key store); `legacyToken` empty = none. Neither is owned beyond the call lifetime of the Authenticator.
-        `configFile` is kept for the external auth modes (E9-01); it is not read yet. */
+        `configFile` (rovox.toml) holds `[auth] mode = token | trusted_proxy | introspection`, see ExternalAuth.h; native keys
+        `rvx_...` are valid in the mode `token` only, the legacy token in every mode. */
     Authenticator (KeyStore* keys, std::string legacyToken, std::filesystem::path configFile = {});
+    ~Authenticator();
 
     /** True when there is no legacy token and no keys: every request is the local operator (today's loopback behaviour). */
     bool open() const;
@@ -137,12 +141,15 @@ public:
     /** `<key_id>.<exp>.<hex HMAC-SHA256>` for `rovox_session`; empty for the open mode (nothing to log in to). */
     std::string issueSession (const Principal&, std::int64_t ttlSeconds = 30 * 24 * 3600) const;
 
-    /** Value of `WWW-Authenticate` on a 401; empty in the token mode. */
+    /** Value of `WWW-Authenticate` on a 401; empty unless the mode is introspection with a `resource`. */
     std::string challengeHeader() const;
-    /** OAuth protected-resource metadata (E11-08); nullopt = the route is not registered. */
+    /** OAuth protected-resource metadata (RFC 9728); nullopt = the route is not registered. */
     std::optional<json> resourceMetadata() const;
 
     const std::filesystem::path& configFile() const     { return configFile_; }
+
+    /** The external auth modes (config, caches, test hooks for the HTTP client and the clock). */
+    ExternalAuth& external() const                      { return *external_; }
 
 private:
     std::string sessionKey() const;                     // creates the secret on first use
@@ -152,6 +159,7 @@ private:
     KeyStore* keys_;
     std::string legacyToken_;
     std::filesystem::path configFile_;
+    std::unique_ptr<ExternalAuth> external_;
     mutable std::mutex keyMutex_;
     std::filesystem::path sessionKeyFile_;
     mutable std::string sessionKey_;
