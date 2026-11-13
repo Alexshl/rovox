@@ -8,6 +8,7 @@
 #include "Peaks.h"
 #include "Quota.h"
 #include "RequestGuard.h"
+#include "Scopes.h"
 #include "Sha1.h"
 #include "Sha256.h"
 #include "Version.h"
@@ -262,7 +263,7 @@ void HttpServer::installRoutes()
             return httplib::Server::HandlerResponse::Handled;
         };
 
-        if (req.method == "OPTIONS" || req.path == "/healthz")
+        if (req.method == "OPTIONS" || req.path == "/healthz" || req.path == "/readyz")
             return httplib::Server::HandlerResponse::Unhandled;
 
         const bool uploadPath = req.path.rfind ("/api/uploads", 0) == 0;
@@ -497,6 +498,85 @@ void HttpServer::installRoutes()
         reply (res, 200, { { "status", "ok" }, { "version", rovoxVersion() }, { "tracktion", tracktionVersion() },
                            { "uptime_s", std::chrono::duration<double> (std::chrono::steady_clock::now() - started_).count() },
                            { "audio", toString (host_.audioMode()) }, { "cpus", host_.cpuBudget().cpus } });
+    });
+
+    // readiness for a load balancer: 200 once serving, 503 as soon as the drain begins (no authentication, like /healthz)
+    svr.Get ("/readyz", [this] (const httplib::Request&, httplib::Response& res)
+    {
+        const bool draining = draining_.load();
+        reply (res, draining ? 503 : 200, { { "ready", ! draining }, { "draining", draining } });
+    });
+
+    // Prometheus text exposition 0.0.4; the admin scope only (open mode and the operator are `local`, which has it). No key ids, no secrets.
+    svr.Get ("/metrics", [this, principalFor] (const httplib::Request& req, httplib::Response& res)
+    {
+        auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
+        if (! principal->has (Scope::admin))
+            return replyError (res, forbiddenScopeError (Scope::admin, "metrics"));
+
+        std::string out;
+        const auto metric = [&out] (const std::string& name, const char* type, const char* help)
+        {
+            out += "# HELP " + name + " " + help + "\n# TYPE " + name + " " + type + "\n";
+        };
+        const auto labelEscape = [] (const std::string& v)
+        {
+            std::string e;
+
+            for (char c : v)
+            {
+                if (c == '\\' || c == '"')  e += std::string ("\\") + c;
+                else if (c == '\n')         e += "\\n";
+                else                        e += c;
+            }
+
+            return e;
+        };
+
+        metric ("rovox_draining", "gauge", "1 while the server is draining for a stop, else 0");
+        out += std::string ("rovox_draining ") + (draining_.load() ? "1" : "0") + "\n";
+
+        metric ("rovox_uptime_seconds", "gauge", "Seconds since the HTTP server started");
+        out += "rovox_uptime_seconds " + std::to_string (std::chrono::duration<double> (std::chrono::steady_clock::now() - started_).count()) + "\n";
+
+        if (options_.metrics.jobsByState)
+        {
+            metric ("rovox_jobs", "gauge", "Jobs known to the server by state");
+
+            for (auto& [state, n] : options_.metrics.jobsByState())
+                out += "rovox_jobs{state=\"" + labelEscape (state) + "\"} " + std::to_string (n) + "\n";
+        }
+
+        if (options_.metrics.mcpSessions)
+        {
+            metric ("rovox_mcp_sessions", "gauge", "Open MCP sessions");
+            out += "rovox_mcp_sessions " + std::to_string (options_.metrics.mcpSessions()) + "\n";
+        }
+
+        if (options_.metrics.wsClients)
+        {
+            metric ("rovox_ws_clients", "gauge", "Connected WebSocket clients");
+            out += "rovox_ws_clients " + std::to_string (options_.metrics.wsClients()) + "\n";
+        }
+
+        if (options_.metrics.tenants)
+        {
+            metric ("rovox_tenant_cpu_seconds_today", "gauge", "CPU seconds used by the tenant's jobs in the current UTC day (approximate for in-process renders)");
+
+            for (const auto& tenant : options_.metrics.tenants())
+            {
+                const auto used = quotas().summary (tenant).value ("used", json::object());
+                out += "rovox_tenant_cpu_seconds_today{tenant=\"" + labelEscape (tenant) + "\"} " + std::to_string (used.value ("cpu_seconds_today", 0.0)) + "\n";
+            }
+        }
+
+        res.status = 200;
+        res.set_header ("Cache-Control", "no-store");
+        res.set_content (out, "text/plain; version=0.0.4; charset=utf-8");
     });
 
     auto runCommand = [this] (const std::string& name, const json& params, CommandContext ctx, httplib::Response& res)

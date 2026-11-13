@@ -39,6 +39,7 @@ const char* toString (JobState s)
         case JobState::succeeded:   return "succeeded";
         case JobState::failed:      return "failed";
         case JobState::cancelled:   return "cancelled";
+        case JobState::interrupted: return "interrupted";
     }
 
     return "failed";
@@ -46,7 +47,7 @@ const char* toString (JobState s)
 
 static std::optional<JobState> parseState (const std::string& s)
 {
-    for (auto st : { JobState::queued, JobState::running, JobState::succeeded, JobState::failed, JobState::cancelled })
+    for (auto st : { JobState::queued, JobState::running, JobState::succeeded, JobState::failed, JobState::cancelled, JobState::interrupted })
         if (s == toString (st))
             return st;
 
@@ -120,6 +121,7 @@ struct JobManager::Entry
     std::uint64_t seq = 0;
     std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>> (false);
     double lastReported = 0;
+    bool interrupted = false;           // under mutex_: cut short by drain(); a result other than success becomes `interrupted`
     std::function<void (const JobInfo&)> onFinished;
 };
 
@@ -252,10 +254,101 @@ void JobManager::shutdown()
                 t.join();
 }
 
+bool JobManager::draining() const
+{
+    std::lock_guard<std::mutex> lock (mutex_);
+    return draining_;
+}
+
+int JobManager::drain (std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::vector<std::pair<JobInfo, std::function<void (const JobInfo&)>>> queuedDone;
+    int cut = 0;
+
+    const auto runningCount = [this]
+    {
+        int n = 0;
+
+        for (auto& [id, e] : jobs_)
+            if (e->info.state == JobState::running)
+                ++n;
+
+        return n;
+    };
+
+    {
+        std::unique_lock<std::mutex> lock (mutex_);
+
+        if (stopping_)
+            return 0;
+
+        draining_ = true;
+
+        // what has not started never will: it ends interrupted at once instead of delaying the stop
+        for (auto& [name, p] : pools_)
+        {
+            for (auto& e : p->queue)
+            {
+                e->interrupted = true;
+                e->cancel->store (true);
+                e->info.state = JobState::interrupted;
+                e->info.error = makeError (errc::interrupted, "the server stopped before this job started");
+                e->info.stage = "interrupted";
+                e->info.finished = isoNow();
+                e->fn = nullptr;
+                auto finishedFn = std::move (e->onFinished);
+                e->onFinished = nullptr;
+                JobInfo snap = e->info;
+                snap.revision = ++e->info.revision;
+                queuedDone.emplace_back (std::move (snap), std::move (finishedFn));
+                ++cut;
+            }
+
+            p->queue.clear();
+        }
+    }
+
+    cv_.notify_all();
+
+    for (auto& [snap, finishedFn] : queuedDone)
+    {
+        persist (snap);
+        report (snap);
+
+        if (finishedFn)
+            finishedFn (snap);
+    }
+
+    std::unique_lock<std::mutex> lock (mutex_);
+
+    while (runningCount() > 0 && std::chrono::steady_clock::now() < deadline)
+        cv_.wait_until (lock, std::min (deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds (100)));
+
+    // the deadline passed: ask what still runs to stop; a job normally notices within a second
+    for (auto& [id, e] : jobs_)
+    {
+        if (e->info.state == JobState::running)
+        {
+            e->interrupted = true;
+            e->cancel->store (true);
+            ++cut;
+        }
+    }
+
+    const auto grace = std::chrono::steady_clock::now() + std::chrono::seconds (5);
+
+    while (runningCount() > 0 && std::chrono::steady_clock::now() < grace)
+        cv_.wait_until (lock, std::min (grace, std::chrono::steady_clock::now() + std::chrono::milliseconds (100)));
+
+    return cut;
+}
+
 JobManager::Submitted JobManager::submit (JobSpec spec, JobFn fn)
 {
     std::shared_ptr<Entry> entry;
     JobInfo snapshot;
+    std::optional<Error> submittedError;
 
     {
         std::lock_guard<std::mutex> lock (mutex_);
@@ -290,11 +383,23 @@ JobManager::Submitted JobManager::submit (JobSpec spec, JobFn fn)
         if (! spec.clientRequestId.empty())
             byRequest_[spec.tenant + "|" + spec.projectId + "|" + spec.clientRequestId] = entry->info.id;
 
+        std::optional<Error> refused;
+
         if (stopping_)
         {
             entry->info.state = JobState::cancelled;
             entry->info.error = makeError (errc::cancelled, "the server is shutting down");
             entry->info.finished = isoNow();
+        }
+        else if (draining_)
+        {
+            refused = makeError (errc::busy, "the server is draining: no new jobs are accepted");
+            entry->info.state = JobState::failed;
+            entry->info.error = refused;
+            entry->info.stage = "failed";
+            entry->info.finished = isoNow();
+            entry->fn = nullptr;
+            entry->onFinished = nullptr;
         }
         else
         {
@@ -305,11 +410,12 @@ JobManager::Submitted JobManager::submit (JobSpec spec, JobFn fn)
         snapshot = entry->info;
         snapshot.revision = ++entry->info.revision;
         evictOldFinished();
+        submittedError = refused;
     }
 
     persist (snapshot);
     report (snapshot);
-    return { snapshot.id, true };
+    return { snapshot.id, true, std::move (submittedError) };
 }
 
 bool JobManager::cancel (const std::string& id)
@@ -469,6 +575,12 @@ void JobManager::worker (Pool& pool)
                 i.progress = 1.0;
                 i.stage = "done";
                 i.result = std::move (out.value());
+            }
+            else if (e->interrupted)
+            {
+                i.state = JobState::interrupted;
+                i.stage = "interrupted";
+                i.error = makeError (errc::interrupted, "the server stopped before this job finished");
             }
             else if (out.error().code == errc::cancelled)
             {

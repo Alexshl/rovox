@@ -54,6 +54,8 @@ int main (int argc, char** argv)
     serve->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
     serve->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (AGPL section 13; default $ROVOX_SOURCE_URL)");
     serve->add_option ("--storage", o.storage, "s3 | local | fs (see the global option)")->check (CLI::IsMember ({ "s3", "local", "fs" }));
+    serve->add_option ("--drain-timeout", o.drainTimeoutS, "On SIGTERM: seconds running jobs get to finish before they end 'interrupted' (keep it below the process manager's stop timeout; Docker 10 s)")
+         ->capture_default_str()->check (CLI::Range (0.0, 3600.0));
     serve->callback ([&] { std::exit (rovox::cli::runServe (o)); });
 
     auto* render = app.add_subcommand ("render", "Render a project to an audio file with preflight and post-render checks");
@@ -123,6 +125,7 @@ int main (int argc, char** argv)
     mcp->add_flag ("--reaper-compat", o.reaperCompat, "Also offer the tool names of the old REAPER MCP bridge (list_projects, update_tracks ...)");
     mcp->add_option ("--source-url", o.sourceUrl, "Where the running source code can be obtained (default $ROVOX_SOURCE_URL)");
     mcp->add_option ("--storage", o.storage, "s3 | local | fs (see the global option)")->check (CLI::IsMember ({ "s3", "local", "fs" }));
+    mcp->add_option ("--drain-timeout", o.drainTimeoutS, "On SIGTERM: seconds running jobs get to finish before they end 'interrupted'")->capture_default_str()->check (CLI::Range (0.0, 3600.0));
     mcp->callback ([&] { std::exit (rovox::cli::runMcp (o)); });
 
     auto* key = app.add_subcommand ("key", "API keys: create, list, revoke, rotate (works on <data>/auth/keys.json; a running server notices within a second)");

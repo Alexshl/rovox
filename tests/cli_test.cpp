@@ -1387,3 +1387,55 @@ ROVOX_TEST (cli, key_create_list_rotate_revoke_show_the_secret_once_and_work_wit
     CHECK (actions == std::vector<std::string> ({ "create", "rotate", "create", "revoke" }));
     CHECK ((fs::status (data / "auth" / "audit.jsonl").permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
 }
+
+ROVOX_TEST (cli, readyz_is_public_and_metrics_needs_the_admin_scope)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("metrics");
+    int code = -1;
+    auto created = run ({ "key", "create", "--tenant", "cli-metrics", "--scopes", "catalog:read,projects:read" }, data, 30, code);
+    REQUIRE (code == 0);
+    const auto key = trimmed (created.out);
+    const auto parsed = parseApiKey (key);
+    REQUIRE (parsed.has_value());
+
+    auto server = spawn ({ "serve", "--port", "0", "--token", "tok123", "--drain-timeout", "2" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const int port = portOf (server);
+    REQUIRE (port > 0);
+    httplib::Client c ("127.0.0.1", port);
+
+    auto ready = c.Get ("/readyz");
+    REQUIRE (ready != nullptr);
+    CHECK (ready->status == 200);
+    CHECK (json::parse (ready->body).value ("ready", false));
+
+    auto noAuth = c.Get ("/metrics");
+    REQUIRE (noAuth != nullptr);
+    CHECK (noAuth->status == 401);
+
+    auto noAdmin = c.Get ("/metrics", httplib::Headers { { "Authorization", "Bearer " + key } });
+    REQUIRE (noAdmin != nullptr);
+    CHECK (noAdmin->status == 403);
+    CHECK (json::parse (noAdmin->body)["error"].value ("code", "") == "FORBIDDEN_SCOPE");
+
+    auto metrics = c.Get ("/metrics", httplib::Headers { { "Authorization", "Bearer tok123" } });
+    REQUIRE (metrics != nullptr);
+    CHECK (metrics->status == 200);
+    CHECK (metrics->get_header_value ("Content-Type").rfind ("text/plain", 0) == 0);
+    CHECK (metrics->body.find ("# TYPE rovox_jobs gauge") != std::string::npos);
+    CHECK (metrics->body.find ("rovox_jobs{state=\"queued\"} 0") != std::string::npos);
+    CHECK (metrics->body.find ("rovox_draining 0") != std::string::npos);
+    CHECK (metrics->body.find ("rovox_ws_clients 0") != std::string::npos);
+    CHECK (metrics->body.find ("rovox_tenant_cpu_seconds_today{tenant=\"local\"}") != std::string::npos);
+    CHECK (metrics->body.find (parsed->id) == std::string::npos);       // no key ids, no secrets
+    CHECK (metrics->body.find (parsed->secret) == std::string::npos);
+    CHECK (metrics->body.find ("tok123") == std::string::npos);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+    CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() < 5.0);      // nothing running: the drain does not wait for the timeout
+}

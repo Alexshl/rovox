@@ -26,6 +26,7 @@ struct Options
     std::vector<std::string> allowOrigins;
     std::vector<std::string> allowHosts;
     std::string connectUrl;             // mcp --connect: URL of a running `rovox serve`
+    double drainTimeoutS = 20;          // serve / mcp (in-process): how long running jobs may finish after SIGTERM/SIGINT before they end `interrupted`
     std::string tenant;                 // mcp (in-process): the tenant of this stdio session, every scope but admin (default: local, the operator)
 
     // key create | list | revoke | rotate (--tenant is `tenant` above)
