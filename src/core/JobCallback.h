@@ -13,6 +13,7 @@
 
 #include "Delivery.h"
 #include "Result.h"
+#include "Url.h"
 
 #include <atomic>
 #include <chrono>
@@ -47,13 +48,6 @@ struct CallbackTarget
     std::string url, secretName, resolvedIp;
     std::string nextSecretName;                         // optional second active secret (rotation): the signature header then carries both
 };
-
-/** True for loopback, private (RFC 1918), link-local, unique-local (fc00::/7), unspecified, multicast, carrier-grade NAT (100.64/10) and benchmarking (198.18/15) addresses;
-    IPv4-compatible (::a.b.c.d) always, IPv4-mapped, NAT64 (64:ff9b::/96) and 6to4 (2002::/16) by the IPv4 address they carry. */
-bool isPrivateAddress (const std::string& ip);
-
-/** Resolves a host to numeric addresses; the default is getaddrinfo. Tests inject one. */
-using HostResolver = std::function<std::vector<std::string> (const std::string& host, int port)>;
 
 /** Checks callback {url, secret_ref} of render.start: INVALID_PARAMS for a bad shape, a non-http(s) URL, a host that is not allowed,
     an unresolvable host, a private address (unless allowed) or an unknown / unset secret. On success the host is resolved to the address to connect to. */

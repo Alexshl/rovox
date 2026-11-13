@@ -11,9 +11,14 @@
 #include "Quota.h"
 #include "Review.h"
 #include "Sha1.h"
+#include "UploadStore.h"
+#include "Url.h"
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <fstream>
+#include <set>
 
 namespace rovox::mcp
 {
@@ -193,6 +198,187 @@ const CommandToolSpec commandTools[] = {
     { "import.rpp", "Import REAPER project", "Imports a REAPER .RPP file into the project: tracks, items, markers, tempo. Rea* effects become Rovox stock effects (settings from <project>.rovoxfx.json beside the RPP or fx_sidecar, written by tools/reaper/rovox_export_fx.lua; else defaults), JS effects become JSFX when found under ROVOX_JSFX_PATH (slider values from the project); the rest is reported as unsupported.", false },
     { "import.apply", "Apply import plan", "Creates the tracks and items of a plan made by import.plan. rename maps source keys (REC01) or planned names to track names.", false },
 };
+
+// ---- upload.from_url: what may be downloaded (audio, REAPER projects, zip archives) ---------------------------------
+std::string lowerAscii (std::string s)
+{
+    std::transform (s.begin(), s.end(), s.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
+    return s;
+}
+
+std::string fileExtension (const std::string& name)
+{
+    const auto dot = name.rfind ('.');
+    return dot == std::string::npos ? std::string() : lowerAscii (name.substr (dot + 1));
+}
+
+bool allowedFetchExtension (const std::string& ext)
+{
+    static const std::set<std::string> allowed { "wav", "flac", "mp3", "ogg", "opus", "m4a", "aac", "aif", "aiff", "rpp", "zip" };
+    return allowed.count (ext) > 0;
+}
+
+/** The media type without parameters, lower case. */
+std::string mediaType (const std::string& contentType)
+{
+    auto t = lowerAscii (contentType.substr (0, contentType.find (';')));
+    t.erase (std::remove_if (t.begin(), t.end(), [] (unsigned char c) { return std::isspace (c); }), t.end());
+    return t;
+}
+
+bool allowedFetchType (const std::string& type)
+{
+    static const std::set<std::string> allowed { "application/zip", "application/x-zip-compressed", "application/octet-stream", "binary/octet-stream", "text/plain" };
+    return type.empty() || type.rfind ("audio/", 0) == 0 || allowed.count (type) > 0;
+}
+
+std::string extensionForType (const std::string& type)
+{
+    static const std::map<std::string, std::string> byType {
+        { "audio/mpeg", "mp3" }, { "audio/mp3", "mp3" }, { "audio/wav", "wav" }, { "audio/x-wav", "wav" }, { "audio/wave", "wav" }, { "audio/vnd.wave", "wav" },
+        { "audio/flac", "flac" }, { "audio/x-flac", "flac" }, { "audio/ogg", "ogg" }, { "audio/opus", "opus" }, { "audio/mp4", "m4a" }, { "audio/x-m4a", "m4a" },
+        { "audio/aac", "aac" }, { "audio/aiff", "aif" }, { "audio/x-aiff", "aif" }, { "application/zip", "zip" }, { "application/x-zip-compressed", "zip" } };
+    auto it = byType.find (type);
+    return it == byType.end() ? std::string() : it->second;
+}
+
+/** A file name that is safe inside the uploads folder: the last path segment, letters digits . _ - only, no leading dot. */
+std::string sanitiseFetchName (const std::string& raw)
+{
+    auto name = raw.substr (0, raw.find_first_of ("?#"));
+    name = name.substr (name.rfind ('/') == std::string::npos ? 0 : name.rfind ('/') + 1);
+
+    for (auto& ch : name)
+        if (! std::isalnum ((unsigned char) ch) && ch != '.' && ch != '_' && ch != '-')
+            ch = '_';
+
+    while (! name.empty() && name.front() == '.')
+        name.erase (name.begin());
+
+    if (name.size() > 120)
+        name.resize (120);
+
+    return name;
+}
+
+struct RemoveOnExit
+{
+    std::filesystem::path path;
+    ~RemoveOnExit() { std::error_code ec; std::filesystem::remove (path, ec); }
+};
+
+/** The body of an upload.from_url job: download to a temporary file in the uploads folder (counting bytes against the limit and the tenant's storage quota),
+    then store it as a finished upload of the tenant. */
+Result<json> fetchIntoUploads (JobContext& ctx, UploadStore& store, const std::string& tenant, const std::string& quotaProfile, const std::string& url, std::string wantedName,
+                               std::uint64_t maxBytes, bool allowLoopback)
+{
+    namespace fs = std::filesystem;
+    const fs::path tmp = store.partPath ("fromurl_" + ctx.id()).replace_extension (".tmp");
+    RemoveOnExit cleanup { tmp };
+
+    FetchOptions o;
+    o.maxBytes = maxBytes;
+    o.guard.allowLoopback = allowLoopback;
+    o.cancelled = [&ctx] { return ctx.cancelled(); };
+    o.progress = [&ctx] (std::uint64_t received, std::int64_t total)
+    {
+        const double f = total > 0 ? (double) received / (double) total : (double) received / ((double) received + 16.0 * 1048576.0);
+        ctx.progress (std::clamp (0.9 * f, 0.0, 0.9), "downloading");
+    };
+
+    std::string filename = wantedName;
+    o.accept = [&] (const std::string& contentType, std::int64_t length, const std::string& finalUrl) -> Result<void>
+    {
+        const auto type = mediaType (contentType);
+
+        if (! allowedFetchType (type))
+            return makeError (errc::invalidParams, "the content type " + type + " is not an audio file, a REAPER project or a zip archive", json { { "content_type", type } });
+
+        if (filename.empty())
+            filename = sanitiseFetchName (parseUrl (finalUrl).path);
+
+        if (! allowedFetchExtension (fileExtension (filename)))
+        {
+            const auto ext = extensionForType (type);
+
+            if (ext.empty())
+                return makeError (errc::invalidParams, "the file must be audio (wav, flac, mp3, ogg, opus, m4a, aac, aif), a REAPER project (.rpp) or a zip archive", json { { "filename", filename } });
+
+            filename = (filename.empty() ? std::string ("download") : filename) + "." + ext;
+        }
+
+        if (auto q = quotas().checkStorage (tenant, length > 0 ? length : 0, quotaProfile); ! q.ok())
+            return q.error();
+
+        return {};
+    };
+
+    ctx.progress (0, "connecting");
+    auto fetched = fetchUrlToFile (url, tmp, o);
+
+    if (! fetched.ok())
+        return fetched.error();
+
+    if (ctx.cancelled())
+        return makeError (errc::cancelled, "the download was cancelled");
+
+    if (fetched.value().bytes == 0)
+        return makeError (errc::invalidParams, "the download is empty");
+
+    // a body without Content-Length is only known now
+    if (auto q = quotas().checkStorage (tenant, (std::int64_t) fetched.value().bytes, quotaProfile); ! q.ok())
+        return q.error();
+
+    ctx.progress (0.92, "storing");
+    auto created = store.create (fetched.value().bytes, { { "filename", filename } }, tenant);
+
+    if (! created.ok())
+        return created.error();
+
+    const auto id = created.value().id;
+
+    auto abandon = [&] (Error e) -> Result<json>
+    {
+        (void) store.terminate (id, tenant);
+        return e;
+    };
+
+    {
+        auto writer = store.openWriter (id, 0, tenant);
+
+        if (! writer.ok())
+            return abandon (writer.error());
+
+        std::ifstream in (tmp, std::ios::binary);
+        std::vector<char> buffer (1 << 20);
+
+        while (in)
+        {
+            in.read (buffer.data(), (std::streamsize) buffer.size());
+            const auto n = (size_t) in.gcount();
+
+            if (n > 0 && ! writer.value()->write (buffer.data(), n))
+                return abandon (makeError (errc::io, "cannot store the download"));
+        }
+
+        auto done = store.finishPatch (*writer.value());
+
+        if (! done.ok())
+            return abandon (done.error());
+    }
+
+    auto placed = store.finish (id, tenant);
+
+    if (! placed.ok())
+        return abandon (placed.error());
+
+    json out = placed.value();
+    out["upload_id"] = id;
+    out["filename"] = filename;
+    out["bytes"] = fetched.value().bytes;
+    out["content_type"] = mediaType (fetched.value().contentType);
+    return out;
+}
 } // namespace
 
 //==============================================================================
@@ -851,6 +1037,65 @@ void McpServer::buildTools()
                 return ToolOutput::failure (r.error());
 
             return ToolOutput::success (r.value());
+        };
+        add (std::move (t));
+    }
+
+    if (config_.uploads != nullptr)
+    {
+        ToolDef t;
+        t.name = "upload.from_url";
+        t.title = "Upload from URL";
+        t.description = "Downloads an http(s) URL into this tenant's uploads (audio, a REAPER .rpp or a zip archive) as a job; wait_s (default 30) waits, job.get shows progress, job.cancel stops it. "
+                        "Addresses that are loopback, private, link-local or the cloud metadata address are refused after DNS resolution and on every redirect (at most 3). "
+                        "max_bytes caps the size; the tenant's storage quota is checked. The result is what upload.finish returns plus upload_id: pass its path to import.plan (or import.rpp).";
+        t.inputSchema = schema ({ { "url", str ("http or https URL of the file") }, { "filename", str ("name to store it under; default the last part of the URL") },
+                                  { "max_bytes", integer ("size limit in bytes; default and ceiling are the server's upload limit", 1) }, { "client_request_id", str() },
+                                  { "wait_s", { { "type", "number" }, { "minimum", 0 }, { "maximum", 60 } } } }, { "url" });
+        t.annotations = { { "readOnlyHint", false } };
+        t.mayBlock = true;
+        t.defaultWaitS = 30;
+        t.handler = [store = config_.uploads, allowLoopback = config_.fetchAllowLoopback, waitForJob, jobWait] (ToolCall& c) -> ToolOutput
+        {
+            const auto url = c.args.value ("url", std::string());
+            const auto parsed = parseUrl (url);
+
+            if (! parsed.valid)
+                return ToolOutput::failure (makeError (errc::invalidParams, parsed.error.empty() ? "url must be an http or https URL" : parsed.error, json { { "path", "/url" } }));
+
+            std::uint64_t maxBytes = store->limits().maxFileBytes;
+
+            if (c.args.contains ("max_bytes"))
+            {
+                const json& limit = c.args["max_bytes"];
+
+                if (! limit.is_number_integer() || limit.get<std::int64_t>() < 1)
+                    return ToolOutput::failure (makeError (errc::invalidParams, "max_bytes is a whole number of bytes, at least 1", json { { "path", "/max_bytes" } }));
+
+                maxBytes = std::min<std::uint64_t> (maxBytes, limit.get<std::uint64_t>());
+            }
+
+            const auto tenant = c.session.tenant;
+            const auto profile = c.session.principal.quotaProfile;
+
+            if (auto q = quotas().checkStorage (tenant, 0, profile); ! q.ok())
+                return ToolOutput::failure (q.error());
+
+            JobSpec spec;
+            spec.kind = "upload_fetch";
+            spec.tenant = tenant;
+            spec.pool = "io";
+            spec.clientRequestId = c.args.value ("client_request_id", std::string());
+            spec.origin = c.session.origin().toJson();
+            const auto wantedName = c.args.contains ("filename") ? sanitiseFetchName (c.args.value ("filename", std::string())) : std::string();
+
+            auto submitted = c.server.jobs().submit (std::move (spec), [store, tenant, profile, url, wantedName, maxBytes, allowLoopback] (JobContext& ctx) -> Result<json>
+                                                    { return fetchIntoUploads (ctx, *store, tenant, profile, url, wantedName, maxBytes, allowLoopback); });
+
+            if (submitted.error)
+                return ToolOutput::failure (*submitted.error);
+
+            return waitForJob (c, submitted.id, submitted.created, jobWait (c.args, 30, 60), {}, true);
         };
         add (std::move (t));
     }

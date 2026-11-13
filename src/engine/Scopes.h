@@ -25,7 +25,7 @@ std::vector<Scope> requiredScopes (const std::string& name);
 std::optional<Scope> missingScope (const Principal&, const std::string& name);
 bool allowed (const Principal&, const std::string& name);
 
-/** Scope needed to act on a job of this kind (job.cancel): delivery -> delivery, import_plan -> projects:write, others -> render. */
+/** Scope needed to act on a job of this kind (job.cancel): delivery -> delivery, import_plan and upload_fetch -> projects:write, others -> render. */
 Scope scopeForJobKind (const std::string& kind);
 
 /** FORBIDDEN_SCOPE error naming the missing scope. */

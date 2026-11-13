@@ -39,7 +39,7 @@ const std::map<std::string, std::vector<Scope>>& table()
                "marker.create", "marker.update", "marker.upsert", "marker.delete",
                "midi.write", "midi.edit", "midi.quantize", "midi.transpose", "midi.import_file", "midi.export_file",
                "routing.send_create", "routing.send_update", "routing.send_delete", "tempo.set", "transport.set", "undo", "redo", "agent.accept",
-               "import.plan", "import.apply", "import.rpp", "template.apply", "template.new", "template.save", "template.delete", "recipe.save", "recipe.delete" }, { S::projectsWrite });
+               "import.plan", "import.apply", "import.rpp", "upload.from_url", "template.apply", "template.new", "template.save", "template.delete", "recipe.save", "recipe.delete" }, { S::projectsWrite });
 
         add ({ "render.preflight", "render.start", "render.batch", "render.preview", "analyze.audio" }, { S::render });
         add ({ "recipe.run" }, { S::render, S::projectsWrite });
@@ -100,7 +100,7 @@ Scope scopeForJobKind (const std::string& kind)
     if (kind == "delivery")
         return Scope::delivery;
 
-    if (kind == "import_plan")
+    if (kind == "import_plan" || kind == "upload_fetch")
         return Scope::projectsWrite;
 
     return Scope::render;
