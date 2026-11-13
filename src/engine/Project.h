@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 namespace rovox
 {
@@ -113,6 +114,8 @@ public:
     /** Called on the message thread after a save (dir() holds the new files) or an autosave (autosave/<revision>.rvx does); set by the ProjectManager
         when an object store mirrors the project. */
     std::function<void (const fs::path& writtenDir, bool autosave)> onPersisted;
+    /** Tenant whose project is heard right now (one device, one mix: E11-06); empty = nobody plays. Message thread; set by the ProjectManager. */
+    std::function<std::optional<std::string>()> audibleTenant;
     /** `storage` block of project.get / project.list: {backend, synced_revision, pending_uploads, last_error}. */
     std::function<json()> storageStatus;
 

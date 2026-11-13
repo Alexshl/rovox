@@ -48,8 +48,13 @@ void registerTransportCommands (CommandRegistry& r)
                { "position", timePosSchema() },
                { "loop", obj ({ { "enabled", { { "type", "boolean" } } }, { "start_s", { { "type", "number" }, { "minimum", 0 } } }, { "end_s", { { "type", "number" }, { "minimum", 0 } } } }) } }),
         anyObject(), false,
-        [] (Project& p, const json& params, const CommandContext&) -> Result<json>
+        [] (Project& p, const json& params, const CommandContext& ctx) -> Result<json>
         {
+            // one device, one mix: while another tenant is heard, play is refused (stop / seek / loop are not); the message names no one
+            if (params.value ("state", "") == "playing" && p.audibleTenant)
+                if (auto audible = p.audibleTenant(); audible.has_value() && *audible != ctx.tenant)
+                    return makeError (errc::busy, "live audio is in use");
+
             return p.transport().apply (params);
         }));
 

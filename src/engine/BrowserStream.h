@@ -7,6 +7,8 @@
 //
 // Packet (little endian, 28-byte header + Opus payload):
 //   u8 type=1 | u8 flags (bit0 discontinuity) | u16 stream_id | u16 epoch | u16 reserved
+//   stream_id is always 0 and reserved for per-tenant streams (option (a) of the tenancy plan); today one mix serves one tenant at a time: the
+//   Gateway sends packets only to the clients of the tenant that plays, and transport.set play of another tenant is BUSY.
 //   u32 seq | u64 sample_pos (timeline of the position source, samples @48k) | u64 server_time_us | opus bytes
 #pragma once
 
