@@ -223,7 +223,7 @@ ROVOX_TEST (quota, journal_is_rebuilt_after_a_restart_and_report_matches_the_job
     double sumCpu = 0, sumAudio = 0;
     {
         QuotaService svc ([&] { return now; });
-        svc.configure (data, {}, &hub);
+        svc.configure (data, {});
         CHECK (svc.configured());
 
         const std::vector<std::tuple<std::string, double, double, std::string>> jobs {
@@ -233,14 +233,14 @@ ROVOX_TEST (quota, journal_is_rebuilt_after_a_restart_and_report_matches_the_job
         {
             auto r = svc.admit ("qt-jr", "", audioS);
             REQUIRE (r.ok());
-            svc.finish (r.value(), record ("qt-jr", id, roundUsage (cpuS), roundUsage (audioS), kind));
+            svc.finish (r.value(), record ("qt-jr", id, roundUsage (cpuS), roundUsage (audioS), kind), &hub);
             sumCpu += roundUsage (cpuS);
             sumAudio += roundUsage (audioS);
         }
 
         auto other = svc.admit ("qt-jr-other", "", 1.0);
         REQUIRE (other.ok());
-        svc.finish (other.value(), record ("qt-jr-other", "jobx", 99.0, 1.0));
+        svc.finish (other.value(), record ("qt-jr-other", "jobx", 99.0, 1.0), &hub);
     }
 
     Event e;
@@ -269,7 +269,7 @@ ROVOX_TEST (quota, journal_is_rebuilt_after_a_restart_and_report_matches_the_job
 
     // "restart": new objects on the same directory
     QuotaService restarted ([&] { return now; });
-    restarted.configure (data, {}, nullptr);
+    restarted.configure (data, {});
     const auto summary = restarted.summary ("qt-jr");
     CHECK_NEAR (summary["used"]["cpu_seconds_today"].get<double>(), sumCpu, 0.01);
     CHECK_NEAR (summary["used"]["audio_minutes_month"].get<double>(), sumAudio / 60.0, 0.001);
@@ -302,7 +302,7 @@ ROVOX_TEST (quota, journal_is_rebuilt_after_a_restart_and_report_matches_the_job
     // the window of another day is not carried over: a later restart on the next UTC day starts at zero, the month keeps counting
     const double tomorrow = (std::floor (day0 / dayLength) + 1) * dayLength + 60.0;
     QuotaService nextDay ([&] { return tomorrow; });
-    nextDay.configure (data, {}, nullptr);
+    nextDay.configure (data, {});
     CHECK (nextDay.summary ("qt-jr")["used"]["cpu_seconds_today"] == 0.0);
     CHECK (nextDay.summary ("qt-jr")["used"]["audio_minutes_month"].get<double>() > 0.0);
 }

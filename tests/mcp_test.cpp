@@ -344,7 +344,7 @@ ROVOX_TEST (mcp, tools_list_has_schemas_unique_names_and_pagination)
         static const std::set<std::string> global = { "project.list", "project.new", "project.open", "job.get", "job.cancel", "job.list", "events.poll", "upload.status", "upload.finish", "review.resolve", "review.wait",
                                                       "project.catalog", "plugin.catalog", "plugin.rescan", "plugin.probe", "plugin.tag", "plugin.unblacklist",
                                                       "template.list", "template.get", "template.delete", "delivery.list_adapters",
-                                                      "recipe.list", "recipe.get", "recipe.save", "recipe.delete" };
+                                                      "recipe.list", "recipe.get", "recipe.save", "recipe.delete", "usage.report", "usage.summary" };
 
         if (! global.count (name))
             CHECK (t["inputSchema"]["properties"].contains ("project_id"));
@@ -2719,11 +2719,11 @@ ROVOX_TEST (mcp, render_of_a_tenant_whose_cpu_quota_is_exhausted_is_refused_and_
     CHECK (refused["error"]["code"] == errc::quotaExceeded);
     CHECK (refused["error"]["details"]["quota"] == "cpu_seconds_per_day");
     CHECK (refused["error"]["details"].contains ("resets_at"));
-    CHECK (h.jobs.list ({ .tenant = "qt-broke" }).empty());
+    CHECK (h.jobs.list ({ .tenant = "qt-broke", .kind = "render" }).empty());       // import.plan ran as a job of its own
 
     auto preview = h.tool ("render.preview", { { "project_id", id }, { "range", { { "start", { { "s", 0.0 } } }, { "end", { { "s", 2.0 } } } } } }, s.get());
     CHECK (preview["error"]["code"] == errc::quotaExceeded);
-    CHECK (h.jobs.list ({ .tenant = "qt-broke" }).empty());
+    CHECK (h.jobs.list ({ .tenant = "qt-broke", .kind = "preview" }).empty());
 
     // a tenant without a profile of its own is judged by the built-in default and is not affected
     auto other = tenantSession (h, "qt-fine", ScopeSet::all());

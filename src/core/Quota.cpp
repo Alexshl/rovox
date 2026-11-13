@@ -414,12 +414,11 @@ void QuotaService::setConfigFile (fs::path file)
     }
 }
 
-void QuotaService::configure (const fs::path& dataDir, const fs::path& configFile, EventHub* hub)
+void QuotaService::configure (const fs::path& dataDir, const fs::path& configFile)
 {
     std::shared_ptr<UsageJournal> journal;
     {
         std::lock_guard lock (mutex_);
-        hub_ = hub;
 
         if (! configFile.empty() && configFile_ != configFile)
         {
@@ -490,15 +489,13 @@ Result<ReservationId> QuotaService::admit (const std::string& tenant, const std:
     return tracker_.reserve (tenant, profile (tenant, explicitProfile), tracker_.estimateCpu (tenant, audioS), audioS);
 }
 
-void QuotaService::finish (ReservationId id, UsageRecord rec)
+void QuotaService::finish (ReservationId id, UsageRecord rec, EventHub* hub)
 {
     tracker_.commit (id, rec.cpuS, rec.audioS);
     std::shared_ptr<UsageJournal> journal;
-    EventHub* hub;
     {
         std::lock_guard lock (mutex_);
         journal = journal_;
-        hub = hub_;
     }
 
     if (journal)

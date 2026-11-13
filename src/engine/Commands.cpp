@@ -104,7 +104,7 @@ void setSoloUndoable (te::Track& t, bool on)    { t.state.setProperty (te::IDs::
 void ensureQuotas (ProjectManager& pm)
 {
     if (! quotas().configured())
-        quotas().configure (pm.host().dataDir(), {}, &pm.hub());
+        quotas().configure (pm.host().dataDir(), {});
 }
 
 /** Project count of the tenant against its `projects` quota; counts the project directories below the tenant's projects root. */

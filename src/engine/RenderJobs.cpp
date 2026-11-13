@@ -339,7 +339,7 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
     if (meteredAudioS >= 0)
     {
         if (! quotas().configured())
-            quotas().configure (projects_.host().dataDir(), configFile_, &projects_.hub());
+            quotas().configure (projects_.host().dataDir(), configFile_);
 
         // concurrent jobs, CPU seconds of the day and audio minutes of the month: QUOTA_EXCEEDED means no job is created
         auto admitted = quotas().admit (who.tenant, who.quotaProfile, meteredAudioS);
@@ -348,7 +348,7 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
             return admitted.error();
 
         reservation = admitted.value();
-        fn = [inner = std::move (fn), reservation, who, kind, meteredAudioS] (JobContext& jc) -> Result<json>
+        fn = [inner = std::move (fn), reservation, who, kind, meteredAudioS, hub = &projects_.hub()] (JobContext& jc) -> Result<json>
         {
             const double cpu0 = threadCpuSeconds(), child0 = childCpuSecondsThisThread();
             auto result = inner (jc);
@@ -376,7 +376,7 @@ Result<StartedJob> JobService::submit (const JobContextInfo& who, const std::str
                         }
             }
 
-            quotas().finish (reservation, std::move (rec));
+            quotas().finish (reservation, std::move (rec), hub);
             return result;
         };
 

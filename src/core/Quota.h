@@ -131,9 +131,10 @@ class QuotaService
 public:
     explicit QuotaService (NowFn now = systemNowS);
 
-    /** Sets the data directory (journal in <data>/usage, storage size of <data>/tenants/<t>), the configuration file and the hub that gets
-        `usage.recorded`; rebuilds the windows from the journal. Calling it again with the same data dir only updates file (if not empty) and hub. */
-    void configure (const fs::path& dataDir, const fs::path& configFile, EventHub* hub);
+    /** Sets the data directory (journal in <data>/usage, storage size of <data>/tenants/<t>) and the configuration file; rebuilds the windows
+        from the journal. Calling it again with the same data dir only updates the file (if not empty). The service is process-wide and outlives
+        any one server, so it keeps no hub: finish() is handed the hub of the job's owner. */
+    void configure (const fs::path& dataDir, const fs::path& configFile);
     void setConfigFile (fs::path file);
     bool configured() const;
 
@@ -146,7 +147,8 @@ public:
     /** Admission of a job of `audioS` audio seconds (CPU estimate = audioS x learned ratio). QUOTA_EXCEEDED creates nothing. */
     Result<ReservationId> admit (const std::string& tenant, const std::string& explicitProfile, double audioS);
     /** Closes the reservation with the measured numbers, appends the journal record and publishes `usage.recorded` for the tenant. */
-    void finish (ReservationId, UsageRecord);
+    /** Commits the usage, appends it to the journal and publishes `usage.recorded` on `hub` (when given). */
+    void finish (ReservationId, UsageRecord, EventHub* hub = nullptr);
     void release (ReservationId);
 
     Result<void> checkProjects (const std::string& tenant, const std::string& explicitProfile, int currentCount);
@@ -170,7 +172,6 @@ private:
 
     mutable std::mutex mutex_;
     fs::path dataDir_, configFile_;
-    EventHub* hub_ = nullptr;
     std::shared_ptr<UsageJournal> journal_;
     std::shared_ptr<const QuotaConfig> config_ = std::make_shared<const QuotaConfig>();
     fs::file_time_type configMtime_ {};
