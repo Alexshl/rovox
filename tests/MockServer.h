@@ -4,6 +4,10 @@
 // A local HTTP server for the delivery tests: records what it receives and answers with a scripted status / body. No real network.
 #pragma once
 
+// Tracktion first: httplib pulls zlib.h, whose macros break Tracktion's choc_zlib.h when it is parsed later in the same
+// translation unit. Including the engine here makes the order of includes in the tests irrelevant.
+#include "TestSupport.h"
+
 #include <httplib.h>
 
 #include <map>
