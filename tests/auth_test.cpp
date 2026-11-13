@@ -1345,13 +1345,16 @@ ROVOX_TEST (auth, protected_resource_metadata_and_challenge_follow_the_mode)
     CHECK (bare.challengeHeader().empty());
     CHECK (! bare.resourceMetadata().has_value());
 
-    // no config file, an unknown mode and a broken file all mean the token mode
+    // no config file and an unknown mode mean the token mode
     Authenticator missing (nullptr, "", test::makeTempDir ("auth-metadata-none") / "missing.toml");
     CHECK (missing.external().mode() == AuthMode::token);
     Authenticator unknown (nullptr, "", writeConfig ("auth-metadata-unknown", "[auth]\nmode = \"magic\"\n"));
     CHECK (unknown.external().mode() == AuthMode::token);
+    // a broken file fails closed: never the token mode with its native keys and open loopback
     Authenticator broken (nullptr, "", writeConfig ("auth-metadata-broken", "[auth\nmode = "));
-    CHECK (broken.external().mode() == AuthMode::token);
+    CHECK (broken.external().mode() != AuthMode::token);
+    CHECK (! broken.open());
+    CHECK (! broken.resolve (AuthRequest {}).ok());
 }
 
 ROVOX_TEST (auth, external_modes_never_open_the_server_and_secrets_stay_out_of_errors)
