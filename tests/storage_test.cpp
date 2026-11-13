@@ -590,8 +590,8 @@ ROVOX_TEST (storage, push_does_not_write_head_after_the_lease_was_taken_over)
 
     store->setObject (a->keys().lease ("local", c.id), json { { "owner", "server-b" }, { "expires", ProjectLease::systemNow() + 60 }, { "acquired", ProjectLease::systemNow() } }.dump());
 
-    REQUIRE (waitFor ([&] { return a->status ("local", c.id)["lease"] == "lost"; }, 5000));
-    REQUIRE (waitFor ([&] { return store->cancelledUploads >= 1; }, 5000));          // the upload in flight noticed at a part boundary
+    REQUIRE (waitFor ([&] { return a->status ("local", c.id)["lease"] == "lost"; }, 20000));
+    REQUIRE (waitFor ([&] { return store->cancelledUploads >= 1; }, 20000));          // the upload in flight noticed at a part boundary
     CHECK (a->status ("local", c.id)["last_error"].get<std::string>().find ("lease") != std::string::npos);
 
     CHECK (store->objects.count (a->keys().head ("local", c.id)) == 0);

@@ -211,7 +211,7 @@ ROVOX_TEST (url, host_check_resolves_then_judges)
 
     answer = {};
     CHECK (! checkUrlHost (url, guard).ok());
-    CHECK (asked == 6);
+    CHECK (asked == 7);                             // one resolution per check above
 }
 
 ROVOX_TEST (url, fetch_refuses_loopback_unless_the_test_switch_is_on)
