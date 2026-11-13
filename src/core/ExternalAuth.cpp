@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 
@@ -203,6 +204,8 @@ struct ExternalAuth::Config
     std::vector<Cidr> allow;
     std::string proxySecret;
     std::int64_t maxSkewS = 60;
+    std::int64_t leewayS = 60;      // clock skew tolerated on JWT / introspection exp and nbf
+    bool allowLocal = false;        // an external identity may carry the tenant `local` (the operator)
 
     std::string url, clientId, clientSecret, jwksUrl, issuer, audience, resource;
     ClaimNames claims;
@@ -238,11 +241,11 @@ ScopeSet knownScopes (const std::vector<std::string>& names)
 }
 
 /** The principal of an RFC 7662 answer or JWT claim set; nullopt if there is no usable tenant. */
-std::optional<Principal> principalFromClaims (const json& c, const ClaimNames& names)
+std::optional<Principal> principalFromClaims (const json& c, const ClaimNames& names, bool allowLocal)
 {
     const auto tenant = jsonString (c, names.tenant.c_str());
 
-    if (! isValidTenantId (tenant))
+    if (! isValidTenantId (tenant) || (tenant == "local" && ! allowLocal))
         return std::nullopt;
 
     std::vector<std::string> scopeNames;
@@ -270,6 +273,12 @@ std::optional<Principal> principalFromClaims (const json& c, const ClaimNames& n
 std::int64_t positiveTtl (std::int64_t exp, std::int64_t now)
 {
     return exp > 0 ? std::min (positiveTtlS, exp - now) : positiveTtlS;
+}
+
+/** When a long-lived connection of that principal must be dropped: `exp` (plus the leeway), but never later than the cache TTL. */
+std::int64_t sessionExpiry (std::int64_t exp, std::int64_t leeway, std::int64_t now)
+{
+    return exp > 0 ? std::min (exp + leeway, now + positiveTtlS) : now + positiveTtlS;
 }
 
 bool audienceMatches (const json& claims, const std::string& audience)
@@ -547,6 +556,7 @@ std::shared_ptr<const ExternalAuth::Config> ExternalAuth::config() const
     if (! stamp)
     {
         config_ = std::make_shared<Config>();
+        haveGoodConfig_ = false;
         cache_.clear();
         return config_;
     }
@@ -564,6 +574,8 @@ std::shared_ptr<const ExternalAuth::Config> ExternalAuth::config() const
                 cfg->mode = AuthMode::trustedProxy;
             else if (mode == "introspection")
                 cfg->mode = AuthMode::introspection;
+
+            cfg->allowLocal = (*auth)["allow_local"].value_or (false);
 
             if (const auto* tp = (*auth)["trusted_proxy"].as_table())
             {
@@ -595,6 +607,7 @@ std::shared_ptr<const ExternalAuth::Config> ExternalAuth::config() const
                 cfg->issuer = str ("issuer");
                 cfg->audience = str ("audience");
                 cfg->resource = str ("resource");
+                cfg->leewayS = std::max<std::int64_t> (0, (*in)["leeway_s"].value_or ((std::int64_t) 60));
 
                 if (const auto v = str ("tenant_claim"); ! v.empty())   cfg->claims.tenant = v;
                 if (const auto v = str ("subject_claim"); ! v.empty())  cfg->claims.subject = v;
@@ -604,11 +617,23 @@ std::shared_ptr<const ExternalAuth::Config> ExternalAuth::config() const
         }
 
         config_ = cfg;
+        haveGoodConfig_ = true;
         cache_.clear();
     }
     catch (const toml::parse_error&)
     {
-        // an unreadable file keeps the last good configuration (the first read falls back to mode token)
+        // an unreadable file keeps the last good configuration. With none yet it fails closed: an external mode with nothing
+        // configured rejects every request (never a fallback to native keys or the open loopback). Nothing of the file is logged.
+        if (! haveGoodConfig_)
+        {
+            auto closed = std::make_shared<Config>();
+            closed->mode = AuthMode::introspection;
+            config_ = closed;
+            cache_.clear();
+            std::fprintf (stderr, "rovox: warning: %s is not valid TOML: all external requests are rejected until it is fixed\n", file_.filename().string().c_str());
+        }
+        else
+            std::fprintf (stderr, "rovox: warning: %s is not valid TOML: keeping the previous configuration\n", file_.filename().string().c_str());
     }
 
     return config_;
@@ -655,9 +680,10 @@ std::optional<Result<Principal>> ExternalAuth::fromProxy (const AuthRequest& req
     const auto subject = headerOf (req, "x-rovox-subject");
     const auto scopes = headerOf (req, "x-rovox-scopes");
     const auto client = headerOf (req, "x-rovox-client");
-    const auto expected = hmacSha256Hex (cfg->proxySecret, ts + "\n" + req.method + "\n" + req.path + "\n" + tenant + "\n" + subject + "\n" + scopes + "\n" + client);
+    const auto& target = req.target.empty() ? req.path : req.target;
+    const auto expected = hmacSha256Hex (cfg->proxySecret, ts + "\n" + req.method + "\n" + target + "\n" + tenant + "\n" + subject + "\n" + scopes + "\n" + client);
 
-    if (! constantTimeEquals (lower (signature), expected) || ! isValidTenantId (tenant))
+    if (! constantTimeEquals (lower (signature), expected) || ! isValidTenantId (tenant) || (tenant == "local" && ! cfg->allowLocal))
         return Result<Principal> (unauthorized());
 
     auto parsed = ScopeSet::parse (split (scopes, ", "));
@@ -671,6 +697,7 @@ std::optional<Result<Principal>> ExternalAuth::fromProxy (const AuthRequest& req
     p.client = client;
     p.scopes = withoutForeignAdmin (parsed.value(), tenant);
     p.authMode = "trusted_proxy";
+    p.expiresAt = now() + positiveTtlS;     // request-scoped: a WS opened through the proxy is re-authenticated after a minute
     return Result<Principal> (p);
 }
 
@@ -756,13 +783,15 @@ ExternalAuth::Outcome ExternalAuth::introspect (const Config& cfg, const std::st
 
     const auto exp = numericClaim (claims, "exp");
 
-    if (exp > 0 && exp <= t)
+    if (exp > 0 && exp + cfg.leewayS <= t)
         return rejected;
 
-    auto p = principalFromClaims (claims, cfg.claims);
+    auto p = principalFromClaims (claims, cfg.claims, cfg.allowLocal);
 
     if (! p)
         return rejected;
+
+    p->expiresAt = sessionExpiry (exp, cfg.leewayS, t);
 
     Outcome ok;
     ok.principal = p;
@@ -893,16 +922,18 @@ ExternalAuth::Outcome ExternalAuth::verifyJwt (const Config& cfg, const std::str
 
     const auto exp = numericClaim (claims, "exp");
 
-    if (jsonString (claims, "iss") != cfg.issuer || ! audienceMatches (claims, cfg.audience) || exp <= t)
+    if (jsonString (claims, "iss") != cfg.issuer || ! audienceMatches (claims, cfg.audience) || exp + cfg.leewayS <= t)
         return rejected;
 
-    if (claims.contains ("nbf") && numericClaim (claims, "nbf") > t)
+    if (claims.contains ("nbf") && numericClaim (claims, "nbf") > t + cfg.leewayS)
         return {};                          // not valid yet: reject, but do not remember it
 
-    auto p = principalFromClaims (claims, cfg.claims);
+    auto p = principalFromClaims (claims, cfg.claims, cfg.allowLocal);
 
     if (! p)
         return rejected;
+
+    p->expiresAt = sessionExpiry (exp, cfg.leewayS, t);
 
     Outcome ok;
     ok.principal = p;

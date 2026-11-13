@@ -184,6 +184,7 @@ void Gateway::handleUpgrade (int fd, WsRequest req)
     authRequest.remoteAddr = req.remote;
     authRequest.method = "GET";
     authRequest.path = req.path;
+    authRequest.target = req.query.empty() ? req.path : req.path + "?" + req.query;
     authRequest.headers = req.headers;
     auto principal = auth_->resolve (authRequest);
 

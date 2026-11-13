@@ -874,9 +874,143 @@ ROVOX_TEST (auth, trusted_proxy_admin_is_for_the_local_tenant_only)
     CHECK (! acme.value().has (Scope::admin));
     CHECK (acme.value().has (Scope::render));
 
-    auto local = auth.resolve (proxyRequest ("10.0.0.9", now, "/x", "local", "admin"));
+    // the tenant `local` is the operator: never claimable from outside unless allow_local is set
+    CHECK (auth.resolve (proxyRequest ("10.0.0.9", now, "/x", "local", "admin")).error().code == errc::unauthorized);
+
+    const auto allowing = writeConfig ("auth-proxy-allow-local", std::string ("[auth]\nallow_local = true\n") + std::string (proxyToml).substr (7));
+    Authenticator permissive (nullptr, "", allowing);
+    permissive.external().setClock ([&] { return now; });
+    auto local = permissive.resolve (proxyRequest ("10.0.0.9", now, "/x", "local", "admin"));
     REQUIRE (local.ok());
     CHECK (local.value().has (Scope::admin));
+}
+
+ROVOX_TEST (auth, trusted_proxy_signature_covers_the_query_and_proxy_principals_expire)
+{
+    const auto cfg = writeConfig ("auth-proxy-target", proxyToml);
+    Authenticator auth (nullptr, "", cfg);
+    std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+
+    // signed over "/api/x?a=1": the same path with another query (or none) is another request
+    auto signedReq = proxyRequest ("10.0.0.9", now, "/api/x?a=1");
+    signedReq.path = "/api/x";
+    signedReq.target = "/api/x?a=1";
+    auto p = auth.resolve (signedReq);
+    REQUIRE (p.ok());
+
+    auto otherQuery = signedReq;
+    otherQuery.target = "/api/x?a=2";
+    CHECK (! auth.resolve (otherQuery).ok());
+    auto noQuery = signedReq;
+    noQuery.target = "/api/x";
+    CHECK (! auth.resolve (noQuery).ok());
+
+    // a proxy principal is valid for a short time only (a WS opened through the proxy is dropped after it)
+    CHECK (p.value().expiresAt == now + 60);
+    CHECK (auth.stillValid (p.value()));
+    now += 59;
+    CHECK (auth.stillValid (p.value()));
+    now += 1;
+    CHECK (! auth.stillValid (p.value()));
+}
+
+ROVOX_TEST (auth, a_tenant_claim_of_local_from_a_provider_is_rejected_unless_allowed)
+{
+    TestKey rsa ("rsa-1", false);
+    FakeIdp idp;
+    idp.jwksBody = json { { "keys", json::array ({ rsa.jwk() }) } }.dump();
+    const std::int64_t now = 1'800'000'000;
+
+    json claims = json::object();
+    claims["iss"] = "https://idp.test";
+    claims["aud"] = "rovox-api";
+    claims["exp"] = now + 3600;
+    claims["tenant"] = "local";
+    claims["scope"] = "admin render";
+
+    {
+        const auto cfg = writeConfig ("auth-local-claim", introspectionToml);
+        Authenticator auth (nullptr, "", cfg);
+        auth.external().setClock ([&] { return now; });
+        auth.external().setFetcher (idp.fetcher());
+        CHECK (auth.resolve (bearer (rsa.jwt (claims))).error().code == errc::unauthorized);
+        idp.introspectBody = R"({"active":true,"tenant":"local","scope":"admin"})";
+        CHECK (! auth.resolve (bearer ("opaque-local")).ok());
+    }
+
+    {
+        const auto cfg = writeConfig ("auth-local-claim-allowed", "[auth]\nallow_local = true\n" + std::string (introspectionToml).substr (7));
+        Authenticator auth (nullptr, "", cfg);
+        auth.external().setClock ([&] { return now; });
+        auth.external().setFetcher (idp.fetcher());
+        auto p = auth.resolve (bearer (rsa.jwt (claims)));
+        REQUIRE (p.ok());
+        CHECK (p.value().has (Scope::admin));
+    }
+}
+
+ROVOX_TEST (auth, jwt_sessions_expire_for_long_lived_connections_and_exp_nbf_have_a_leeway)
+{
+    TestKey rsa ("rsa-1", false);
+    FakeIdp idp;
+    idp.jwksBody = json { { "keys", json::array ({ rsa.jwk() }) } }.dump();
+    const auto cfg = writeConfig ("auth-jwt-expiry", introspectionToml);
+    Authenticator auth (nullptr, "", cfg);
+    std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+    auth.external().setFetcher (idp.fetcher());
+
+    json claims = json::object();
+    claims["iss"] = "https://idp.test";
+    claims["aud"] = "rovox-api";
+    claims["tenant"] = "acme";
+
+    // a token living 20 s: the principal is good for 20 s (+ the leeway), then a WS must go
+    claims["exp"] = now + 20;
+    auto shortLived = auth.resolve (bearer (rsa.jwt (claims)));
+    REQUIRE (shortLived.ok());
+    CHECK (shortLived.value().expiresAt == now + 60);           // min (exp + leeway, now + cache TTL)
+    CHECK (auth.stillValid (shortLived.value()));
+    now += 61;
+    CHECK (! auth.stillValid (shortLived.value()));
+
+    // a long token is capped by the cache TTL: the identity provider is asked again after a minute
+    now = 1'800'000'000;
+    claims["exp"] = now + 3600;
+    auto longLived = auth.resolve (bearer (rsa.jwt (claims)));
+    REQUIRE (longLived.ok());
+    CHECK (longLived.value().expiresAt == now + 60);
+
+    // leeway: exp up to 60 s in the past and nbf up to 60 s ahead are tolerated, not more
+    json expired = claims;
+    expired["exp"] = now - 59;
+    CHECK (auth.resolve (bearer (rsa.jwt (expired))).ok());
+    expired["exp"] = now - 60;
+    CHECK (! auth.resolve (bearer (rsa.jwt (expired))).ok());
+    json early = claims;
+    early["nbf"] = now + 60;
+    CHECK (auth.resolve (bearer (rsa.jwt (early))).ok());
+    early["nbf"] = now + 61;
+    CHECK (! auth.resolve (bearer (rsa.jwt (early))).ok());
+
+    // a configurable leeway
+    const auto strict = writeConfig ("auth-jwt-leeway", std::string (introspectionToml) + "leeway_s = 0\n");
+    Authenticator strictAuth (nullptr, "", strict);
+    strictAuth.external().setClock ([&] { return now; });
+    strictAuth.external().setFetcher (idp.fetcher());
+    expired["exp"] = now - 1;
+    CHECK (! strictAuth.resolve (bearer (rsa.jwt (expired))).ok());
+}
+
+ROVOX_TEST (auth, an_unparseable_config_fails_closed_instead_of_falling_back_to_token_mode)
+{
+    const auto cfg = writeConfig ("auth-broken", "[auth\nmode = ");
+    Authenticator auth (nullptr, "", cfg);
+    CHECK (! auth.open());
+    CHECK (auth.external().mode() != AuthMode::token);
+    CHECK (! auth.resolve (bearer ("anything")).ok());
+    CHECK (! auth.resolve (bearer ("rvx_k_AAAAAAAAAA_secret")).ok());
 }
 
 ROVOX_TEST (auth, trusted_proxy_ignores_headers_from_outside_the_allowlist)
@@ -1010,7 +1144,7 @@ ROVOX_TEST (auth, introspection_positive_entry_never_outlives_exp_and_errors_are
     now += 9;
     CHECK (auth.resolve (bearer ("short-lived")).ok());
     CHECK (idp.introspections.load() == 1);
-    now += 2;                                                   // past exp: asked again, and the answer is "expired"
+    now += 62;                                                  // past exp and the 60 s leeway: asked again, and the answer is "expired"
     CHECK (! auth.resolve (bearer ("short-lived")).ok());
     CHECK (idp.introspections.load() == 2);
 
@@ -1124,8 +1258,8 @@ ROVOX_TEST (auth, jwt_with_wrong_claims_signature_or_algorithm_is_unauthorized)
     CHECK (! auth.resolve (bearer (rsa.jwt (with ("iss", "https://evil.test")))).ok());
     CHECK (! auth.resolve (bearer (rsa.jwt (with ("aud", "someone-else")))).ok());
     CHECK (! auth.resolve (bearer (rsa.jwt (with ("aud", json::array ({ "a", "b" }))))).ok());
-    CHECK (! auth.resolve (bearer (rsa.jwt (with ("exp", now - 1)))).ok());
-    CHECK (! auth.resolve (bearer (rsa.jwt (with ("exp", now)))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("exp", now - 61)))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("exp", now - 60)))).ok());
     CHECK (! auth.resolve (bearer (rsa.jwt (with ("nbf", now + 100)))).ok());
     CHECK (! auth.resolve (bearer (rsa.jwt (with ("tenant", "Not Valid")))).ok());
 

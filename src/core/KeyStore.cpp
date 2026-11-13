@@ -6,11 +6,13 @@
 #include "Ids.h"
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -25,6 +27,38 @@ namespace
 {
 constexpr auto checkInterval = std::chrono::seconds (1);
 constexpr size_t maxLabel = 120;
+
+/** An exclusive flock on `<dir>/keys.lock` for the read-modify-write of keys.json across processes (the server and `rovox keys`). */
+class KeyFileLock
+{
+public:
+    explicit KeyFileLock (const fs::path& keysFile)
+    {
+        std::error_code ec;
+        const auto dir = keysFile.parent_path();
+        fs::create_directories (dir, ec);
+        ::chmod (dir.c_str(), 0700);
+        fd_ = ::open ((dir / "keys.lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+        if (fd_ >= 0)
+            while (::flock (fd_, LOCK_EX) != 0 && errno == EINTR) {}
+    }
+
+    ~KeyFileLock()
+    {
+        if (fd_ >= 0)
+        {
+            ::flock (fd_, LOCK_UN);
+            ::close (fd_);
+        }
+    }
+
+    KeyFileLock (const KeyFileLock&) = delete;
+    KeyFileLock& operator= (const KeyFileLock&) = delete;
+
+private:
+    int fd_ = -1;
+};
 
 bool writeAll (int fd, const std::string& data)
 {
@@ -326,6 +360,7 @@ void KeyStore::audit (const std::string& action, const KeyRecord& r, const std::
 Result<KeyStore::Created> KeyStore::create (const CreateSpec& spec, const std::string& actor)
 {
     std::lock_guard<std::mutex> lock (mutex_);
+    KeyFileLock fileLock (file_);
     refresh (true);
     auto out = createLocked (spec);
 
@@ -360,6 +395,7 @@ json KeyStore::list()
 Result<json> KeyStore::revoke (const std::string& id, const std::string& actor)
 {
     std::lock_guard<std::mutex> lock (mutex_);
+    KeyFileLock fileLock (file_);
     refresh (true);
     auto it = records_.find (id);
 
@@ -384,6 +420,7 @@ Result<json> KeyStore::revoke (const std::string& id, const std::string& actor)
 Result<KeyStore::Created> KeyStore::rotate (const std::string& id, std::int64_t graceSeconds, const std::string& actor)
 {
     std::lock_guard<std::mutex> lock (mutex_);
+    KeyFileLock fileLock (file_);
     refresh (true);
     auto it = records_.find (id);
 

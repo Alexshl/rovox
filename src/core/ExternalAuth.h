@@ -17,7 +17,16 @@
 //   issuer = "https://idp"
 //   audience = "rovox"
 //   resource = "https://rovox.example.com"  # RFC 9728 resource identifier
+//   leeway_s = 60                           # clock skew tolerated on exp / nbf
 //   tenant_claim = "tenant"                 # also subject_claim ("sub"), scope_claim ("scope"), client_claim ("client_id")
+//
+// `[auth] allow_local = true` lets an external identity carry the tenant `local` (the operator); by default a tenant claim of
+// `local` (JWT claim, introspection answer, proxy header) is rejected: the operator comes from the legacy token / native keys only.
+//
+// Trusted-proxy signature: lower-case hex HMAC-SHA256 (secret) of
+//   ts \n METHOD \n target \n tenant \n subject \n scopes \n client
+// where `target` is the request target as received (path and query, e.g. "/api/x?a=1"), so a signature is valid for that one
+// request only; X-Rovox-Ts is unix seconds. An unreadable rovox.toml on the first read fails closed (every request is rejected).
 //
 // Replay of a signed proxy request inside max_skew_s is accepted (threat model of the tenancy plan, section 2): keep the
 // proxy-to-core link on TLS or a private network. Secrets and tokens never appear in errors or logs.
@@ -89,6 +98,9 @@ public:
     std::string challengeHeader() const;
     std::optional<json> resourceMetadata() const;
 
+    /** Unix seconds by the injected clock (the system clock by default). */
+    std::int64_t now() const;
+
     struct Config;      // internal
     struct Outcome;
     struct Jwk;
@@ -99,7 +111,6 @@ private:
     Outcome verifyJwt (const Config&, const std::string& token, std::int64_t now) const;
     std::shared_ptr<const Jwk> findKey (const Config&, const std::string& kid, std::int64_t now, bool& fetchFailed) const;
     HttpReply fetch (const std::string& method, const std::string& url, const std::string& body, const std::map<std::string, std::string>& headers) const;
-    std::int64_t now() const;
 
     struct CacheEntry
     {
@@ -111,6 +122,7 @@ private:
     mutable std::mutex mutex_;                  // config and cache
     mutable std::shared_ptr<const Config> config_;
     mutable bool loaded_ = false;
+    mutable bool haveGoodConfig_ = false;       // a file was parsed successfully at least once
     mutable std::optional<std::filesystem::file_time_type> mtime_;
     mutable std::unordered_map<std::string, CacheEntry> cache_;
 
