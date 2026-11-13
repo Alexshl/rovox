@@ -1225,3 +1225,44 @@ ROVOX_TEST (templates, a_template_id_with_path_segments_is_refused)
     CHECK (! r.ok);
     CHECK (r.error.has_value() && r.error->code == errc::invalidParams);
 }
+
+ROVOX_TEST (templates, accompaniment_built_ins_use_the_gm_pack_and_mark_the_soloist)
+{
+    test::Env env;
+    auto list = env.run ("", "template.list", { { "tag", "accompaniment" } });
+    REQUIRE (list.ok);
+    CHECK (list.data["templates"].size() == 2);
+    CHECK (env.run ("", "template.list", { { "tag", "ear-training" } }).data["templates"].size() == 1);
+
+    for (const std::string tid : { "flute-piano", "sax-combo", "ear-training" })
+    {
+        const auto got = env.ok ("", "template.get", { { "template_id", tid } });
+        const auto tracks = got["template"]["tracks"];
+        REQUIRE (! tracks.empty());
+        CHECK (tracks[0]["role"] == "soloist");
+        CHECK (tracks[0]["soloist"] == true);
+        CHECK (tracks[0]["instrument"]["plugin_uid"].get<std::string>().rfind ("rovox:sf2/gm-musescore-lite/", 0) == 0);
+    }
+}
+
+ROVOX_TEST (templates, new_mode_makes_a_project_with_the_template_applied)
+{
+    test::Env env;
+    const auto made = env.ok ("", "template.new", { { "template_id", "audio-band" }, { "name", "from-template" }, { "ephemeral", true }, { "ttl_s", 3600 } });
+    const auto id = made["project_id"].get<std::string>();
+    CHECK (made["template"]["id"] == "audio-band");
+    CHECK (made["tracks"].size() == 5);
+    CHECK (env.ok (id, "track.list")["tracks"].size() == 5);
+    CHECK (env.ok (id, "history.list")["undo"].size() == 1);
+
+    const auto projects = env.ok ("", "project.list", { { "include_ephemeral", true } });
+    const auto list = projects["projects"];
+    bool found = false;
+
+    for (auto& pr : list)
+        if (pr["project_id"] == id)
+            found = pr["ephemeral"] == true;
+
+    CHECK (found);
+    CHECK (! env.run ("", "template.new", { { "template_id", "no-such-template" } }).ok);
+}
