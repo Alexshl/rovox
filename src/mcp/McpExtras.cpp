@@ -270,6 +270,9 @@ json substitute (const json& v, const json& params, const json& steps)
     return v;
 }
 
+// how many recipes are running on this thread (nested recipe.run calls): bounded by maxRecipeDepth
+thread_local int recipesRunningHere = 0;
+
 int recipeDepth()
 {
     return recipesRunningHere;
