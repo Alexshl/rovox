@@ -68,7 +68,7 @@ export class McpClient {
     for (;;) {
       if (!out.ok) return out;
       const job = out.data as { job_id?: string; state?: string; progress?: number; stage?: string } | undefined;
-      if (!job || !job.job_id || job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled') return out;
+      if (!job || !job.job_id || job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled' || job.state === 'interrupted') return out;
       onProgress?.(job.progress ?? 0, job.stage ?? '');
       out = await this.call('job.get', { job_id: job.job_id, wait_s: 2 });
     }

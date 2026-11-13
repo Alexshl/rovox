@@ -287,7 +287,7 @@ void EventWebhooks::onEvent (const Event& e)
         const auto& job = e.body["job"];
         const auto state = job.value ("state", std::string());
 
-        if (job.value ("kind", std::string()) == "render" && (state == "succeeded" || state == "failed" || state == "cancelled"))
+        if (job.value ("kind", std::string()) == "render" && (state == "succeeded" || state == "failed" || state == "cancelled" || state == "interrupted"))
         {
             json done { { "job_id", job.value ("job_id", "") }, { "kind", "render" }, { "state", state }, { "project_id", job.value ("project_id", "") },
                         { "finished", job.value ("finished", "") } };

@@ -628,7 +628,7 @@ void McpServer::buildTools()
         t.name = "job.list";
         t.title = "List jobs";
         t.description = "Jobs of this server, newest first. Filter by project_id, state (queued|running|succeeded|failed|cancelled) or kind (render|preview|analysis|import_plan|preflight).";
-        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "state", { { "type", "string" }, { "enum", { "queued", "running", "succeeded", "failed", "cancelled" } } } },
+        t.inputSchema = schema ({ { "project_id", projectIdProp() }, { "state", { { "type", "string" }, { "enum", { "queued", "running", "succeeded", "failed", "cancelled", "interrupted" } } } },
                                   { "kind", str() }, { "limit", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 200 } } } });
         t.annotations = { { "readOnlyHint", true } };
         t.handler = [ownsProject] (ToolCall& c) -> ToolOutput

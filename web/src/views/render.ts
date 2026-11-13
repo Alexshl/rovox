@@ -97,7 +97,7 @@ export function openRenderDialog(app: App): void {
     }
 
     const job = res.data as { state?: string; result?: Record<string, any>; error?: { code: string; message: string; details?: any } } | undefined;
-    if (!res.ok || !job || job.state === 'failed' || job.state === 'cancelled') {
+    if (!res.ok || !job || job.state === 'failed' || job.state === 'cancelled' || job.state === 'interrupted') {
       const err = job?.error ?? res.error;
       // the plain text first; the raw server message and code stay below it
       const raw = [err?.code, err?.message].filter((x) => x).join(': ');
