@@ -172,9 +172,10 @@ jobs:
           docker run -d --name rovox-insp -e ROVOX_TOKEN="$token" -p 127.0.0.1:4812:4810 rovox:ci serve --bind 0.0.0.0
           trap 'docker logs rovox-insp || true; docker rm -f rovox-insp || true' EXIT
           for i in $(seq 1 60); do curl -fs http://127.0.0.1:4812/healthz >/dev/null && break; sleep 2; done
-          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --header "Authorization: Bearer $token" --method tools/list --format json | tee /tmp/inspector-http-tools.json
+          # --header is variadic in the 0.17 CLI: it must come last, or it swallows the options after it
+          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --transport http --method tools/list --format json --header "Authorization: Bearer $token" | tee /tmp/inspector-http-tools.json
           jq -e '.tools | length > 0' /tmp/inspector-http-tools.json
-          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --header "Authorization: Bearer $token" --method tools/call --tool-name project.list --tool-args-json '{}' --format json | tee /tmp/inspector-http-call.json
+          npx --yes "$INSPECTOR" --cli http://127.0.0.1:4812/mcp --transport http --method tools/call --tool-name project.list --format json --header "Authorization: Bearer $token" | tee /tmp/inspector-http-call.json
           jq -e '.structuredContent.ok == true' /tmp/inspector-http-call.json
 
       - name: Skills sidecar e2e (analysis.tempo_map on a 120 BPM click, tempo.get on the core)
