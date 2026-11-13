@@ -4,6 +4,7 @@
 // Transport, meters, browser-stream packets, peaks and the commands the web UI relies on (tasks 310, 320, 330).
 // Runs with ROVOX_TEST_AUDIO=browser: the engine owns the stream device (a timer thread, no sound card).
 
+#include "Gateway.h"
 #include "Peaks.h"
 #include "Render.h"
 #include "TestFramework.h"
@@ -594,4 +595,79 @@ ROVOX_TEST (transport, the_clock_restarts_its_schedule_after_a_long_stall)
     CHECK (! BrowserStream::clockNeedsResync (milliseconds (250), period));
     CHECK (BrowserStream::clockNeedsResync (milliseconds (251), period));
     CHECK (BrowserStream::clockNeedsResync (seconds (10), period));
+}
+
+namespace
+{
+CommandResult runTenant (test::Env& env, const std::string& tenant, const std::string& project, const json& params)
+{
+    CommandContext ctx;
+    ctx.projectId = project;
+    ctx.tenant = tenant;
+    ctx.origin = { Origin::Kind::mcp, "mcp_1", "Claude" };
+    return env.bus.runNow ("transport.set", params, ctx);
+}
+
+std::string makeTenantProject (test::Env& env, const std::string& tenant, const std::string& name)
+{
+    CreateOptions opts;
+    opts.name = name;
+    opts.tenant = tenant;
+    auto id = env.pm.create (opts);
+    REQUIRE (id.ok());
+    return id.value();
+}
+} // namespace
+
+ROVOX_TEST (transport, another_tenant_cannot_start_playback_while_a_tenant_is_heard)
+{
+    test::Env env;
+    const auto x1 = makeTenantProject (env, "aud_x", "X one");
+    const auto x2 = makeTenantProject (env, "aud_x", "X two");
+    const auto y = makeTenantProject (env, "aud_y", "Y one");
+    CHECK (! env.pm.audibleTenant().has_value());
+
+    REQUIRE (runTenant (env, "aud_x", x1, { { "state", "playing" } }).ok);
+    REQUIRE (env.pm.audibleTenant().has_value());
+    CHECK (*env.pm.audibleTenant() == "aud_x");
+
+    // the other tenant is refused, and the message names neither the tenant nor a project
+    const auto busy = runTenant (env, "aud_y", y, { { "state", "playing" } });
+    REQUIRE (! busy.ok);
+    CHECK (busy.error->code == errc::busy);
+    CHECK (busy.error->message.find ("aud_x") == std::string::npos);
+    CHECK (busy.error->message.find (x1) == std::string::npos);
+    CHECK (! env.project (y).transport().wantsPlaying());
+
+    // stop and seek of the other tenant need no audio
+    CHECK (runTenant (env, "aud_y", y, { { "state", "stopped" } }).ok);
+    CHECK (runTenant (env, "aud_y", y, { { "position_s", 1.0 } }).ok);
+
+    // the same tenant keeps playing several projects as before
+    CHECK (runTenant (env, "aud_x", x2, { { "state", "playing" } }).ok);
+
+    CHECK (runTenant (env, "aud_x", x1, { { "state", "stopped" } }).ok);
+    CHECK (runTenant (env, "aud_x", x2, { { "state", "stopped" } }).ok);
+    CHECK (! env.pm.audibleTenant().has_value());
+    CHECK (runTenant (env, "aud_y", y, { { "state", "playing" } }).ok);
+    REQUIRE (env.pm.audibleTenant().has_value());
+    CHECK (*env.pm.audibleTenant() == "aud_y");
+    CHECK (runTenant (env, "aud_y", y, { { "state", "stopped" } }).ok);
+
+    for (auto& id : { x1, x2, y })
+        env.pm.close (id, SaveMode::discard);
+
+    std::error_code ec;
+
+    for (auto* t : { "aud_x", "aud_y" })
+        fs::remove_all (test::host().dataDir() / "tenants" / t, ec);
+}
+
+ROVOX_TEST (transport, audio_packets_go_only_to_the_clients_of_the_tenant_that_plays)
+{
+    const std::optional<std::string> x = "aud_x", none;
+    CHECK (Gateway::audioRecipient ("aud_x", x));
+    CHECK (! Gateway::audioRecipient ("aud_y", x));
+    CHECK (! Gateway::audioRecipient ("local", x));
+    CHECK (Gateway::audioRecipient ("aud_y", none));            // nobody plays: silence, the stream stays continuous
 }

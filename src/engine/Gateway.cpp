@@ -475,14 +475,25 @@ void Gateway::onHubEvent (const Event& e)
     }
 }
 
+bool Gateway::audioRecipient (const std::string& clientTenant, const std::optional<std::string>& audibleTenant)
+{
+    return ! audibleTenant.has_value() || *audibleTenant == clientTenant;
+}
+
 void Gateway::onAudioPacket (const std::vector<std::uint8_t>& packet)
 {
     std::shared_ptr<const std::vector<std::uint8_t>> frame;
     size_t headerLen = 0;
+    std::optional<std::string> audible;
+
+    {
+        std::lock_guard<std::mutex> lock (audibleMutex_);
+        audible = audibleTenant_;
+    }
 
     for (auto& c : clients())
     {
-        if (! c->wantAudio)
+        if (! c->wantAudio || ! audioRecipient (c->principal.tenant, audible))
             continue;
 
         if (frame == nullptr)
@@ -508,6 +519,13 @@ void Gateway::timerCallback()
 
     if (all.empty())
         return;
+
+    const auto audible = projects_.audibleTenant();
+
+    {
+        std::lock_guard<std::mutex> lock (audibleMutex_);
+        audibleTenant_ = audible;
+    }
 
     // a revoked or expired key closes its sockets within a second (the key store re-reads its file at most once a second itself)
     if (const auto now = std::chrono::steady_clock::now(); now - lastRevocationCheck_ >= std::chrono::seconds (1))
@@ -579,6 +597,9 @@ void Gateway::timerCallback()
 
             for (auto& c : subscribers)
             {
+                if (playing && ! audioRecipient (c->principal.tenant, audible))
+                    continue;                           // another tenant is heard: no position or meters of the mix
+
                 Sub sub;
                 {
                     std::lock_guard<std::mutex> lock (c->mutex);

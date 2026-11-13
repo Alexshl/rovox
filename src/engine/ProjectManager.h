@@ -80,6 +80,10 @@ public:
     std::optional<fs::path> findDirByName (const std::string& tenant, const std::string& name) const;
     fs::path projectsRoot (const std::string& tenant) const;
 
+    /** Tenant of an open project whose transport wants to play (not isPlaying(): a stopping transport still counts until it settles); nullopt if none.
+        Message thread. The device has one mix, so another tenant's play is refused while this is set (E11-06). */
+    std::optional<std::string> audibleTenant() const;
+
     /** Autosaves every dirty project (called by a 60 s timer in `serve` and on shutdown). */
     int autosaveDirty();
     /** Deletes ephemeral projects past created_at + ttl_s (open or on disk) that have no running job.

@@ -5,6 +5,7 @@
 
 #include "Ids.h"
 #include "PluginCatalog.h"
+#include "Transport.h"
 
 #include <algorithm>
 #include <cstring>
@@ -110,6 +111,7 @@ Result<std::string> ProjectManager::attach (const fs::path& dir, LoadedProject l
                                               [this] (Project& p, const Project::PublishedEvent& e) { publish (p, e); });
     project->lockFd_ = lockFd;
     project->onEvent = [this, raw = project.get()] (const json& e) { hub_.publish (raw->tenant(), raw->id(), e); };
+    project->audibleTenant = [this] { return audibleTenant(); };
     project->storageStatus = [this, tenant = project->tenant(), id] { return storageStatus (tenant, id); };
 
     if (mirrored)
@@ -374,6 +376,15 @@ void ProjectManager::setStorage (std::shared_ptr<RemoteStorage> s)
     if (storage_)
         storage_->setListener ([this] (const std::string& tenant, const std::string& id, const json& status)
                                { hub_.publish (tenant, id, { { "type", "storage.changed" }, { "project_id", id }, { "storage", status } }); });
+}
+
+std::optional<std::string> ProjectManager::audibleTenant() const
+{
+    for (auto& [id, p] : projects_)
+        if (p->transport_ != nullptr && p->transport_->wantsPlaying())
+            return p->tenant();
+
+    return std::nullopt;
 }
 
 json ProjectManager::storageStatus (const std::string& tenant, const std::string& id) const

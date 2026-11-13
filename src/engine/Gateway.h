@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 
 namespace rovox
@@ -75,6 +76,10 @@ public:
         project included); project state / transport events only to subscribers of that project and channel. Pure, so the isolation is unit-testable. */
     static bool shouldDeliver (const std::string& clientTenant, const std::map<std::string, Sub>& subs, const Event&);
 
+    /** Whether a client of `clientTenant` gets the audio packets while `audibleTenant` plays (E11-06). Nobody playing = silence, which goes to all
+        so a stream that is already open keeps its sequence. Pure, so the isolation is unit-testable. */
+    static bool audioRecipient (const std::string& clientTenant, const std::optional<std::string>& audibleTenant);
+
 private:
     struct Client
     {
@@ -113,6 +118,8 @@ private:
     std::vector<std::shared_ptr<Client>> clients_;
     std::map<std::string, int> projectIndex_;
     std::set<std::string> wasPlaying_;
+    mutable std::mutex audibleMutex_;
+    std::optional<std::string> audibleTenant_;      // refreshed by timerCallback (message thread); the audio thread only reads it, under audibleMutex_
     std::atomic<bool> stopping_ { false };
 };
 
