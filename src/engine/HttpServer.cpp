@@ -5,6 +5,7 @@
 
 #include "Gateway.h"
 #include "Ids.h"
+#include "JobFiles.h"
 #include "Peaks.h"
 #include "Quota.h"
 #include "RequestGuard.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <chrono>
 #include <ctime>
 #include <fstream>
 #include <limits>
@@ -730,6 +732,44 @@ void HttpServer::installRoutes()
             });
         });
     }
+
+    // signed download links of job files (E8-06): public, the signature (tenant + job + name + expiry) is the credential; see JobFiles.h
+    auto jobFiles = std::make_shared<JobFiles> (host_.dataDir());
+    svr.Get (R"(/files/([^/]+)/([^/]+)/([^/]+))", [jobFiles] (const httplib::Request& req, httplib::Response& res)
+    {
+        const auto now = (std::int64_t) std::chrono::duration_cast<std::chrono::seconds> (std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto resolved = jobFiles->resolve (req.matches[1], req.matches[2], req.matches[3], req.get_param_value ("exp"), req.get_param_value ("sig"), now);
+
+        if (! resolved.ok())
+            return reply (res, resolved.error().code == errc::notFound ? 404 : 403, { { "ok", false }, { "error", resolved.error().toJson() } });
+
+        const auto file = resolved.value();
+        std::ifstream in (file, std::ios::binary);
+
+        if (! in)
+            return reply (res, 404, { { "ok", false }, { "error", { { "code", errc::notFound }, { "message", "no such file" } } } });
+
+        std::error_code ec;
+        const auto size = fs::file_size (file, ec);
+        const auto ext = file.extension().string();
+        const std::string mime = ext == ".mp3" ? "audio/mpeg" : (ext == ".flac" ? "audio/flac" : (ext == ".wav" ? "audio/wav" : "application/octet-stream"));
+        res.set_header ("Content-Disposition", "attachment; filename=\"" + file.filename().string() + "\"");     // the name is [A-Za-z0-9._-]: nothing to escape
+        res.set_header ("X-Content-Type-Options", "nosniff");
+        res.set_header ("Cache-Control", "private, no-store");
+        auto stream = std::make_shared<std::ifstream> (std::move (in));
+        res.set_content_provider (size, mime, [stream] (size_t offset, size_t length, httplib::DataSink& sink)
+        {
+            stream->clear();
+            stream->seekg ((std::streamoff) offset);
+            std::string buf (std::min<size_t> (length, 1 << 20), '\0');
+            stream->read (buf.data(), (std::streamsize) buf.size());
+
+            if (stream->gcount() <= 0)
+                return false;
+
+            return sink.write (buf.data(), (size_t) stream->gcount());
+        });
+    });
 
     //==========================================================================
     // tus 1.0 uploads: core + creation + checksum + termination
