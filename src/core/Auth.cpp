@@ -424,7 +424,10 @@ Result<Principal> Authenticator::resolve (const AuthRequest& req) const
 bool Authenticator::stillValid (const Principal& p) const
 {
     if (p.authMode != "token")
-        return true;        // external principals are re-checked on every request
+    {
+        // external principals are re-checked on every request; a long-lived connection lives until the credential's expiry
+        return p.expiresAt <= 0 || external_->now() < p.expiresAt;
+    }
 
     if (keys_ == nullptr)
         return false;

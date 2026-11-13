@@ -74,6 +74,7 @@ struct Principal
     ScopeSet scopes = ScopeSet::all();
     std::string quotaProfile;       // empty = the tenant's default; `local` is unlimited
     std::string authMode = "local"; // local | open | legacy | token | trusted_proxy | introspection
+    std::int64_t expiresAt = 0;     // unix seconds; 0 = none. External principals: a long-lived connection is dropped after it (stillValid)
 
     bool has (Scope s) const        { return scopes.has (s); }
 
@@ -107,6 +108,7 @@ struct AuthRequest
     std::string cookie;                             // the Cookie header
     std::string queryToken;                         // ?token= (only where the transport allows it)
     std::string remoteAddr, method, path;
+    std::string target;                             // request target (path + "?" + query); empty = just `path`. Covered by the trusted-proxy signature
     std::map<std::string, std::string> headers;     // lower-case names
 };
 
@@ -176,6 +178,7 @@ AuthRequest authRequestOf (const Request& req)
     a.remoteAddr = req.remote_addr;
     a.method = req.method;
     a.path = req.path;
+    a.target = req.target;
 
     // `?token=` opens the page URL (GET) only; it is never a credential for a state-changing request
     if (req.method == "GET" && req.has_param ("token"))
