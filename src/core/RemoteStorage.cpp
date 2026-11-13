@@ -1074,10 +1074,23 @@ void RemoteStorage::loop()
                 return;
         }
 
-        const bool flushing = [this] { std::lock_guard<std::mutex> lock (mutex_); return flushing_; }();
+        // the flags are read before every job: a flush that timed out (flushing_ back to false) must not keep bypassing the backoff,
+        // or a push that fails at once (cancelled by shutdown) is retried in a tight loop that never sees stop_
+        for (;;)
+        {
+            bool flushing = false;
+            {
+                std::lock_guard<std::mutex> lock (mutex_);
 
-        while (processOne (flushing))
-            ;
+                if (stop_)
+                    return;
+
+                flushing = flushing_;
+            }
+
+            if (! processOne (flushing))
+                break;
+        }
 
         housekeeping();
         idleCv_.notify_all();
