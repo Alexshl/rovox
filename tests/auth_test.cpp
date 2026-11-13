@@ -6,10 +6,10 @@
 #include "ExternalAuth.h"
 #include "Hmac.h"
 #include "KeyStore.h"
-#include "MockServer.h"
 #include "Origin.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
+#include "MockServer.h"       // last: httplib pulls zlib.h, whose macros break choc_zlib.h (Tracktion, via TestSupport.h) if it comes first
 
 #include <openssl/bn.h>
 #include <openssl/ec.h>
