@@ -5,6 +5,7 @@
 
 #include "AudioSink.h"
 #include "DrumsPlugin.h"
+#include "Sf2Plugin.h"
 #include "JsfxPlugin.h"
 #include "Limiter.h"
 #include "Loudness.h"
@@ -311,6 +312,12 @@ PreflightReport runPreflight (te::Edit& edit, const RenderRequest& req, te::Time
         if (auto extras = drumsPluginExtras (*p, 60.0); extras.is_object() && p->isEnabled() && extras["status"] == "error")
             addFinding (report, req, "plugin_not_loaded", "Rovox Drums has no kit (" + extras["error"].get<std::string>() + "); the track would be silent",
                         p->getOwnerTrack(), json { { "plugin_id", Project::idOf (p->state) }, { "plugin", "rovox:drums" }, { "reason", extras["error"] } });
+
+    // 2a'. an SF2 instrument whose pack or soundfont is missing, or whose preset the soundfont lacks, is silent
+    for (auto p : te::getAllPlugins (edit, false))
+        if (auto extras = sf2PluginExtras (*p); extras.is_object() && p->isEnabled() && extras["status"] == "error")
+            addFinding (report, req, "plugin_not_loaded", "Rovox SF2 cannot play (" + extras["error"].get<std::string>() + "); the track would be silent",
+                        p->getOwnerTrack(), json { { "plugin_id", Project::idOf (p->state) }, { "plugin", "rovox:sf2" }, { "reason", extras["error"] } });
 
     // 2b. JSFX plugins whose file is missing under ROVOX_JSFX_PATH or does not compile pass the audio through unchanged
     for (auto p : te::getAllPlugins (edit, false))
@@ -1422,9 +1429,16 @@ Result<json> renderEdit (te::Edit& edit, const RenderContext& ctx, const RenderR
     std::set<std::string> packKeys;
 
     for (auto p : te::getAllPlugins (edit, false))
-        if (auto id = drumsKitIdentity (*p, 60.0); id.is_object())
+    {
+        auto id = drumsKitIdentity (*p, 60.0);
+
+        if (! id.is_object())
+            id = sf2PackIdentity (*p);
+
+        if (id.is_object())
             if (packKeys.insert (id["id"].get<std::string>() + "|" + id["version"].get<std::string>() + "|" + id["sha256"].get<std::string>()).second)
                 packs.push_back ({ { "id", id["id"] }, { "version", id["version"] }, { "sha256", id["sha256"] }, { "license", id["license"] }, { "source", id["source"] } });
+    }
 
     std::unique_ptr<juce::XmlElement> xml (edit.state.createXml());
     Sha256 inputHash;

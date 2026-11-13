@@ -29,7 +29,7 @@ FROM base AS toolchain
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config git ca-certificates ccache \
-      libasound2-dev libfreetype-dev libfontconfig1-dev libopus-dev \
+      libasound2-dev libfreetype-dev libfontconfig1-dev libopus-dev libfluidsynth-dev \
       nlohmann-json3-dev libcli11-dev libcpp-httplib-dev libebur128-dev libmp3lame-dev libtomlplusplus-dev \
       libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxi-dev \
  && rm -rf /var/lib/apt/lists/*
@@ -83,6 +83,12 @@ RUN useradd --uid 10001 --create-home --home-dir /home/rovox --shell /usr/sbin/n
 # and the end-to-end scripts.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 calf-plugins zynaddsubfx-lv2 lsp-plugins-lv2 x42-plugins avldrums.lv2 avldrums.lv2-soundfont \
+ && rm -rf /var/lib/apt/lists/*
+# The SoundFont player of rovox:sf2 (libfluidsynth3, LGPL-2.1+, linked dynamically) and the General MIDI soundfont of the built-in pack gm-musescore-lite
+# (MuseScore General Lite, MIT; /usr/share/sounds/sf3/MuseScore_General_Lite.sf3). The soundfont is listed first so that it satisfies libfluidsynth3's
+# "timgm6mb-soundfont | sf3-soundfont-gm" dependency: the GPL-2.0 TimGM6mb is not installed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends musescore-general-soundfont-small libfluidsynth3 \
  && rm -rf /var/lib/apt/lists/*
 # Licences of the plugins above, read from their Debian copyright files (server_use_ok in plugin.catalog); unknown ones get no entry.
 COPY tools/plugin-licenses.py /tmp/plugin-licenses.py

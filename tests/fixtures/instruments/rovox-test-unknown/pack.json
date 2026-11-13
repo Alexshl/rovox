@@ -1,0 +1,28 @@
+{
+  "id": "rovox-test-unknown",
+  "version": "1",
+  "sha256": "9c6cc98c696212a57128deefe21f2cb280ccddf88fb9b870824133aa6d7757ac",
+  "license": "LicenseRef-unknown",
+  "server_use_ok": "unknown",
+  "attribution": "Rovox test sine, own work",
+  "source_url": "https://github.com/Alexshl/rovox",
+  "license_notes": "The same sine, declared with an unknown licence for the licence-gate test.",
+  "files": {
+    "sine.sf2": "9c6cc98c696212a57128deefe21f2cb280ccddf88fb9b870824133aa6d7757ac"
+  },
+  "instruments": [
+    {
+      "name": "Test Sine",
+      "gm_program": 0,
+      "bank": 0,
+      "range": [
+        0,
+        127
+      ],
+      "tags": [
+        "test",
+        "sine"
+      ]
+    }
+  ]
+}

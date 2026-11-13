@@ -15,6 +15,7 @@ add_library(rovox_core STATIC
     FsObjectStore.cpp
     DrumKit.cpp
     DrumKitLibrary.cpp
+    InstrumentPacks.cpp
     RemoteStorage.cpp
     S3ObjectStore.cpp
     Hmac.cpp

@@ -12,6 +12,7 @@
 #include "HttpServer.h"
 #include "Ids.h"
 #include "Import.h"
+#include "InstrumentPacks.h"
 #include "JobManager.h"
 #include "KeyStore.h"
 #include "McpHttp.h"
@@ -1831,6 +1832,80 @@ int runPlugins (const Options& o)
     EngineHost host (engineConfig (o, true));
     std::cout << scanPlugins (host, { "LV2", "VST3" }, o.pluginsDir).dump (2) << "\n";
     return 0;
+}
+
+int runPacksList (const Options& o)
+{
+    const auto scan = InstrumentPacks::scan();
+    json out = json::array();
+
+    for (auto& p : scan.packs)
+    {
+        auto j = InstrumentPacks::toJson (p);
+        j.erase ("instruments");
+        j["instrument_count"] = p.instruments.size();
+        out.push_back (std::move (j));
+    }
+
+    if (o.json)
+    {
+        std::cout << json { { "packs", out }, { "problems", scan.problems } }.dump (2) << std::endl;
+        return 0;
+    }
+
+    for (auto& p : out)
+        std::cout << p.value ("id", "") << "  " << p.value ("version", "") << "  " << p.value ("license", "") << "  server_use_ok=" << p["server_use_ok"].dump() << "  "
+                  << p.value ("instrument_count", 0) << " instruments  " << p.value ("path", "") << (p.value ("builtin", false) ? "  (built in)" : "") << "\n";
+
+    for (auto& pr : scan.problems)
+        std::cerr << "unusable pack: " << pr.value ("path", "") << ": " << pr.value ("error", "") << "\n";
+
+    if (out.empty())
+        std::cout << "no instrument packs (looked in " << (std::getenv ("ROVOX_INSTRUMENTS_PATH") != nullptr ? std::getenv ("ROVOX_INSTRUMENTS_PATH") : "/instruments") << ")\n";
+
+    return 0;
+}
+
+int runPacksVerify (const Options& o)
+{
+    const auto scan = InstrumentPacks::scan();
+    json results = json::array();
+    bool allOk = scan.problems.empty() || ! o.packId.empty();
+    bool found = o.packId.empty();
+
+    for (auto& p : scan.packs)
+    {
+        if (! o.packId.empty() && p.id != o.packId)
+            continue;
+
+        found = true;
+        auto r = InstrumentPacks::verify (p);
+        allOk = allOk && r["ok"].get<bool>();
+        results.push_back (std::move (r));
+    }
+
+    if (! found)
+        return fail ("no instrument pack '" + o.packId + "' (rovox packs list shows the installed ones)");
+
+    if (o.json)
+    {
+        std::cout << json { { "ok", allOk }, { "packs", results }, { "problems", scan.problems } }.dump (2) << std::endl;
+        return allOk ? 0 : 2;
+    }
+
+    for (auto& r : results)
+    {
+        std::cout << r.value ("id", "") << ": " << (r["ok"].get<bool>() ? "ok" : "FAILED") << "\n";
+
+        for (auto& problem : r["problems"])
+            std::cout << "  " << problem.get<std::string>() << "\n";
+    }
+
+    if (o.packId.empty())
+        for (auto& pr : scan.problems)
+            std::cout << "unusable pack: " << pr.value ("path", "") << ": " << pr.value ("error", "") << "\n";
+
+    return allOk ? 0 : 2;
 }
 
 } // namespace rovox::cli

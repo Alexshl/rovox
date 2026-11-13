@@ -6,6 +6,8 @@
 #include "JsfxPlugin.h"
 #include "DrumsPlugin.h"
 #include "DrumKitLibrary.h"
+#include "InstrumentPacks.h"
+#include "Sf2Plugin.h"
 
 #include "PluginHost.h"
 #include "ProjectFormat.h"
@@ -94,6 +96,25 @@ json localKitManifest (const fs::path& dataDir)
     }
 
     return json::object();
+}
+
+/** plugin.catalog record of one preset of an instrument pack (played by rovox:sf2). The "pack" member carries the pack's own licence data: withLicense()
+    takes the licence and server_use_ok from it, not from the Rovox code licence. */
+json packPresetRecord (const InstrumentPack& pack, const PackInstrument& i)
+{
+    json categories = json::array ({ "instrument", "soundfont", "pack" });
+
+    for (auto& t : i.tags)
+        categories.push_back (t);
+
+    return { { "plugin_uid", sf2PresetUid (pack.id, i.bank, i.program) }, { "format", "Rovox" }, { "name", i.name + " (" + pack.id + ")" }, { "vendor", pack.id },
+             { "version", pack.version }, { "kind", "instrument" }, { "categories", categories },
+             { "description", "SoundFont instrument: bank " + std::to_string (i.bank) + ", program " + std::to_string (i.program) + " of the pack " + pack.id + ", played by rovox:sf2. " + pack.attribution },
+             { "io", { { "in", 0 }, { "out", 2 }, { "midi_in", true } } }, { "latency_samples", nullptr }, { "params_count", nullptr },
+             { "file", "builtin" }, { "connector", "local" }, { "server_use_ok", false }, { "builtin", true },
+             { "range", { i.lowNote, i.highNote } },
+             { "pack", { { "id", pack.id }, { "version", pack.version }, { "license", pack.license }, { "server_use_ok", pack.serverUseOk }, { "attribution", pack.attribution },
+                         { "source_url", pack.sourceUrl }, { "bank", i.bank }, { "program", i.program } } } };
 }
 
 std::string iso (std::time_t t = std::time (nullptr))
@@ -192,6 +213,16 @@ Result<void> PluginCatalog::requireLicencesInState (const std::string& tenant, c
             }
         }
 
+        if (node.hasType (te::IDs::PLUGIN) && node[te::IDs::type].toString() == sf2XmlType)
+        {
+            // an instrument-pack plugin: the pack must be installed and its licence must pass the gate
+            const auto pack = toStd (node["pack"].toString());
+            const auto uid = sf2PresetUid (pack, (int) node["bank"], (int) node["program"]);
+
+            if (seen.insert (uid).second && ! licenceAllows (tenant, find (uid)))
+                offending.push_back ({ { "name", "Rovox SF2 (" + pack + ")" }, { "file", uid } });
+        }
+
         for (int i = 0; i < node.getNumChildren(); ++i)
             walk (node.getChild (i));
     };
@@ -248,7 +279,16 @@ json PluginCatalog::withLicense (json rec) const
     rec.erase ("package");
     std::string license, source;
 
-    if (rec.value ("format", "") == "Rovox")
+    bool packAllows = true;
+
+    if (rec.contains ("pack") && rec["pack"].is_object())
+    {
+        // a preset of an instrument pack: the licence of the soundfont, not of the Rovox player
+        license = rec["pack"].value ("license", "");
+        source = rec["pack"].value ("source_url", "");
+        packAllows = rec["pack"].contains ("server_use_ok") && rec["pack"]["server_use_ok"] == true;
+    }
+    else if (rec.value ("format", "") == "Rovox")
     {
         license = "AGPL-3.0-or-later";
         source = rovoxSourceUrl;
@@ -300,7 +340,7 @@ json PluginCatalog::withLicense (json rec) const
     if (! source.empty())
         rec["source_url"] = source;
 
-    rec["server_use_ok"] = ! license.empty() && isFreeLicense (license) ? json (true) : json ("unknown");
+    rec["server_use_ok"] = packAllows && ! license.empty() && isFreeLicense (license) ? json (true) : json ("unknown");
     return rec;
 }
 
@@ -602,6 +642,19 @@ std::optional<json> PluginCatalog::find (const std::string& key) const
         return withLicense (stockCatalogRecord (*stock));
     }
 
+    if (auto preset = parseSf2PresetUid (key))
+    {
+        if (auto pack = InstrumentPacks::find (preset->pack))
+            for (auto& i : pack->instruments)
+                if (i.bank == preset->bank && i.program == preset->program)
+                {
+                    std::lock_guard<std::mutex> lock (mutex_);
+                    return withLicense (packPresetRecord (*pack, i));
+                }
+
+        return std::nullopt;
+    }
+
     if (isJsfxUid (key))
     {
         auto rec = jsfxCatalogRecord (key);
@@ -820,6 +873,10 @@ json PluginCatalog::query (const CatalogQuery& q)
 
         for (auto& rec : jsfxCatalogRecords())
             source[rec["plugin_uid"].get<std::string>()] = rec;
+
+        for (auto& pack : InstrumentPacks::scan().packs)
+            for (auto& i : pack.instruments)
+                source[sf2PresetUid (pack.id, i.bank, i.program)] = packPresetRecord (pack, i);
 
         for (auto& [uid, rec] : source.items())
         {

@@ -4,6 +4,7 @@
 #include "StockPlugins.h"
 
 #include "DrumsPlugin.h"
+#include "Sf2Plugin.h"
 #include "FadeStage.h"
 #include "PanStage.h"
 #include "Limiter.h"
@@ -1211,6 +1212,7 @@ void registerStockPlugins (te::Engine& engine)
     pm.createBuiltInType<RovoxVerb>();
     pm.createBuiltInType<RovoxFir>();
     registerDrumsPlugin (engine);
+    registerSf2Plugin (engine);
     registerPanStage (engine);
     registerFadeStage (engine);
 }

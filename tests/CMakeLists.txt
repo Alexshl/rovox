@@ -31,6 +31,7 @@ target_sources(rovox_engine_tests PRIVATE
     stock_test.cpp
     parity_test.cpp
     drums_test.cpp
+    instrument_test.cpp
     transport_test.cpp
     stretch_resample_test.cpp
     auth_test.cpp
@@ -39,8 +40,9 @@ target_sources(rovox_engine_tests PRIVATE
     recipe_test.cpp)
 
 target_link_libraries(rovox_engine_tests PRIVATE rovox_mcp)
+target_compile_definitions(rovox_engine_tests PRIVATE ROVOX_SOURCE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
-foreach(suite core engine project import render rpp upload cli mcp transport web stock drums jsfx plugins midi routing fx templates projects delivery review storage parity stretch auth quota isolation recipe)
+foreach(suite core engine project import render rpp upload cli mcp transport web stock drums instrument jsfx plugins midi routing fx templates projects delivery review storage parity stretch auth quota isolation recipe)
     add_test(NAME ${suite} COMMAND rovox_engine_tests ${suite})
 endforeach()
 
@@ -51,6 +53,8 @@ set_tests_properties(cli web PROPERTIES ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE
 set_tests_properties(plugins midi routing fx templates projects mcp PROPERTIES
     ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE:rovox>;ROVOX_TEST_LV2_DIR=${CMAKE_CURRENT_BINARY_DIR}/lv2")
 set_tests_properties(transport PROPERTIES ENVIRONMENT "ROVOX_TEST_AUDIO=browser")
+# the instrument suite plays the own-work test soundfont packs (written by tools/make_test_sf2.py)
+set_tests_properties(instrument PROPERTIES ENVIRONMENT "ROVOX_TEST_INSTRUMENTS_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/instruments")
 # the JSFX suite runs the effects written for the tests
 set_tests_properties(jsfx PROPERTIES ENVIRONMENT "ROVOX_CLI_BIN=$<TARGET_FILE:rovox>;ROVOX_TEST_JSFX_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jsfx")
 

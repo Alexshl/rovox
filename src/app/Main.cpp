@@ -109,6 +109,16 @@ int main (int argc, char** argv)
     plugins->add_option ("--path", o.pluginsDir, "Extra search path");
     plugins->callback ([&] { std::exit (rovox::cli::runPlugins (o)); });
 
+    auto* packs = app.add_subcommand ("packs", "Instrument packs (SoundFonts played by rovox:sf2, from $ROVOX_INSTRUMENTS_PATH, default /instruments): list, verify");
+    packs->require_subcommand (1);
+    auto* packsList = packs->add_subcommand ("list", "List the installed packs with licence and server_use_ok");
+    packsList->add_flag ("--json", o.json, "Print JSON");
+    packsList->callback ([&] { std::exit (rovox::cli::runPacksList (o)); });
+    auto* packsVerify = packs->add_subcommand ("verify", "Check the files and sha256 of the packs (exit 2 if something is wrong)");
+    packsVerify->add_option ("id", o.packId, "Only this pack");
+    packsVerify->add_flag ("--json", o.json, "Print JSON");
+    packsVerify->callback ([&] { std::exit (rovox::cli::runPacksVerify (o)); });
+
     auto* storage = app.add_subcommand ("storage", "Object storage (S3-compatible) administration");
     storage->require_subcommand (1);
     auto* storagePush = storage->add_subcommand ("push", "Upload every local project (snapshot, media, renders) to the bucket; projects that are already up to date are skipped");
