@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,10 @@ struct Options
     std::vector<std::string> allowHosts;
     std::string connectUrl;             // mcp --connect: URL of a running `rovox serve`
     std::string tenant;                 // mcp (in-process): the tenant of this stdio session, every scope but admin (default: local, the operator)
+
+    // key create | list | revoke | rotate (--tenant is `tenant` above)
+    std::string keyId, keyScopes, keyLabel, keyExpires, keyQuotaProfile;
+    std::int64_t keyGraceS = 0;
 
     // render
     std::string target, out, renderName, range, format, scope = "master", seed;
@@ -57,6 +62,10 @@ int runImport (const Options&);
 int runUpload (const Options&);
 int runPlugins (const Options&);
 int runStoragePush (const Options&);
+int runKeyCreate (const Options&);    // key management works on <data>/auth/keys.json directly; a running server picks the change up within a second
+int runKeyList (const Options&);
+int runKeyRevoke (const Options&);
+int runKeyRotate (const Options&);
 int runMcp (const Options&);          // in-process, or (with --connect) a stdio proxy to a running server
 int runPluginProbe (const Options&);
 int runRenderChildCommand (const Options&);

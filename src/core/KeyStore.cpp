@@ -10,6 +10,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <sstream>
@@ -39,6 +41,16 @@ bool writeAll (int fd, const std::string& data)
     }
 
     return true;
+}
+
+std::string isoUtcS (std::int64_t t)
+{
+    const std::time_t tt = (std::time_t) t;
+    std::tm tm {};
+    ::gmtime_r (&tt, &tm);
+    char buf[32];
+    std::strftime (buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
 }
 
 std::optional<KeyRecord> recordFromJson (const json& j)
@@ -106,6 +118,50 @@ json recordToJson (const KeyRecord& r, std::int64_t lastUsed, bool withHash)
 json KeyRecord::toPublicJson() const
 {
     return recordToJson (*this, lastUsedAt, false);
+}
+
+Result<std::int64_t> parseExpiry (const std::string& text, std::int64_t nowS)
+{
+    const auto bad = makeError (errc::invalidParams, "expiry must be like 30d or an ISO date (2027-01-31, 2027-01-31T12:00:00Z)");
+
+    if (text.size() >= 2 && text.back() == 'd' && std::all_of (text.begin(), text.end() - 1, [] (unsigned char c) { return std::isdigit (c) != 0; }))
+    {
+        if (text.size() > 6)
+            return bad;
+
+        const auto days = std::stoll (text.substr (0, text.size() - 1));
+
+        if (days <= 0)
+            return bad;
+
+        return nowS + days * 86400;
+    }
+
+    std::tm tm {};
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+    char tail = 0;
+    int n = std::sscanf (text.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d%c", &y, &mo, &d, &h, &mi, &sec, &tail);
+
+    if (n == 3)
+        h = mi = sec = 0;
+    else if (! (n == 6 || (n == 7 && tail == 'Z' && text.back() == 'Z')))
+        return bad;
+
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || sec > 60)
+        return bad;
+
+    tm.tm_year = y - 1900;
+    tm.tm_mon = mo - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = h;
+    tm.tm_min = mi;
+    tm.tm_sec = sec;
+    const auto t = (std::int64_t) ::timegm (&tm);
+
+    if (t <= nowS)
+        return makeError (errc::invalidParams, "expiry is in the past");
+
+    return t;
 }
 
 //==============================================================================
@@ -252,7 +308,22 @@ Result<KeyStore::Created> KeyStore::createLocked (const CreateSpec& spec)
     return Created { r.toPublicJson(), formatApiKey (id, secret) };
 }
 
-Result<KeyStore::Created> KeyStore::create (const CreateSpec& spec)
+void KeyStore::audit (const std::string& action, const KeyRecord& r, const std::string& actor)
+{
+    const json line { { "ts", isoUtcS (now()) }, { "action", action }, { "key_id", r.id }, { "tenant", r.tenant }, { "label", r.label },
+                      { "scopes", r.scopes.names() }, { "actor", actor } };
+    const auto path = file_.parent_path() / "audit.jsonl";
+    const int fd = ::open (path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+
+    if (fd < 0)
+        return;
+
+    ::fchmod (fd, 0600);
+    writeAll (fd, line.dump() + "\n");
+    ::close (fd);
+}
+
+Result<KeyStore::Created> KeyStore::create (const CreateSpec& spec, const std::string& actor)
 {
     std::lock_guard<std::mutex> lock (mutex_);
     refresh (true);
@@ -267,6 +338,7 @@ Result<KeyStore::Created> KeyStore::create (const CreateSpec& spec)
         return saved.error();
     }
 
+    audit ("create", records_[out.value().record["id"].get<std::string>()], actor);
     return out;
 }
 
@@ -285,7 +357,7 @@ json KeyStore::list()
     return out;
 }
 
-Result<json> KeyStore::revoke (const std::string& id)
+Result<json> KeyStore::revoke (const std::string& id, const std::string& actor)
 {
     std::lock_guard<std::mutex> lock (mutex_);
     refresh (true);
@@ -305,10 +377,11 @@ Result<json> KeyStore::revoke (const std::string& id)
         return saved.error();
     }
 
+    audit ("revoke", it->second, actor);
     return it->second.toPublicJson();
 }
 
-Result<KeyStore::Created> KeyStore::rotate (const std::string& id, std::int64_t graceSeconds)
+Result<KeyStore::Created> KeyStore::rotate (const std::string& id, std::int64_t graceSeconds, const std::string& actor)
 {
     std::lock_guard<std::mutex> lock (mutex_);
     refresh (true);
@@ -347,6 +420,8 @@ Result<KeyStore::Created> KeyStore::rotate (const std::string& id, std::int64_t 
         return saved.error();
     }
 
+    audit ("rotate", records_[id], actor);
+    audit ("create", records_[created.value().record["id"].get<std::string>()], actor);
     return created;
 }
 

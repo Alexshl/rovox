@@ -2910,3 +2910,113 @@ ROVOX_TEST (mcp, stdio_tenant_session_has_every_scope_but_admin)
     CHECK (byId["3"]["result"]["isError"] == true);
     CHECK (byId["3"].dump().find ("FORBIDDEN_SCOPE") != std::string::npos);
 }
+
+//==============================================================================
+// E11-07: key.* and tenant.* admin tools
+
+ROVOX_TEST (mcp, key_and_tenant_tools_are_for_the_local_operator_only)
+{
+    const auto dir = test::makeTempDir ("mcpkeys");     // its own key file: the shared data dir's auth/keys.json belongs to other tests
+    KeyStore keys (dir / "auth" / "keys.json");
+    mcp::McpConfig cfg;
+    cfg.keyStore = &keys;
+    Harness h ({}, cfg);
+
+    // the operator creates a key: the full key is in this response and nowhere else
+    auto created = h.tool ("key.create", { { "tenant", "mcp-keyt" }, { "scopes", { "catalog:read", "projects:read" } }, { "label", "agent" }, { "expires", "7d" } });
+    REQUIRE (created["ok"] == true);
+    const auto key = created["data"]["key"].get<std::string>();
+    const auto parsed = parseApiKey (key);
+    REQUIRE (parsed.has_value());
+    const auto id = created["data"]["record"]["id"].get<std::string>();
+    CHECK (id == parsed->id);
+    CHECK (created["data"]["record"].contains ("expires_at"));
+    CHECK (! created["data"]["record"].contains ("hash"));
+
+    // list, tenant.list and tenant.get show the key id only
+    auto listed = h.tool ("key.list", { { "tenant", "mcp-keyt" } });
+    REQUIRE (listed["ok"] == true);
+    REQUIRE (listed["data"]["keys"].size() == 1);
+    CHECK (listed["data"]["keys"][0]["id"] == id);
+    CHECK (listed.dump().find (parsed->secret) == std::string::npos);
+    CHECK (listed.dump().find ("sha256") == std::string::npos);
+
+    auto tenants = h.tool ("tenant.list");
+    REQUIRE (tenants["ok"] == true);
+    bool found = false;
+
+    for (auto& t : tenants["data"]["tenants"])
+        if (t["tenant"] == "mcp-keyt")
+        {
+            found = true;
+            CHECK (t["keys"]["active"] == 1);
+        }
+
+    CHECK (found);
+    CHECK (tenants.dump().find (parsed->secret) == std::string::npos);
+
+    auto tenant = h.tool ("tenant.get", { { "tenant", "mcp-keyt" } });
+    REQUIRE (tenant["ok"] == true);
+    CHECK (tenant["data"]["tenant"] == "mcp-keyt");
+    CHECK (tenant["data"]["keys"]["total"] == 1);
+    CHECK (tenant["data"].contains ("limits"));
+    CHECK (tenant["data"].contains ("usage"));
+    CHECK (h.tool ("tenant.get", { { "tenant", "Not Valid!" } })["error"]["code"] == errc::invalidParams);
+
+    // refused by the key store: admin for another tenant
+    CHECK (h.tool ("key.create", { { "tenant", "mcp-keyt" }, { "scopes", { "admin" } } })["error"]["code"] == errc::invalidParams);
+
+    // rotate with a grace period, then revoke the new key
+    auto rotated = h.tool ("key.rotate", { { "key_id", id }, { "grace_s", 60 } });
+    REQUIRE (rotated["ok"] == true);
+    const auto newKey = rotated["data"]["key"].get<std::string>();
+    CHECK (newKey != key);
+    const auto newId = rotated["data"]["record"]["id"].get<std::string>();
+    auto revoked = h.tool ("key.revoke", { { "key_id", newId } });
+    REQUIRE (revoked["ok"] == true);
+    CHECK (revoked["data"]["record"].contains ("revoked_at"));
+    CHECK (h.tool ("key.revoke", { { "key_id", "k_doesnotexist" } })["error"]["code"] == errc::notFound);
+
+    // a tenant, even one holding the admin scope, is refused by every admin tool, and the denial leaks nothing
+    auto tenantSessionAll = tenantSession (h, "adm_x", ScopeSet::all());
+    const json adminCalls = json::array ({ { { "key.create", { { "tenant", "adm_x" }, { "scopes", { "render" } } } } }, { { "key.list", json::object() } },
+                                           { { "key.revoke", { { "key_id", id } } } }, { { "key.rotate", { { "key_id", id } } } },
+                                           { { "tenant.list", json::object() } }, { { "tenant.get", { { "tenant", "mcp-keyt" } } } } });
+
+    for (auto& call : adminCalls)
+    {
+        const auto name = call.begin().key();
+        auto denied = h.tool (name, call.begin().value(), tenantSessionAll.get());
+        CHECK (denied["ok"] == false);
+        CHECK (denied["error"]["code"] == errc::forbiddenScope);
+        CHECK (denied.dump().find (parsed->secret) == std::string::npos);
+    }
+
+    // a session without the admin scope does not see them in tools/list either
+    auto reader = scopedSession (h, ScopeSet::of ({ Scope::catalogRead, Scope::projectsRead }));
+    auto visible = listedTools (h, *reader);
+
+    for (auto* name : { "key.create", "key.list", "key.revoke", "key.rotate", "tenant.list", "tenant.get" })
+    {
+        CHECK (visible.count (name) == 0);
+        CHECK (h.tool (name, json::object(), reader.get())["error"]["code"] == errc::forbiddenScope);
+    }
+
+    CHECK (listedTools (h, *h.session).count ("key.create") == 1);
+
+    // the audit journal names the actor and holds no secret
+    std::ifstream in (dir / "auth" / "audit.jsonl");
+    std::stringstream text;
+    text << in.rdbuf();
+    CHECK (text.str().find ("\"actor\":\"mcp\"") != std::string::npos);
+    CHECK (text.str().find (parsed->secret) == std::string::npos);
+    CHECK (text.str().find ("sha256") == std::string::npos);
+}
+
+ROVOX_TEST (mcp, without_a_key_store_there_are_no_key_tools)
+{
+    Harness h;
+    auto listed = listedTools (h, *h.session);
+    CHECK (listed.count ("key.create") == 0);
+    CHECK (listed.count ("tenant.list") == 0);
+}

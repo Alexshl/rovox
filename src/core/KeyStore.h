@@ -3,7 +3,8 @@
 
 // API keys in <data>/auth/keys.json (mode 0600, atomic writes). Only the SHA-256 of a key's secret is stored; the full key
 // is returned once, by create / rotate. The file is re-read when its mtime or size changes (checked at most once a second),
-// so an edit by the CLI or by hand takes effect in about a second.
+// so an edit by the CLI or by hand takes effect in about a second. create / revoke / rotate are also appended to
+// <data>/auth/audit.jsonl (mode 0600): {ts, action, key_id, tenant, label, scopes, actor}, never a key or a hash.
 #pragma once
 
 #include "Auth.h"
@@ -34,6 +35,9 @@ struct KeyRecord
     json toPublicJson() const;
 };
 
+/** An expiry as given on a command line: "30d" (days from `nowS`) or an ISO date / time ("2027-01-31", "2027-01-31T12:00:00Z", UTC). Unix seconds, in the future. */
+Result<std::int64_t> parseExpiry (const std::string& text, std::int64_t nowS);
+
 class KeyStore
 {
 public:
@@ -55,12 +59,12 @@ public:
     explicit KeyStore (std::filesystem::path file, std::function<std::int64_t()> clock = {});
 
     /** INVALID_PARAMS for a bad tenant id, an empty scope set or `admin` for a tenant other than "local". */
-    Result<Created> create (const CreateSpec&);
+    Result<Created> create (const CreateSpec&, const std::string& actor = "cli");
     /** Public records, never a hash or secret. */
     json list();
-    Result<json> revoke (const std::string& id);
+    Result<json> revoke (const std::string& id, const std::string& actor = "cli");
     /** New key with the same label, tenant, scopes and quota profile. The old key is revoked at once, or expires in `graceSeconds`. */
-    Result<Created> rotate (const std::string& id, std::int64_t graceSeconds = 0);
+    Result<Created> rotate (const std::string& id, std::int64_t graceSeconds = 0, const std::string& actor = "cli");
 
     std::optional<KeyRecord> find (const std::string& id);
     /** Remembers use in memory (written to the file with the next change). */
@@ -75,6 +79,7 @@ private:
     void refresh (bool force);                  // callers hold mutex_
     Result<void> save();                        // callers hold mutex_
     Result<Created> createLocked (const CreateSpec&);
+    void audit (const std::string& action, const KeyRecord&, const std::string& actor);     // best effort; callers hold mutex_
 
     std::filesystem::path file_;
     std::function<std::int64_t()> clock_;
