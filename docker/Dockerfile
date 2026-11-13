@@ -46,9 +46,9 @@ ARG ROVOX_BUILD_JOBS=
 # open LV2 plugins from Debian for the plugin tests (instruments that play MIDI, effects); the tests fail, not skip, when they are missing
 RUN apt-get update \
  && apt-get install -y --no-install-recommends calf-plugins zynaddsubfx-lv2 lsp-plugins-lv2 x42-plugins avldrums.lv2 avldrums.lv2-soundfont \
-      dpf-plugins-vst3 dragonfly-reverb-vst3 \
+      dpf-plugins-vst3 dragonfly-reverb-vst3 lsp-plugins-vst3 \
  && rm -rf /var/lib/apt/lists/*
-# VST3 (Debian trixie) only for the tests: the scan and the factory programs (DPF MVerb); not shipped in the runtime image
+# VST3 (Debian trixie) only for the tests: the scan, factory programs and render (DPF MVerb, Kars, Nekobi), latency / PDC (LSP); not shipped in the runtime image
 ENV ROVOX_REQUIRE_LV2=1 ROVOX_REQUIRE_VST3=1
 WORKDIR /src
 COPY . .
