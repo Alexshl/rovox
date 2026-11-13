@@ -10,6 +10,7 @@
 #include "PluginCatalog.h"
 #include "PluginHost.h"
 #include "RenderJobs.h"
+#include "Sha256.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 
@@ -127,6 +128,88 @@ json notes (std::initializer_list<std::pair<int, double>> pitchAndStart, double 
 
     return out;
 }
+
+bool requireVst3()
+{
+    return std::getenv ("ROVOX_REQUIRE_VST3") != nullptr;
+}
+
+/** Catalog entries of the VST3 plugins matching `query` (optionally one kind); empty if the image has none. */
+json vst3Matches (test::Env& env, const std::string& query, const std::string& kind = {})
+{
+    json args { { "format", "VST3" }, { "query", query }, { "limit", 50 } };
+
+    if (! kind.empty())
+        args["kind"] = kind;
+
+    auto r = env.run ("", "plugin.catalog", args);
+    REQUIRE (r.ok);
+    return r.data["plugins"];
+}
+
+/** True if there is something to test with; fails the test when the image is supposed to have it (ROVOX_REQUIRE_VST3), else says it skips. */
+bool vst3Present (bool found, const char* what)
+{
+    if (found)
+        return true;
+
+    std::cerr << (requireVst3() ? "    the image should have " : "    skipped: no ") << what << (requireVst3() ? " (VST3) but the catalog has none\n" : " (VST3) installed\n");
+    CHECK (! requireVst3());
+    return false;
+}
+
+/** Renders the master of the project through the job service (external plugins render in the child); returns the file. */
+fs::path renderMaster (test::Env& env, const std::string& id, const std::string& name)
+{
+    JobManager jobs { fs::path() };
+    JobService service (env.pm, jobs, env.executor);
+    auto started = service.startRender ({ "local", id, Origin::system() }, { { "name", name }, { "tail_s", 0.0 }, { "check", true } }, false);
+    REQUIRE (started.ok());
+    auto job = waitForJob (jobs, started.value().jobId);
+
+    if (job["state"] != "succeeded")
+        std::cerr << "    " << job.dump() << "\n";
+
+    REQUIRE (job["state"] == "succeeded");
+    jobs.shutdown();
+    return env.project (id).rendersDir() / (name + ".wav");
+}
+
+std::string shaOf (const fs::path& file)
+{
+    auto h = sha256File (file);
+    REQUIRE (h.has_value());
+    return *h;
+}
+
+/** Index of the largest |sample| of the first channel. */
+size_t peakIndex (const fs::path& wav)
+{
+    std::vector<std::vector<float>> ch;
+    double sr = 0;
+    REQUIRE (test::readWav (wav, ch, sr));
+    REQUIRE (! ch.empty());
+    size_t best = 0;
+
+    for (size_t i = 0; i < ch[0].size(); ++i)
+        if (std::abs (ch[0][i]) > std::abs (ch[0][best]))
+            best = i;
+
+    return best;
+}
+
+/** A project with one track holding a single-sample impulse (0.25) at `at` of a `seconds` long 44.1 kHz file. */
+std::string impulseProject (test::Env& env, int at, double seconds)
+{
+    const auto id = env.newProject ("pdc");
+    const auto dir = test::makeTempDir ("plugin-impulse");
+    std::vector<float> samples ((size_t) std::lround (seconds * 44100.0), 0.0f);
+    samples[(size_t) at] = 0.25f;
+    test::writeWav (dir / "impulse.wav", { samples }, 44100.0, 24);
+    auto plan = env.ok (id, "import.plan", { { "paths", { (dir / "impulse.wav").string() } } });
+    env.ok (id, "import.apply", { { "plan_id", plan["plan_id"] } });
+    return id;
+}
 } // namespace
 
 //==============================================================================
@@ -192,6 +275,130 @@ ROVOX_TEST (plugins, vst3_in_the_image_is_scanned_and_lists_its_factory_programs
     REQUIRE (mverb.contains ("presets"));
     CHECK (mverb["presets"].size() >= 1);
     std::cerr << "    MVerb (VST3): " << mverb["presets"].size() << " presets\n";
+}
+
+ROVOX_TEST (plugins, a_vst3_effect_renders_audibly_and_deterministically)
+{
+    test::Env env;
+    scanOnce (env);
+    const auto found = vst3Matches (env, "MVerb");
+
+    if (! vst3Present (! found.empty(), "MVerb"))
+        return;
+
+    const auto uid = found[0]["plugin_uid"].get<std::string>();
+    const auto id = sineTrackProject (env, 3.0);
+    const auto dry = renderMaster (env, id, "dry");
+    auto added = env.run (id, "fx.add", { { "track_id", firstTrack (env, id) }, { "plugin", { { "plugin_uid", uid } } } });
+    REQUIRE (added.ok);
+    CHECK (added.data["plugin"]["loaded"] == true);
+
+    const auto wetA = renderMaster (env, id, "wet");
+    const auto shaA = shaOf (wetA);
+    CHECK (peakOf (wetA) > 0.001);
+
+    // the reverb changes the audio: the samples differ from the dry render
+    std::vector<std::vector<float>> d, w;
+    double sr = 0;
+    REQUIRE (test::readWav (dry, d, sr));
+    REQUIRE (test::readWav (wetA, w, sr));
+    REQUIRE (! d.empty());
+    REQUIRE (! w.empty());
+    double diff = 0;
+
+    for (size_t i = 0; i < std::min (d[0].size(), w[0].size()); ++i)
+        diff += std::abs ((double) d[0][i] - (double) w[0][i]);
+
+    std::cerr << "    MVerb render differs from dry by a summed " << diff << "\n";
+    CHECK (diff > 1.0);
+
+    // the same project rendered again gives the same bytes
+    const auto wetB = renderMaster (env, id, "wet");
+    CHECK (shaOf (wetB) == shaA);
+}
+
+ROVOX_TEST (plugins, a_vst3_with_latency_reports_it_and_the_render_is_delay_compensated)
+{
+    // an LSP lookahead / linear-phase plugin (lsp-plugins-vst3, one bundle with all of them): the first one that reports a latency
+    test::Env env;
+    scanOnce (env);
+    std::string uid, name;
+    int latency = 0;
+
+    for (const char* query : { "Limiter", "Compressor", "Equalizer", "Gate" })
+    {
+        for (const auto& p : vst3Matches (env, query))
+        {
+            if (p["kind"] == "instrument" || p["name"].get<std::string>().find ("Sidechain") != std::string::npos)
+                continue;
+
+            auto probe = env.run ("", "plugin.probe", { { "plugin_uid", p["plugin_uid"] } });
+
+            if (! probe.ok || probe.data["probe"].value ("latency_samples", 0) <= 0)
+                continue;
+
+            uid = p["plugin_uid"].get<std::string>();
+            name = p["name"].get<std::string>();
+            latency = probe.data["probe"]["latency_samples"].get<int>();
+            break;
+        }
+
+        if (! uid.empty())
+            break;
+    }
+
+    if (! vst3Present (! uid.empty(), "a plugin that reports latency (lsp-plugins-vst3)"))
+        return;
+
+    std::cerr << "    " << name << " reports " << latency << " samples of latency\n";
+    CHECK (latency > 0);
+
+    const int at = 22050;
+    const auto id = impulseProject (env, at, 1.5);
+    const auto dryIndex = peakIndex (renderMaster (env, id, "dry"));
+    auto added = env.run (id, "fx.add", { { "track_id", firstTrack (env, id) }, { "plugin", { { "plugin_uid", uid } } } });
+    REQUIRE (added.ok);
+    CHECK (added.data["plugin"]["probe"]["latency_samples"].get<int>() == latency);
+
+    const auto wet = renderMaster (env, id, "wet");
+    CHECK (peakOf (wet) > 0.01);
+    const auto wetIndex = peakIndex (wet);
+    std::cerr << "    impulse at " << dryIndex << " dry, " << wetIndex << " through the plugin\n";
+    CHECK ((long long) std::llabs ((long long) wetIndex - (long long) dryIndex) <= 1);
+}
+
+ROVOX_TEST (plugins, a_vst3_instrument_plays_midi)
+{
+    // Kars and Nekobi come from dpf-plugins-vst3 (both are synths)
+    test::Env env;
+    scanOnce (env);
+    std::string uid;
+
+    for (const char* query : { "Kars", "Nekobi" })
+    {
+        auto found = vst3Matches (env, query, "instrument");
+
+        if (! found.empty())
+        {
+            uid = found[0]["plugin_uid"].get<std::string>();
+            break;
+        }
+    }
+
+    if (! vst3Present (! uid.empty(), "a VST3 instrument (Kars or Nekobi)"))
+        return;
+
+    const auto id = env.newProject ("vst3synth");
+    const auto track = env.ok (id, "track.create", { { "name", "Synth" } })["track_id"].get<std::string>();
+    auto added = env.run (id, "fx.add", { { "track_id", track }, { "plugin", { { "plugin_uid", uid } } } });
+    REQUIRE (added.ok);
+    CHECK (added.data["plugin"]["is_instrument"] == true);
+    REQUIRE (env.run (id, "item.create_midi", { { "track_id", track }, { "name", "riff" },
+                                                { "notes", notes ({ { 48, 0.0 }, { 55, 1.0 }, { 60, 2.0 }, { 55, 3.0 } }, 0.9) } }).ok);
+    const auto out = renderMaster (env, id, "riff");
+    const double peak = peakOf (out);
+    std::cerr << "    VST3 instrument rendered peak " << peak << "\n";
+    CHECK (peak > 0.01);
 }
 
 ROVOX_TEST (plugins, instruments_in_the_image_are_listed_with_presets)
