@@ -161,7 +161,9 @@ ROVOX_TEST (import, local_r20_projects_if_present)
     CHECK (applyS < 1.0);
     CHECK (env.ok (id, "track.list")["tracks"].size() == plan["tracks"].size());
 
-    for (auto& t : env.ok (id, "track.list")["tracks"])
+    const auto trackList = env.ok (id, "track.list");
+
+    for (auto& t : trackList["tracks"])
         for (auto& c : t["items"])
             CHECK (c["length_s"].get<double>() > 0.0);
 }

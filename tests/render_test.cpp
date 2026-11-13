@@ -492,7 +492,9 @@ int runChildMode (int argc, char** argv)
         if (fx)
         {
             // the spike P5 scenario: 8 tracks with EQ + compressor and a compressor on the master
-            for (auto& t : env.ok (id, "track.list")["tracks"])
+            const auto trackList = env.ok (id, "track.list");
+
+            for (auto& t : trackList["tracks"])
                 for (const char* kind : { "equaliser", "compressor" })
                     env.ok (id, "fx.add", { { "track_id", t["track_id"] }, { "builtin", kind } });
 

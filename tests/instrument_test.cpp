@@ -328,7 +328,9 @@ ROVOX_TEST (instrument, the_plugin_state_names_the_pack_and_a_missing_pack_is_re
 
     bool shown = false;
 
-    for (auto& fx : env.ok (id, "fx.list", { { "target", track } })["fx"])
+    const auto listed = env.ok (id, "fx.list", { { "target", track } });     // kept: a range-for over ["fx"] of a temporary dangles
+
+    for (auto& fx : listed["fx"])
         shown = shown || (fx.contains ("sf2") && fx["sf2"]["status"] == "ready" && fx["loaded"] == true);
 
     CHECK (shown);

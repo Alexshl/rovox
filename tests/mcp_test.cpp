@@ -2247,6 +2247,29 @@ struct LicenseFixture
     std::string oldValue;
 };
 
+/** Every page of plugin.catalog (the catalog grows past one page with the LSP VST3 bundle and the instrument packs). */
+template <typename H>
+json wholeCatalog (H& h, json args = json::object())
+{
+    json all { { "plugins", json::array() } };
+    args["limit"] = 500;
+
+    for (int page = 0; page < 50; ++page)
+    {
+        auto d = h.data ("plugin.catalog", args);
+
+        for (auto& p : d["plugins"])
+            all["plugins"].push_back (p);
+
+        if (! d.contains ("next_cursor") || d["next_cursor"].is_null())
+            break;
+
+        args["cursor"] = d["next_cursor"];
+    }
+
+    return all;
+}
+
 json findRecord (const json& catalog, const std::string& uid)
 {
     for (auto& p : catalog["plugins"])
@@ -2263,7 +2286,7 @@ ROVOX_TEST (mcp, plugin_catalog_reports_licences_and_filters_by_server_use_ok)
     Harness h;
 
     // stock plugins are Rovox code: AGPL, with the repository as the source
-    auto all = h.data ("plugin.catalog", { { "limit", 500 } });
+    auto all = wholeCatalog (h);
     auto eq = findRecord (all, "rovox:eq");
     REQUIRE (eq.is_object());
     CHECK (eq["license"] == "AGPL-3.0-or-later");
@@ -2282,7 +2305,7 @@ ROVOX_TEST (mcp, plugin_catalog_reports_licences_and_filters_by_server_use_ok)
     CHECK (user["server_use_ok"] == "unknown");
     CHECK (! user.contains ("license"));
 
-    auto filtered = h.data ("plugin.catalog", { { "server_use_ok", true }, { "limit", 500 } });
+    auto filtered = wholeCatalog (h, { { "server_use_ok", true } });
     CHECK (findRecord (filtered, jsfx).is_null());
     CHECK (findRecord (filtered, "rovox:eq").is_object());
 
@@ -2291,7 +2314,7 @@ ROVOX_TEST (mcp, plugin_catalog_reports_licences_and_filters_by_server_use_ok)
 
     // a record from a licences.json (the one the image build writes, or the override in the data directory) gets the licence and the source
     fx.setOverride ({ { jsfx, { { "license", "MIT" }, { "source_url", "https://example.org/licgain" }, { "package", "licgain" } } } });
-    auto licensed = findRecord (h.data ("plugin.catalog", { { "server_use_ok", true }, { "limit", 500 } }), jsfx);
+    auto licensed = findRecord (wholeCatalog (h, { { "server_use_ok", true } }), jsfx);
     REQUIRE (licensed.is_object());
     CHECK (licensed["license"] == "MIT");
     CHECK (licensed["source_url"] == "https://example.org/licgain");
@@ -2299,7 +2322,7 @@ ROVOX_TEST (mcp, plugin_catalog_reports_licences_and_filters_by_server_use_ok)
 
     // a licence that is not on the free list stays "unknown"
     fx.setOverride ({ { jsfx, { { "license", "LicenseRef-proprietary" }, { "source_url", "https://example.org/licgain" } } } });
-    auto nonFree = findRecord (h.data ("plugin.catalog", { { "limit", 500 } }), jsfx);
+    auto nonFree = findRecord (wholeCatalog (h), jsfx);
     REQUIRE (nonFree.is_object());
     CHECK (nonFree["server_use_ok"] == "unknown");
 }
