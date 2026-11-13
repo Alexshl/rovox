@@ -21,6 +21,11 @@
 #include <set>
 #include <thread>
 
+namespace rovox
+{
+class KeyStore;
+}
+
 namespace rovox::mcp
 {
 
@@ -36,6 +41,7 @@ struct McpConfig
     std::function<Result<json> (const std::string&)> uploadBatchStatus;     // set by `serve`; enables upload.status
     std::function<Result<json> (const std::string&)> uploadFinish;          // set by `serve`; enables upload.finish
     std::function<bool()> audioActive;      // optional
+    KeyStore* keyStore = nullptr;           // set by `serve` and `mcp`; enables key.* and tenant.* (admin tools, local operator only)
     std::string configFile;                 // TOML with [delivery.*] adapters; empty = $ROVOX_CONFIG, else <data>/config/rovox.toml
 };
 
@@ -185,6 +191,7 @@ public:
 private:
     friend class ToolRegistry;
     void buildTools();
+    void buildAdminTools();                 // McpAdminTools.cpp: key.*, tenant.* (only with McpConfig::keyStore)
     json handleRequest (Session&, const json& req, RequestContext&);
     json handleToolsCall (Session&, const json& params, RequestContext&);
     json toolResult (const ToolOutput&) const;

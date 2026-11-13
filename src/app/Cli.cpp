@@ -815,6 +815,7 @@ int runServe (const Options& o)
     server.setGateway (&gateway);
 
     auto mcpCfg = mcpConfig (o);
+    mcpCfg.keyStore = &keys;
     mcpCfg.uploadBatchStatus = [&server] (const std::string& id) { return server.uploads().batchStatus (id); };
     mcpCfg.uploadFinish = [&server] (const std::string& id) { return server.uploads().finish (id); };
     McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
@@ -1408,7 +1409,10 @@ int runMcp (const Options& o)
     if (! storage.ok())
         return fail (storage.error().message);
 
-    McpStack stack (host, pm, bus, hub, executor, mcpConfig (o));
+    KeyStore keys (cfg.dataDir / "auth" / "keys.json");
+    auto mcpCfg = mcpConfig (o);
+    mcpCfg.keyStore = &keys;
+    McpStack stack (host, pm, bus, hub, executor, mcpCfg);
 
     std::atomic<bool> readerDone { false };
     std::thread reader ([&]
@@ -1434,6 +1438,134 @@ int runMcp (const Options& o)
     pm.closeAll (SaveMode::autosave);       // dirty projects land in autosave/, as with `serve`
     shutdownStorage (storage.value());
     return 0;
+}
+
+//==============================================================================
+// key management: the file is the interface, no running server is needed (and none is touched)
+namespace
+{
+KeyStore openKeyStore (const Options& o)
+{
+    return KeyStore (resolveDataDir (o.dataDir) / "auth" / "keys.json");
+}
+
+/** The key goes to stdout and nowhere else; the human hint goes to stderr. */
+int printCreated (const KeyStore::Created& c, const Options& o, const char* verb)
+{
+    if (o.json)
+        std::cout << json { { "key", c.key }, { "record", c.record } }.dump (2) << std::endl;
+    else
+        std::cout << c.key << std::endl;
+
+    std::cerr << verb << " " << c.record.value ("id", "") << " (tenant " << c.record.value ("tenant", "") << "). This is the only time the key is shown: store it now.\n";
+    return 0;
+}
+
+std::string keyStatus (const json& r, std::int64_t now)
+{
+    if (r.contains ("revoked_at"))
+        return "revoked";
+
+    if (r.contains ("expires_at") && now >= r["expires_at"].get<std::int64_t>())
+        return "expired";
+
+    return "active";
+}
+
+std::string joinNames (const json& names)
+{
+    std::string out;
+
+    for (auto& n : names)
+        out += (out.empty() ? "" : ",") + n.get<std::string>();
+
+    return out;
+}
+} // namespace
+
+int runKeyCreate (const Options& o)
+{
+    std::vector<std::string> names;
+    std::stringstream ss (o.keyScopes);
+
+    for (std::string item; std::getline (ss, item, ',');)
+        if (! item.empty())
+            names.push_back (item);
+
+    auto scopes = ScopeSet::parse (names);
+
+    if (! scopes.ok())
+        return fail (scopes.error().message);
+
+    auto keys = openKeyStore (o);
+    KeyStore::CreateSpec spec;
+    spec.tenant = o.tenant;
+    spec.scopes = scopes.value();
+    spec.label = o.keyLabel;
+    spec.quotaProfile = o.keyQuotaProfile;
+
+    if (! o.keyExpires.empty())
+    {
+        auto expiry = parseExpiry (o.keyExpires, keys.now());
+
+        if (! expiry.ok())
+            return fail (expiry.error().message);
+
+        spec.expiresAt = expiry.value();
+    }
+
+    auto created = keys.create (spec, "cli");
+
+    if (! created.ok())
+        return fail (created.error().message);
+
+    return printCreated (created.value(), o, "created key");
+}
+
+int runKeyList (const Options& o)
+{
+    auto keys = openKeyStore (o);
+    json out = json::array();
+
+    for (auto& r : keys.list())
+        if (o.tenant.empty() || r.value ("tenant", "") == o.tenant)
+            out.push_back (r);
+
+    if (o.json)
+    {
+        std::cout << out.dump (2) << std::endl;
+        return 0;
+    }
+
+    const auto now = keys.now();
+
+    for (auto& r : out)
+        std::cout << r.value ("id", "") << "  " << r.value ("tenant", "") << "  " << joinNames (r["scopes"]) << "  " << keyStatus (r, now) << "  " << r.value ("label", "") << "\n";
+
+    return 0;
+}
+
+int runKeyRevoke (const Options& o)
+{
+    auto keys = openKeyStore (o);
+    auto r = keys.revoke (o.keyId, "cli");
+
+    if (! r.ok())
+        return fail (r.error().message);
+
+    std::cout << "revoked " << o.keyId << std::endl;
+    return 0;
+}
+
+int runKeyRotate (const Options& o)
+{
+    auto keys = openKeyStore (o);
+    auto r = keys.rotate (o.keyId, o.keyGraceS, "cli");
+
+    if (! r.ok())
+        return fail (r.error().message);
+
+    return printCreated (r.value(), o, "rotated: new key");
 }
 
 //==============================================================================

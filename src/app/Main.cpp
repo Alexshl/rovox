@@ -125,6 +125,32 @@ int main (int argc, char** argv)
     mcp->add_option ("--storage", o.storage, "s3 | local | fs (see the global option)")->check (CLI::IsMember ({ "s3", "local", "fs" }));
     mcp->callback ([&] { std::exit (rovox::cli::runMcp (o)); });
 
+    auto* key = app.add_subcommand ("key", "API keys: create, list, revoke, rotate (works on <data>/auth/keys.json; a running server notices within a second)");
+    key->require_subcommand (1);
+    auto* keyCreate = key->add_subcommand ("create", "Create a key; the full key is printed once on stdout (and never again)");
+    keyCreate->add_option ("--tenant", o.tenant, "Tenant the key belongs to")->required();
+    keyCreate->add_option ("--scopes", o.keyScopes, "Comma separated: catalog:read,projects:read,projects:write,render,delivery,admin (admin only for tenant local; read and write are shorthands)")->required();
+    keyCreate->add_option ("--label", o.keyLabel, "Free text to recognise the key");
+    keyCreate->add_option ("--expires", o.keyExpires, "30d (days from now) or an ISO date / time in UTC");
+    keyCreate->add_option ("--quota-profile", o.keyQuotaProfile, "Quota profile of this key (default: the tenant's)");
+    keyCreate->add_flag ("--json", o.json, "Print {key, record} as JSON");
+    keyCreate->callback ([&] { std::exit (rovox::cli::runKeyCreate (o)); });
+
+    auto* keyList = key->add_subcommand ("list", "List keys (never their secrets)");
+    keyList->add_option ("--tenant", o.tenant, "Only this tenant");
+    keyList->add_flag ("--json", o.json, "Print a JSON array");
+    keyList->callback ([&] { std::exit (rovox::cli::runKeyList (o)); });
+
+    auto* keyRevoke = key->add_subcommand ("revoke", "Revoke a key");
+    keyRevoke->add_option ("id", o.keyId, "Key id (k_...)")->required();
+    keyRevoke->callback ([&] { std::exit (rovox::cli::runKeyRevoke (o)); });
+
+    auto* keyRotate = key->add_subcommand ("rotate", "Create a replacement with the same tenant and scopes; the new key is printed once");
+    keyRotate->add_option ("id", o.keyId, "Key id (k_...)")->required();
+    keyRotate->add_option ("--grace", o.keyGraceS, "Seconds the old key keeps working (default: 0, revoked at once)")->check (CLI::NonNegativeNumber);
+    keyRotate->add_flag ("--json", o.json, "Print {key, record} as JSON");
+    keyRotate->callback ([&] { std::exit (rovox::cli::runKeyRotate (o)); });
+
     // helper processes of the server (task 410): a plugin is loaded and tested, or a project with plugins is rendered, outside the server process
     auto* probe = app.add_subcommand ("plugin-probe", "internal: load one plugin in this process and print what it does as JSON");
     probe->group ("");

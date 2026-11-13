@@ -190,6 +190,7 @@ McpServer::McpServer (ProjectManager& p, CommandBus& b, EventHub& h, JobManager&
     }
 
     buildTools();
+    buildAdminTools();
     observerId_ = hub_.addObserver ([this] (const Event& e) { onHubEvent (e); });
     flusher_ = std::thread ([this] { flusherLoop(); });
 }

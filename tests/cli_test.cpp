@@ -1236,3 +1236,154 @@ ROVOX_TEST (cli, mcp_tenant_flag_gives_every_scope_but_admin)
     run ({ "mcp", "--tenant", "Not Valid!" }, test::makeTempDir ("tenantbad"), 20, bad);
     CHECK (bad == 1);
 }
+
+//==============================================================================
+// E11-07: key management CLI
+
+namespace
+{
+std::string trimmed (std::string s)
+{
+    while (! s.empty() && std::isspace ((unsigned char) s.back()))
+        s.pop_back();
+
+    return s;
+}
+
+std::string slurp (const fs::path& p)
+{
+    std::ifstream in (p);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+/** The status of GET /api/projects with `key`, polled until it is `want` or `timeoutS` passes; returns the last status. */
+int statusWithKey (int port, const std::string& key, int want, double timeoutS)
+{
+    httplib::Client c ("127.0.0.1", port);
+    const auto t0 = std::chrono::steady_clock::now();
+    int status = -1;
+
+    for (;;)
+    {
+        auto r = c.Get ("/api/projects", httplib::Headers { { "Authorization", "Bearer " + key } });
+        status = r != nullptr ? r->status : -1;
+
+        if (status == want || std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() > timeoutS)
+            return status;
+
+        std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    }
+}
+} // namespace
+
+ROVOX_TEST (cli, key_create_list_rotate_revoke_show_the_secret_once_and_work_with_serve)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("keycli");     // its own data dir: auth/keys.json is shared state
+    std::vector<std::string> allOutput;                 // stdout and stderr of every command after the key was shown
+    int code = -1;
+
+    // create: the key is the only line on stdout
+    auto created = run ({ "key", "create", "--tenant", "cli-keyt", "--scopes", "catalog:read,projects:read", "--label", "ci", "--expires", "30d" }, data, 30, code);
+    REQUIRE (code == 0);
+    const auto key1 = trimmed (created.out);
+    const auto parsed1 = parseApiKey (key1);
+    REQUIRE (parsed1.has_value());
+    CHECK (created.out.find ('\n') == created.out.size() - 1);
+    CHECK (created.err.find (key1) == std::string::npos);
+    CHECK (created.err.find (parsed1->id) != std::string::npos);
+
+    // list: ids only
+    auto listed = run ({ "key", "list", "--json", "--tenant", "cli-keyt" }, data, 30, code);
+    CHECK (code == 0);
+    allOutput.push_back (listed.out + listed.err);
+    const auto records = json::parse (listed.out, nullptr, false);
+    REQUIRE ((records.is_array() && records.size() == 1));
+    CHECK (records[0].value ("id", std::string()) == parsed1->id);
+    CHECK (records[0].value ("label", std::string()) == "ci");
+    CHECK (records[0].contains ("expires_at"));
+    CHECK (! records[0].contains ("hash"));
+
+    auto text = run ({ "key", "list" }, data, 30, code);
+    CHECK (code == 0);
+    CHECK (text.out.find (parsed1->id) != std::string::npos);
+    CHECK (text.out.find ("active") != std::string::npos);
+    allOutput.push_back (text.out + text.err);
+
+    // refused: admin for a tenant other than local, a bad scope, an unknown id
+    auto adminKey = run ({ "key", "create", "--tenant", "cli-keyt", "--scopes", "admin" }, data, 30, code);
+    CHECK (code == 1);
+    CHECK (adminKey.out.empty());
+    run ({ "key", "create", "--tenant", "cli-keyt", "--scopes", "nonsense" }, data, 30, code);
+    CHECK (code == 1);
+    run ({ "key", "revoke", "k_doesnotexist" }, data, 30, code);
+    CHECK (code == 1);
+
+    // the key works with a running serve, rotate swaps it, revoke ends it, each within the one-second reload
+    auto server = spawn ({ "serve", "--port", "0" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const int port = portOf (server);
+    REQUIRE (port > 0);
+    CHECK (statusWithKey (port, key1, 200, 3.0) == 200);
+
+    auto rotated = run ({ "key", "rotate", parsed1->id, "--json" }, data, 30, code);
+    REQUIRE (code == 0);
+    const auto rotatedJson = json::parse (rotated.out, nullptr, false);
+    REQUIRE (rotatedJson.is_object());
+    const auto key2 = rotatedJson.value ("key", std::string());
+    const auto parsed2 = parseApiKey (key2);
+    REQUIRE (parsed2.has_value());
+    CHECK (parsed2->id != parsed1->id);
+    CHECK (rotated.err.find (key2) == std::string::npos);
+    CHECK (statusWithKey (port, key1, 401, 3.0) == 401);
+    CHECK (statusWithKey (port, key2, 200, 3.0) == 200);
+
+    auto revoked = run ({ "key", "revoke", parsed2->id }, data, 30, code);
+    CHECK (code == 0);
+    allOutput.push_back (revoked.out + revoked.err);
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK (statusWithKey (port, key2, 401, 3.0) == 401);
+    CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() <= 2.5);
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+    allOutput.push_back (server.out + server.err);
+
+    // the secret never shows up again: not in later output, the key file, the audit journal or the server's logs
+    allOutput.push_back (slurp (data / "auth" / "keys.json"));
+    const auto audit = slurp (data / "auth" / "audit.jsonl");
+    allOutput.push_back (audit);
+
+    for (auto* k : { &key1, &key2 })
+    {
+        const auto secret = parseApiKey (*k)->secret;
+
+        for (auto& o : allOutput)
+        {
+            CHECK (o.find (*k) == std::string::npos);
+            CHECK (o.find (secret) == std::string::npos);
+        }
+    }
+
+    // the audit journal: create, rotate (old key), create (new key), revoke; no hash, private file
+    CHECK (audit.find ("sha256") == std::string::npos);
+    CHECK (audit.find ("\"hash\"") == std::string::npos);
+    std::istringstream lines (audit);
+    std::vector<std::string> actions;
+
+    for (std::string l; std::getline (lines, l);)
+    {
+        const auto j = json::parse (l, nullptr, false);
+        REQUIRE (j.is_object());
+        CHECK (j.value ("actor", std::string()) == "cli");
+        CHECK (j.value ("tenant", std::string()) == "cli-keyt");
+        actions.push_back (j.value ("action", std::string()));
+    }
+
+    CHECK (actions == std::vector<std::string> ({ "create", "rotate", "create", "revoke" }));
+    CHECK ((fs::status (data / "auth" / "audit.jsonl").permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+}
