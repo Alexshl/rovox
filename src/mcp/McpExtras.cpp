@@ -90,7 +90,12 @@ json builtinRecipes()
               { { "tool", "template.apply" }, { "arguments", { { "project_id", "${steps.0.project_id}" }, { "template_id", "${params.template_id}" } } } } }) } } });
 }
 
-std::optional<json> loadRecipe (const fs::path& dataDir, const std::string& id)
+fs::path recipesDirOf (const fs::path& dataDir, const std::string& tenant)
+{
+    return tenant == "local" ? dataDir / "recipes" : dataDir / "tenants" / tenant / "recipes";
+}
+
+std::optional<json> loadRecipe (const fs::path& recipesDir, const std::string& id)
 {
     for (auto& r : builtinRecipes())
         if (r["id"] == id)
@@ -99,12 +104,12 @@ std::optional<json> loadRecipe (const fs::path& dataDir, const std::string& id)
     if (! validRecipeId (id))
         return std::nullopt;
 
-    std::ifstream in (dataDir / "recipes" / (id + ".json"));
+    std::ifstream in (recipesDir / (id + ".json"));
     auto doc = json::parse (in, nullptr, false);
     return doc.is_object() ? std::optional<json> (doc) : std::nullopt;
 }
 
-json listRecipes (const fs::path& dataDir)
+json listRecipes (const fs::path& recipesDir)
 {
     json out = json::array();
 
@@ -119,15 +124,15 @@ json listRecipes (const fs::path& dataDir)
 
     std::error_code ec;
 
-    for (auto& f : fs::directory_iterator (dataDir / "recipes", ec))
+    for (auto& f : fs::directory_iterator (recipesDir, ec))
         if (f.path().extension() == ".json")
-            if (auto r = loadRecipe (dataDir, f.path().stem().string()))
+            if (auto r = loadRecipe (recipesDir, f.path().stem().string()))
                 add (*r);
 
     return out;
 }
 
-Result<json> saveRecipe (const fs::path& dataDir, json recipe)
+Result<json> saveRecipe (const fs::path& recipesDir, json recipe)
 {
     const auto id = recipe.value ("id", "");
 
@@ -160,15 +165,15 @@ Result<json> saveRecipe (const fs::path& dataDir, json recipe)
 
     recipe.erase ("builtin");
     std::error_code ec;
-    fs::create_directories (dataDir / "recipes", ec);
+    fs::create_directories (recipesDir, ec);
 
-    if (auto w = writeFileAtomic (dataDir / "recipes" / (id + ".json"), recipe.dump (2), false); ! w.ok())
+    if (auto w = writeFileAtomic (recipesDir / (id + ".json"), recipe.dump (2), false); ! w.ok())
         return w.error();
 
     return recipe;
 }
 
-Result<void> deleteRecipe (const fs::path& dataDir, const std::string& id)
+Result<void> deleteRecipe (const fs::path& recipesDir, const std::string& id)
 {
     for (auto& r : builtinRecipes())
         if (r["id"] == id)
@@ -176,7 +181,7 @@ Result<void> deleteRecipe (const fs::path& dataDir, const std::string& id)
 
     std::error_code ec;
 
-    if (! validRecipeId (id) || ! fs::remove (dataDir / "recipes" / (id + ".json"), ec))
+    if (! validRecipeId (id) || ! fs::remove (recipesDir / (id + ".json"), ec))
         return makeError (errc::notFound, "no recipe " + id);
 
     return {};

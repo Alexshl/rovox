@@ -317,25 +317,34 @@ void Gateway::handleSub (const std::shared_ptr<Client>& c, const json& msg)
         c->subs[projectId] = sub;
     }
 
-    auto snapshot = executor_.run ([this, projectId, pidx = sub.pidx] { return buildSnapshot (projectId, pidx); });
+    auto snapshot = executor_.run ([this, projectId, tenant = c->principal.tenant, pidx = sub.pidx] { return buildSnapshot (projectId, tenant, pidx); });
 
     if (snapshot.wait_for (std::chrono::seconds (30)) != std::future_status::ready)
         return c->conn->sendText (json { { "t", "error" }, { "message", "snapshot timed out" }, { "project_id", projectId } }.dump (-1, ' ', false, json::error_handler_t::replace));
 
-    c->conn->sendText (snapshot.get().dump (-1, ' ', false, json::error_handler_t::replace));
+    const auto frame = snapshot.get();
+
+    if (frame.value ("t", "") == "error")           // no such project for this tenant (another tenant's looks the same): no subscription
+    {
+        std::lock_guard<std::mutex> lock (c->mutex);
+        c->subs.erase (projectId);
+    }
+
+    c->conn->sendText (frame.dump (-1, ' ', false, json::error_handler_t::replace));
 }
 
-json Gateway::buildSnapshot (const std::string& projectId, int pidx)
+json Gateway::buildSnapshot (const std::string& projectId, const std::string& tenant, int pidx)
 {
     CommandContext ctx;
     ctx.projectId = projectId;
+    ctx.tenant = tenant;
     ctx.origin = { Origin::Kind::ui, "gateway", "ui" };
     auto state = bus_.runNow ("project.get", json::object(), ctx);
 
     if (! state.ok)
         return { { "t", "error" }, { "project_id", projectId }, { "message", state.error ? state.error->message : "no such project" }, { "code", state.error ? state.error->code : "NOT_FOUND" } };
 
-    auto* project = projects_.find (projectId, "local");
+    auto* project = projects_.find (projectId, tenant);
     json index = json::array ({ "master" });
 
     for (auto* t : te::getAudioTracks (project->edit()))
@@ -422,12 +431,26 @@ void Gateway::handleCmd (const std::shared_ptr<Client>& c, const json& msg)
 }
 
 //==============================================================================
-void Gateway::onHubEvent (const Event& e)
+bool Gateway::shouldDeliver (const std::string& clientTenant, const std::map<std::string, Sub>& subs, const Event& e)
 {
+    if (e.tenant != clientTenant)
+        return false;
+
     const auto type = e.body.value ("type", "");
     const bool projectState = type == "project.changed" || type == "agent.accepted" || type == "storage.changed";
     const bool projectTransport = type == "transport.changed";
 
+    if (! e.projectId.empty() && (projectState || projectTransport))
+    {
+        auto it = subs.find (e.projectId);
+        return it != subs.end() && (projectState ? it->second.state : it->second.transport);
+    }
+
+    return e.projectId.empty() || type == "job.updated";
+}
+
+void Gateway::onHubEvent (const Event& e)
+{
     json out = e.body;
     out["t"] = "event";
     std::string text;
@@ -436,15 +459,9 @@ void Gateway::onHubEvent (const Event& e)
     {
         bool deliver = false;
 
-        if (! e.projectId.empty() && (projectState || projectTransport))
         {
             std::lock_guard<std::mutex> lock (c->mutex);
-            auto it = c->subs.find (e.projectId);
-            deliver = it != c->subs.end() && (projectState ? it->second.state : it->second.transport);
-        }
-        else if (e.projectId.empty() || type == "job.updated")
-        {
-            deliver = true;
+            deliver = shouldDeliver (c->principal.tenant, c->subs, e);
         }
 
         if (! deliver)
@@ -506,19 +523,21 @@ void Gateway::timerCallback()
             }
     }
 
-    std::map<std::string, std::vector<std::shared_ptr<Client>>> byProject;
+    std::map<std::pair<std::string, std::string>, std::vector<std::shared_ptr<Client>>> byProject;       // (tenant, project id)
 
     for (auto& c : all)
     {
         std::lock_guard<std::mutex> lock (c->mutex);
 
         for (auto& [pid, sub] : c->subs)
-            byProject[pid].push_back (c);
+            byProject[{ c->principal.tenant, pid }].push_back (c);
     }
 
-    for (auto& [pid, subscribers] : byProject)
+    for (auto& [key, subscribers] : byProject)
     {
-        auto* project = projects_.find (pid, "local");
+        const auto& tenant = key.first;
+        const auto& pid = key.second;
+        auto* project = projects_.find (pid, tenant);
 
         if (project == nullptr)
             continue;

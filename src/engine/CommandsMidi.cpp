@@ -574,7 +574,7 @@ void registerMidiCommands (CommandRegistry& r)
             if (track == nullptr)
                 return makeError (errc::notFound, "no track " + params["track_id"].get<std::string>(), json { { "track_id", params["track_id"] } });
 
-            auto allowed = p.host().checkPath (params["file"].get<std::string>());
+            auto allowed = p.host().checkPath (params["file"].get<std::string>(), p.tenant());
 
             if (! allowed.ok())
                 return allowed.error();

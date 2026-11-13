@@ -61,8 +61,8 @@ public:
     BrowserStream* stream()                 { return stream_.get(); }
 
     /** Path policy (task 350): with restrictPaths, `p` is resolved (symlinks, `..`) and must lie below the data dir or an allowed
-        root, else FORBIDDEN_PATH. Without it every path passes (CLI, tests). Returns the resolved path. */
-    Result<fs::path> checkPath (const fs::path& p) const;
+        root, else FORBIDDEN_PATH. A tenant other than `local` may only use `dataDir/tenants/<t>/` plus the allowed (shared, read-only) roots. Without it every path passes (CLI, tests). Returns the resolved path. */
+    Result<fs::path> checkPath (const fs::path& p, const std::string& tenant = "local") const;
 
     /** Test hook: switches the path policy of this host at run time (tests share one host per process; restore it when done). */
     void setPathPolicy (bool restrictPaths, std::vector<fs::path> allowedRoots)

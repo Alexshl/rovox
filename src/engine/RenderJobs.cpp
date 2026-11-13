@@ -892,7 +892,7 @@ Result<StartedJob> JobService::startImportPlan (const JobContextInfo& who, const
     const auto sources = importSourcesFrom (args);
 
     for (auto& source : sources)
-        if (auto allowed = projects_.host().checkPath (source); ! allowed.ok())
+        if (auto allowed = projects_.host().checkPath (source, who.tenant); ! allowed.ok())
             return allowed.error();
 
     const auto mediaDir = info.value().mediaDir;

@@ -65,17 +65,21 @@ public:
     /** True only if the record's server_use_ok is exactly boolean true (the string "unknown" is not). */
     static bool serverUseOk (const json& record)    { return record.is_object() && record.contains ("server_use_ok") && record["server_use_ok"] == true; }
 
-    /** THE licence gate: the "local" tenant may use anything; any other tenant only a plugin that has a catalog record with server_use_ok == true
-        (a plugin without a record has an unknown licence). Every path that instantiates a plugin for a tenant goes through this. */
+    /** The tenant's licence policy (`[tenants.<id>] licence_policy` in the config file): true = only plugins with server_use_ok. `local` defaults to
+        `any`, every other tenant (also one without a record) to `server_use_ok`. */
+    static bool licenceGated (const std::string& tenant);
+
+    /** THE licence gate: a tenant with licence_policy `any` (default for "local") may use anything; any other tenant only a plugin that has a catalog
+        record with server_use_ok == true (a plugin without a record has an unknown licence). Every path that instantiates a plugin for a tenant goes through this. */
     static bool licenceAllows (const std::string& tenant, const std::optional<json>& record)
     {
-        return tenant == "local" || (record.has_value() && serverUseOk (*record));
+        return ! licenceGated (tenant) || (record.has_value() && serverUseOk (*record));
     }
     /** FORBIDDEN_LICENSE unless licenceAllows(); `what` names the plugin in the message when there is no record. */
     static Result<void> requireLicence (const std::string& tenant, const std::optional<json>& record, const std::string& what);
 
     /** Licence gate for a project being opened: every external plugin ("vst" nodes) in the saved edit state must have a catalog record (matched by
-        its file or URI) that passes licenceAllows() for the tenant; the error lists the offending plugins. The "local" tenant is never restricted. */
+        its file or URI) that passes licenceAllows() for the tenant; the error lists the offending plugins. A tenant with policy `any` ("local" by default) is never restricted. */
     Result<void> requireLicencesInState (const std::string& tenant, const juce::ValueTree& editState) const;
 
     /** Record by plugin_uid ("lv2:<uri>") or, failing that, by exact name (then the first match). nullopt if unknown. */

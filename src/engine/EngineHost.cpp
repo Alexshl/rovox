@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Rovox contributors
 
 #include "EngineHost.h"
+#include "Ids.h"
 
 #include "JsfxPlugin.h"
 #include "PluginCatalog.h"
@@ -182,10 +183,13 @@ EngineHost::~EngineHost()
     engine_.reset();
 }
 
-Result<fs::path> EngineHost::checkPath (const fs::path& p) const
+Result<fs::path> EngineHost::checkPath (const fs::path& p, const std::string& tenant) const
 {
     if (! config_.restrictPaths)
         return p;
+
+    if (tenant != "local" && ! isValidTenantId (tenant))
+        return makeError (errc::forbiddenPath, "path is outside the allowed directories: " + p.string(), json { { "path", p.string() } });
 
     std::error_code ec;
     const auto resolved = fs::weakly_canonical (fs::absolute (p), ec);
@@ -196,7 +200,10 @@ Result<fs::path> EngineHost::checkPath (const fs::path& p) const
         return a == r.end();
     };
 
-    if (! ec && (inside (config_.dataDir) || std::any_of (config_.allowedRoots.begin(), config_.allowedRoots.end(), inside)))
+    // local: the whole data dir; any other tenant: only its own subtree (allowed roots are the shared read-only tool roots)
+    const auto ownRoot = tenant == "local" ? config_.dataDir : config_.dataDir / "tenants" / tenant;
+
+    if (! ec && (inside (ownRoot) || std::any_of (config_.allowedRoots.begin(), config_.allowedRoots.end(), inside)))
         return resolved;
 
     return makeError (errc::forbiddenPath, "path is outside the allowed directories: " + p.string(), json { { "path", p.string() } });
