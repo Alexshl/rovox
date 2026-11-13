@@ -1185,18 +1185,62 @@ void McpServer::buildTools()
         ToolDef t;
         t.name = "recipe.run";
         t.title = "Run recipe";
-        t.description = "Runs a recipe step by step with the given params (project_id is filled into project tools). Stops at the first failing step and reports it. The project edits of one run are ONE undo step.";
-        t.inputSchema = schema ({ { "recipe_id", str() }, { "project_id", projectIdProp() }, { "params", { { "type", "object" } } } }, { "recipe_id" });
+        t.description = "Runs a recipe step by step with the given params (project_id is filled into project tools). Stops at the first failing step and reports it (error details: step, code). The project edits of one run are ONE undo step. "
+                        "Steps run with origin recipe:<id> and your own rights. async=true returns {job_id} at once: job.get shows progress `step i/N`, job.cancel stops it between steps and removes the ephemeral projects and files it made; "
+                        "the job result is the same report as the synchronous answer. Default: synchronous.";
+        t.inputSchema = schema ({ { "recipe_id", str() }, { "project_id", projectIdProp() }, { "params", { { "type", "object" } } },
+                                  { "async", boolean ("Run as a job and return {job_id} (default false: wait for the result).") },
+                                  { "client_request_id", str ("async only: the same id returns the same job.") } }, { "recipe_id" });
         t.annotations = { { "readOnlyHint", false }, { "openWorldHint", true } };
         t.mayBlock = true;
-        t.handler = [] (ToolCall& c) -> ToolOutput
+        t.handler = [ownsProject] (ToolCall& c) -> ToolOutput
         {
             auto r = loadRecipe (recipesDirOf (c.server.projects().host().dataDir(), c.session.tenant), c.args["recipe_id"]);
 
             if (! r)
                 return ToolOutput::failure (makeError (errc::notFound, "no recipe " + c.args["recipe_id"].get<std::string>()));
 
-            return runRecipe (c, *r, c.args.value ("params", json::object()), c.args.value ("project_id", ""));
+            const std::string projectId = c.args.value ("project_id", "");
+            const auto callerParams = c.args.value ("params", json::object());
+
+            // a recipe step that is itself recipe.run stays synchronous: no chains of jobs
+            if (! c.args.value ("async", false) || recipeDepth() > 0)
+                return runRecipe (c, *r, callerParams, projectId);
+
+            if (! projectId.empty() && ! ownsProject (c, projectId))
+                return ToolOutput::failure (makeError (errc::notFound, "no project " + projectId));
+
+            // bad parameters are refused now, not in the job
+            if (auto resolved = resolveRecipeParams (*r, callerParams, projectId); ! resolved.ok())
+                return ToolOutput::failure (resolved.error(), std::nullopt, projectId);
+
+            JobSpec spec;
+            spec.kind = "recipe";
+            spec.projectId = projectId;
+            spec.tenant = c.session.tenant;
+            spec.pool = "io";                       // not "render": a step may start (and wait for) a render job
+            spec.clientRequestId = c.args.value ("client_request_id", "");
+            spec.origin = c.session.origin().toJson();
+
+            auto submitted = c.server.jobs().submit (std::move (spec), [server = &c.server, recipe = *r, callerParams, projectId, principal = c.session.principal,
+                                                                       sessionId = c.session.id, shortId = c.session.shortId] (JobContext& jc) -> Result<json>
+            {
+                Session owner (sessionId, shortId, principal);
+                RequestContext rc;
+                rc.session = &owner;
+                ToolCall call { *server, owner, rc, json::object(), "recipe.run" };
+                auto out = runRecipe (call, recipe, callerParams, projectId, &jc);
+
+                if (out.ok)
+                    return out.data;
+
+                return out.error.value_or (makeError (errc::internal, "the recipe failed"));
+            });
+
+            if (submitted.error)
+                return ToolOutput::failure (*submitted.error, std::nullopt, projectId);
+
+            return ToolOutput::success ({ { "job_id", submitted.id }, { "created", submitted.created }, { "recipe_id", c.args["recipe_id"] }, { "state", "queued" } }, std::nullopt, projectId);
         };
         add (std::move (t));
     }

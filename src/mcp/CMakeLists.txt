@@ -11,7 +11,8 @@ target_sources(rovox_mcp INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/McpExtras.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/McpServer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/McpStdio.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/McpTools.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/McpTools.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/RecipesBuiltin.cpp)
 
 target_include_directories(rovox_mcp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(rovox_mcp INTERFACE rovox_engine)
