@@ -153,3 +153,18 @@ USER 10001
 ENV ROVOX_URL=http://rovox:4810/mcp
 ENTRYPOINT ["rovox-skills"]
 CMD ["list"]
+
+# ---- skills-notation: the sidecar plus real notation tools: LilyPond (PDF/SVG engraving), abcmidi (ABC import), verovio (SVG)
+# Separate image so the plain `skills` image stays small. Build: docker build -f docker/Dockerfile --target skills-notation -t rovox-skills:notation .
+FROM python:3.13-slim-trixie AS skills-notation
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends lilypond abcmidi \
+ && rm -rf /var/lib/apt/lists/*
+COPY skills /opt/rovox-skills
+# the unit tests run at build time with the tools present: ROVOX_REQUIRE_NOTATION=1 turns the real-tool tests on, a missing tool fails the build
+RUN pip install --no-cache-dir "/opt/rovox-skills[notation]" \
+ && cd /opt/rovox-skills && ROVOX_REQUIRE_NOTATION=1 python -m unittest discover -s tests
+USER 10001
+ENV ROVOX_URL=http://rovox:4810/mcp
+ENTRYPOINT ["rovox-skills"]
+CMD ["list"]
