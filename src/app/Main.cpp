@@ -99,7 +99,7 @@ int main (int argc, char** argv)
     auto* upload = app.add_subcommand ("upload", "Upload files or a folder to a running server (resumable)");
     upload->add_option ("paths", o.paths, "Files or folders")->required();
     upload->add_option ("--server", o.server, "Server URL, e.g. http://127.0.0.1:4810")->required();
-    upload->add_option ("--token", o.token, "Bearer token (default: $ROVOX_TOKEN)");
+    upload->add_option ("--token", o.token, "Bearer token or API key (default: $ROVOX_KEY, then $ROVOX_TOKEN)");
     upload->add_option ("--chunk-mb", o.chunkMb, "Chunk size")->capture_default_str();
     upload->callback ([&] { std::exit (rovox::cli::runUpload (o)); });
 
@@ -115,7 +115,8 @@ int main (int argc, char** argv)
 
     auto* mcp = app.add_subcommand ("mcp", "MCP over stdio: the same tools as 'serve', for Claude Code and other local clients");
     mcp->add_option ("--connect", o.connectUrl, "Proxy to a running 'rovox serve' (stdio to HTTP), e.g. http://127.0.0.1:4810, instead of opening the projects in this process");
-    mcp->add_option ("--token", o.token, "With --connect: Bearer token (default: $ROVOX_TOKEN)");
+    mcp->add_option ("--token", o.token, "With --connect: Bearer token or API key (default: $ROVOX_KEY, then $ROVOX_TOKEN)");
+    mcp->add_option ("--tenant", o.tenant, "Run this session as tenant <id> with every scope except admin (for an embedding executor; default: local, the operator)");
     mcp->add_option ("--allow-path", o.allowPaths, "Directory the tools may read besides the data dir (repeatable; default $ROVOX_ALLOWED_PATHS, ':' separated)");
     mcp->add_option ("--plugins", o.pluginsDir, "Extra plugin directory (VST3/LV2)");
     mcp->add_option ("--tool-names", o.toolNames, "MCP tool names: dots (track.list) | underscore (track_list)")->capture_default_str();

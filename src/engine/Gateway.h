@@ -18,6 +18,7 @@
 //     0x03: u8 3 | u8 pidx | u16 epoch | f64 position_s | u8 playing                            (little endian)
 #pragma once
 
+#include "Auth.h"
 #include "CommandBus.h"
 #include "EventHub.h"
 #include "ProjectManager.h"
@@ -33,7 +34,8 @@ namespace rovox
 
 struct GatewayOptions
 {
-    std::string token;                          // empty = open
+    std::string token;                          // empty = open; used only when `authenticator` is null
+    Authenticator* authenticator = nullptr;     // not owned; null = one built from `token` (no key store)
     std::vector<std::string> allowedOrigins;    // besides loopback names and the Host of the request itself
     std::vector<std::string> allowedHosts;      // extra Host values accepted on a loopback bind (reverse proxy)
     bool loopbackBind = false;                  // then the Host must be a loopback name too (DNS rebinding); HttpServer also checks this before the upgrade
@@ -71,6 +73,7 @@ private:
     struct Client
     {
         std::string session;
+        Principal principal;                    // who connected; set before the client is shared, read-only afterwards
         std::shared_ptr<WsConnection> conn;
         std::mutex mutex;
         std::map<std::string, Sub> subs;        // by project id
@@ -95,6 +98,9 @@ private:
     EventHub& hub_;
     MessageThreadExecutor& executor_;
     GatewayOptions options_;
+    std::unique_ptr<Authenticator> ownAuth_;
+    Authenticator* auth_ = nullptr;
+    std::chrono::steady_clock::time_point lastRevocationCheck_ = std::chrono::steady_clock::now();     // message thread only
     int observerId_ = 0;
     std::atomic<int> nextSession_ { 1 };
     mutable std::mutex mutex_;

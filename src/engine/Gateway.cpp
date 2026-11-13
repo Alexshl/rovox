@@ -3,6 +3,7 @@
 
 #include "Gateway.h"
 
+#include "Quota.h"
 #include "RequestGuard.h"
 #include "Transport.h"
 #include "Version.h"
@@ -106,6 +107,17 @@ bool Gateway::originAllowed (const std::string& origin, const std::string& host,
 Gateway::Gateway (EngineHost& host, ProjectManager& pm, CommandBus& bus, EventHub& hub, MessageThreadExecutor& executor, GatewayOptions o)
     : host_ (host), projects_ (pm), bus_ (bus), hub_ (hub), executor_ (executor), options_ (std::move (o))
 {
+    if (options_.authenticator != nullptr)
+    {
+        auth_ = options_.authenticator;
+    }
+    else
+    {
+        ownAuth_ = std::make_unique<Authenticator> (nullptr, options_.token);
+        ownAuth_->setSessionKeyFile (host_.dataDir() / "auth" / "session.key");
+        auth_ = ownAuth_.get();
+    }
+
     observerId_ = hub_.addObserver ([this] (const Event& e) { onHubEvent (e); });
 
     if (auto* stream = host_.stream())
@@ -165,7 +177,17 @@ void Gateway::handleUpgrade (int fd, WsRequest req)
     if (stopping_)
         return wsSendHttp (fd, 503, "Service Unavailable"), void (::close (fd));
 
-    if (! tokenMatches (options_.token, header ("authorization"), header ("cookie"), req.query))
+    AuthRequest authRequest;
+    authRequest.authorization = header ("authorization");
+    authRequest.cookie = header ("cookie");
+    authRequest.queryToken = queryValue (req.query, "token");
+    authRequest.remoteAddr = req.remote;
+    authRequest.method = "GET";
+    authRequest.path = req.path;
+    authRequest.headers = req.headers;
+    auto principal = auth_->resolve (authRequest);
+
+    if (! principal.ok())
         return wsSendHttp (fd, 401, "Unauthorized", "missing or wrong token"), void (::close (fd));
 
     if (! originAllowed (header ("origin"), header ("host"), options_.allowedOrigins, options_.loopbackBind, options_.allowedHosts))
@@ -179,6 +201,7 @@ void Gateway::handleUpgrade (int fd, WsRequest req)
 
     auto client = std::make_shared<Client>();
     client->session = "ws_" + std::to_string (nextSession_++);
+    client->principal = principal.value();
     client->conn = std::make_shared<WsConnection> (fd);
     {
         std::lock_guard<std::mutex> lock (mutex_);
@@ -339,9 +362,16 @@ void Gateway::handleCmd (const std::shared_ptr<Client>& c, const json& msg)
         return reply ({ { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "name is required" } } } });
 
     const auto name = isBatch ? std::string ("batch") : msg["name"].get<std::string>();
+    if (const auto decision = quotas().checkRate (c->principal); ! decision.allowed)
+    {
+        const auto error = QuotaService::rateLimitedError (decision);
+        return reply ({ { "ok", false }, { "error", error.toJson() } });
+    }
+
     CommandContext ctx;
     ctx.projectId = stringField (msg, "project_id");
     ctx.origin = { Origin::Kind::ui, c->session, "ui" };
+    ctx.setPrincipal (c->principal);
     ctx.undoLabel = stringField (msg, "undo_label");
 
     if (msg.contains ("if_revision") && msg["if_revision"].is_number_unsigned())
@@ -460,6 +490,20 @@ void Gateway::timerCallback()
 
     if (all.empty())
         return;
+
+    // a revoked or expired key closes its sockets within a second (the key store re-reads its file at most once a second itself)
+    if (const auto now = std::chrono::steady_clock::now(); now - lastRevocationCheck_ >= std::chrono::seconds (1))
+    {
+        lastRevocationCheck_ = now;
+
+        for (auto& c : all)
+            if (! auth_->stillValid (c->principal))
+            {
+                const std::uint8_t status[2] = { 0x03, 0xF0 };      // 1008 policy violation
+                c->conn->sendBinary (encodeWsFrame (0x8, status, sizeof status), false);
+                c->conn->close();
+            }
+    }
 
     std::map<std::string, std::vector<std::shared_ptr<Client>>> byProject;
 

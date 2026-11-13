@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Rovox contributors
 
 #include "HttpServer.h"
+#include "KeyStore.h"
+#include "Quota.h"
 #include "Sha1.h"
 #include "Sha256.h"
 #include "TestFramework.h"
@@ -544,7 +546,8 @@ ROVOX_TEST (upload, wrong_query_tokens_count_and_a_right_login_is_never_locked_o
     auto right = f.client->Post ("/api/login", R"({"token":"tok-right"})", "application/json");
     REQUIRE (right != nullptr);
     CHECK (right->status == 200);
-    CHECK (right->get_header_value ("Set-Cookie").find ("rovox_token=tok-right") != std::string::npos);
+    CHECK (right->get_header_value ("Set-Cookie").find ("rovox_session=") != std::string::npos);
+    CHECK (right->get_header_value ("Set-Cookie").find ("tok-right") == std::string::npos);
 }
 
 ROVOX_TEST (upload, hashing_a_finished_upload_does_not_block_other_uploads)
@@ -756,4 +759,55 @@ ROVOX_TEST (upload, materialised_batches_expire_after_the_ttl_from_completion)
     CHECK (fs::exists (dir));
     CHECK (store.cleanup (std::time (nullptr) + 3600) == 2);
     CHECK (! fs::exists (dir));
+}
+
+ROVOX_TEST (upload, create_checks_the_storage_quota_of_the_calling_tenant)
+{
+    const auto dir = test::makeTempDir ("upload-quota");
+    const auto config = dir / "rovox.toml";
+    {
+        std::ofstream out (config);
+        out << "[quota_profiles.upl-tiny]\nstorage_bytes = 1000\n";
+    }
+
+    quotas().setConfigFile (config);
+
+    KeyStore keys (dir / "auth" / "keys.json");
+    KeyStore::CreateSpec spec;
+    spec.label = "upload";
+    spec.tenant = "upl-tenant";
+    spec.scopes = ScopeSet::of ({ Scope::projectsWrite });
+    spec.quotaProfile = "upl-tiny";
+    auto created = keys.create (spec);
+    REQUIRE (created.ok());
+    Authenticator auth (&keys, "");
+
+    ServerOptions so;
+    so.authenticator = &auth;
+    so.sessionKeyFile = dir / "auth" / "session.key";
+    Fixture f (so);
+    const httplib::Headers bearer { { "Authorization", "Bearer " + created.value().key }, { "Tus-Resumable", "1.0.0" } };
+
+    auto withLength = [&] (const std::string& length)
+    {
+        auto h = bearer;
+        h.emplace ("Upload-Length", length);
+        return f.client->Post ("/api/uploads", h, "", "");
+    };
+
+    auto small = withLength ("100");
+    REQUIRE (small != nullptr);
+    CHECK (small->status == 201);
+
+    auto big = withLength ("5000");
+    REQUIRE (big != nullptr);
+    CHECK (big->status == 429);
+    CHECK (big->body.find ("QUOTA_EXCEEDED") != std::string::npos);
+
+    // no credentials: refused before the quota is looked at
+    auto anonymous = f.client->Post ("/api/uploads", httplib::Headers { { "Tus-Resumable", "1.0.0" }, { "Upload-Length", "100" } }, "", "");
+    REQUIRE (anonymous != nullptr);
+    CHECK (anonymous->status == 401);
+
+    quotas().setConfigFile ({});
 }

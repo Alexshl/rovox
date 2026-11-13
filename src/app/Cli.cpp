@@ -10,14 +10,17 @@
 #include "FsObjectStore.h"
 #include "Gateway.h"
 #include "HttpServer.h"
+#include "Ids.h"
 #include "Import.h"
 #include "JobManager.h"
+#include "KeyStore.h"
 #include "McpHttp.h"
 #include "McpStdio.h"
 #include "PluginCatalog.h"
 #include "PluginHost.h"
 #include "PluginScan.h"
 #include "ProjectManager.h"
+#include "Quota.h"
 #include "RemoteStorage.h"
 #include "RequestGuard.h"
 #include "Render.h"
@@ -703,6 +706,26 @@ std::vector<std::string> allowedHosts (const Options& o)
 
     return hosts;
 }
+
+/** The configuration file: --config, else $ROVOX_CONFIG, else <data>/config/rovox.toml. */
+fs::path configFileFor (const Options& o, const fs::path& dataDir)
+{
+    const char* envConfig = std::getenv ("ROVOX_CONFIG");
+    return ! o.config.empty() ? fs::path (o.config) : (envConfig != nullptr ? fs::path (envConfig) : dataDir / "config" / "rovox.toml");
+}
+
+/** What a client presents to a server: --token, else $ROVOX_KEY, else $ROVOX_TOKEN. */
+std::string clientToken (const Options& o)
+{
+    if (! o.token.empty())
+        return o.token;
+
+    for (const char* name : { "ROVOX_KEY", "ROVOX_TOKEN" })
+        if (const char* env = std::getenv (name); env != nullptr && env[0] != 0)
+            return env;
+
+    return {};
+}
 } // namespace
 
 int runServe (const Options& o)
@@ -736,8 +759,10 @@ int runServe (const Options& o)
     CommandBus bus (pm, registry, executor);
 
     // event webhooks of [tenants.<id>.webhooks]: declared before the MCP stack, whose jobs publish events until they are shut down
-    const char* envConfig = std::getenv ("ROVOX_CONFIG");
-    EventWebhooks webhooks (hub, { .configFile = ! o.config.empty() ? fs::path (o.config) : (envConfig != nullptr ? fs::path (envConfig) : cfg.dataDir / "config" / "rovox.toml"),
+    const auto configFile = configFileFor (o, cfg.dataDir);
+    quotas().configure (cfg.dataDir, configFile);
+    KeyStore keys (cfg.dataDir / "auth" / "keys.json");
+    EventWebhooks webhooks (hub, { .configFile = configFile,
                                    .tenantRoot = [&pm] (const std::string& tenant) { return pm.projectsRoot (tenant); },
                                    .hostRoot = cfg.dataDir });
 
@@ -760,8 +785,13 @@ int runServe (const Options& o)
         generated = true;
     }
 
-    if (! loopback && so.token.empty())
-        return fail ("--bind " + o.bind + " exposes the server beyond this machine: set --token (or ROVOX_TOKEN). Refusing to start without it.");
+    if (! loopback && so.token.empty() && ! keys.inUse())
+        return fail ("--bind " + o.bind + " exposes the server beyond this machine: set --token (or ROVOX_TOKEN) or create an API key. Refusing to start without it.");
+
+    Authenticator authenticator (&keys, so.token, configFile);
+    authenticator.setSessionKeyFile (cfg.dataDir / "auth" / "session.key");
+    so.authenticator = &authenticator;
+    so.sessionKeyFile = cfg.dataDir / "auth" / "session.key";
 
     so.webDir = resolveWebDir (o);
     so.allowedOrigins = o.allowOrigins;
@@ -775,6 +805,7 @@ int runServe (const Options& o)
     HttpServer server (host, pm, bus, hub, so);
     GatewayOptions gatewayOptions;
     gatewayOptions.token = so.token;
+    gatewayOptions.authenticator = &authenticator;
     gatewayOptions.allowedOrigins = o.allowOrigins;
     gatewayOptions.allowedHosts = so.allowedHosts;
     gatewayOptions.loopbackBind = loopback;
@@ -786,13 +817,13 @@ int runServe (const Options& o)
     mcpCfg.uploadBatchStatus = [&server] (const std::string& id) { return server.uploads().batchStatus (id); };
     mcpCfg.uploadFinish = [&server] (const std::string& id) { return server.uploads().finish (id); };
     McpStack mcpStack (host, pm, bus, hub, executor, mcpCfg);
-    server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .allowedOrigins = o.allowOrigins, .allowedHosts = so.allowedHosts, .loopbackBind = loopback }); });
+    server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, mcpStack.server, { .authenticator = &authenticator, .allowedOrigins = o.allowOrigins, .allowedHosts = so.allowedHosts, .loopbackBind = loopback }); });
 
     if (auto started = server.start(); ! started.ok())
         return fail (started.error().message);
 
     std::cout << "rovox serving on http://" << o.bind << ":" << server.port() << "  (data " << cfg.dataDir.string() << ", audio " << toString (cfg.audio)
-              << ", " << host.cpuBudget().cpus << " cpu" << (host.cpuBudget().cpus == 1 ? "" : "s") << (so.token.empty() ? "" : ", token required") << ")" << std::endl;
+              << ", " << host.cpuBudget().cpus << " cpu" << (host.cpuBudget().cpus == 1 ? "" : "s") << (authenticator.open() ? "" : (so.token.empty() ? ", API key required" : ", token required")) << ")" << std::endl;
 
     if (generated)
         std::cout << "generated access token (set ROVOX_TOKEN to choose your own): " << so.token << "\n"
@@ -854,7 +885,7 @@ class McpProxy
 public:
     explicit McpProxy (const Options& o)
         : url (o.connectUrl),
-          token (! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : ""))
+          token (clientToken (o))
     {}
 
     int run()
@@ -1348,6 +1379,22 @@ int runMcp (const Options& o)
 
     restrictToAllowedPaths (cfg, o);
 
+    // stdio is the local operator; `--tenant` is the operator's statement that this session works for that tenant (never a tool parameter)
+    Principal principal = Principal::local();
+
+    if (! o.tenant.empty())
+    {
+        if (! isValidTenantId (o.tenant))
+            return fail ("--tenant must be 1-64 characters of a-z, 0-9, '_' or '-'");
+
+        principal.tenant = o.tenant;
+        principal.scopes = ScopeSet::all();
+        principal.scopes.remove (Scope::admin);
+        principal.authMode = "operator";
+    }
+
+    quotas().configure (cfg.dataDir, configFileFor (o, cfg.dataDir));
+
     EngineHost host (cfg);
     EventHub hub;
     ProjectManager pm (host, hub);
@@ -1365,7 +1412,7 @@ int runMcp (const Options& o)
     std::atomic<bool> readerDone { false };
     std::thread reader ([&]
     {
-        mcp::StdioTransport (stack.server, std::cin, std::cout).run();
+        mcp::StdioTransport (stack.server, std::cin, std::cout, principal).run();
         readerDone = true;
         juce::MessageManager::callAsync ([] { juce::MessageManager::getInstance()->stopDispatchLoop(); });
     });
@@ -1394,7 +1441,7 @@ int runUpload (const Options& o)
     httplib::Client client (o.server);
     client.set_connection_timeout (10, 0);
     client.set_read_timeout (120, 0);
-    const std::string token = ! o.token.empty() ? o.token : (std::getenv ("ROVOX_TOKEN") != nullptr ? std::getenv ("ROVOX_TOKEN") : "");
+    const std::string token = clientToken (o);
     httplib::Headers auth;
 
     if (! token.empty())

@@ -379,3 +379,155 @@ ROVOX_TEST (auth, origin_carries_subject_and_client_only_when_set)
     CHECK (full["subject"] == "user-42");
     CHECK (full["client"] == "flute-teacher");
 }
+
+//==============================================================================
+// E11-02: the signed session cookie and AuthRequest
+
+namespace
+{
+std::string cookieOf (const std::string& signedValue)
+{
+    return "theme=dark; rovox_session=" + signedValue + "; other=1";
+}
+} // namespace
+
+ROVOX_TEST (auth, session_cookie_signs_verifies_and_never_holds_the_token)
+{
+    const auto dir = test::makeTempDir ("auth-cookie");
+    KeyStore store (dir / "auth" / "keys.json");
+    Authenticator auth (&store, "s3cret-token");
+    auth.setSessionKeyFile (dir / "auth" / "session.key");
+
+    auto legacy = auth.resolve ("Bearer s3cret-token");
+    REQUIRE (legacy.ok());
+    const auto value = auth.issueSession (legacy.value());
+    CHECK (value.rfind ("legacy.", 0) == 0);
+    CHECK (value.find ("s3cret-token") == std::string::npos);
+
+    AuthRequest req;
+    req.cookie = cookieOf (value);
+    auto viaCookie = auth.resolve (req);
+    REQUIRE (viaCookie.ok());
+    CHECK (viaCookie.value().keyId == "legacy");
+    CHECK (viaCookie.value().authMode == "legacy");
+
+    // the secret is on disk (32 bytes, 0600) and survives a new Authenticator
+    const auto keyPath = dir / "auth" / "session.key";
+    REQUIRE (fs::exists (keyPath));
+    CHECK (fs::file_size (keyPath) == 32);
+    struct stat st {};
+    REQUIRE (::stat (keyPath.c_str(), &st) == 0);
+    CHECK ((st.st_mode & 0777) == 0600);
+    Authenticator again (&store, "s3cret-token");
+    again.setSessionKeyFile (keyPath);
+    CHECK (again.resolve (req).ok());
+
+    // tampering: another key id, another expiry, another signature
+    const auto dot1 = value.find ('.'), dot2 = value.find ('.', dot1 + 1);
+    const auto exp = value.substr (dot1 + 1, dot2 - dot1 - 1);
+    AuthRequest forged;
+    forged.cookie = cookieOf ("k_aaaaaaaaaa" + value.substr (dot1));
+    CHECK (! auth.resolve (forged).ok());
+    forged.cookie = cookieOf ("legacy." + std::to_string (std::stoll (exp) + 1000) + value.substr (dot2));
+    CHECK (! auth.resolve (forged).ok());
+    forged.cookie = cookieOf (value.substr (0, value.size() - 1) + (value.back() == '0' ? "1" : "0"));
+    CHECK (! auth.resolve (forged).ok());
+    forged.cookie = cookieOf ("legacy");
+    CHECK (! auth.resolve (forged).ok());
+
+    // a cookie signed with another secret is refused
+    Authenticator stranger (&store, "s3cret-token");
+    stranger.setSessionKeyFile (test::makeTempDir ("auth-cookie-other") / "session.key");
+    forged.cookie = cookieOf (stranger.issueSession (legacy.value()));
+    CHECK (! auth.resolve (forged).ok());
+
+    // open mode: nothing to log in to
+    Authenticator open (nullptr, "");
+    CHECK (open.issueSession (Principal::local()).empty());
+}
+
+ROVOX_TEST (auth, session_cookie_expires_and_follows_the_key)
+{
+    const auto dir = test::makeTempDir ("auth-cookie-key");
+    std::int64_t clock = 2'000'000;
+    KeyStore store (dir / "auth" / "keys.json", [&] { return clock; });
+    auto created = store.create (spec ("acme", ScopeSet::of ({ Scope::catalogRead })));
+    REQUIRE (created.ok());
+    Authenticator auth (&store, "");
+    auth.setSessionKeyFile (dir / "auth" / "session.key");
+
+    auto principal = auth.resolve (created.value().key);
+    REQUIRE (principal.ok());
+    const auto value = auth.issueSession (principal.value(), 100);
+    CHECK (value.rfind (created.value().record["id"].get<std::string>() + ".", 0) == 0);
+    AuthRequest req;
+    req.cookie = "rovox_session=" + value;
+
+    auto viaCookie = auth.resolve (req);
+    REQUIRE (viaCookie.ok());
+    CHECK (viaCookie.value().tenant == "acme");
+    CHECK (viaCookie.value().authMode == "token");
+    CHECK (viaCookie.value().scopes == ScopeSet::of ({ Scope::catalogRead }));
+
+    clock += 99;
+    CHECK (auth.resolve (req).ok());
+    clock += 1;                                                 // exp reached
+    auto expired = auth.resolve (req);
+    REQUIRE (! expired.ok());
+    CHECK (expired.error().code == errc::unauthorized);
+
+    clock = 2'000'000;
+    const auto fresh = auth.issueSession (principal.value());
+    req.cookie = "rovox_session=" + fresh;
+    CHECK (auth.resolve (req).ok());
+    REQUIRE (store.revoke (created.value().record["id"]).ok());      // revoking the key ends its sessions
+    CHECK (! auth.resolve (req).ok());
+}
+
+ROVOX_TEST (auth, auth_request_tries_header_cookie_and_query_and_old_cookie_is_legacy_only)
+{
+    const auto dir = test::makeTempDir ("auth-request");
+    KeyStore store (dir / "auth" / "keys.json");
+    auto created = store.create (spec ("acme", ScopeSet::of ({ Scope::render })));
+    REQUIRE (created.ok());
+    Authenticator auth (&store, "tok-legacy");
+    auth.setSessionKeyFile (dir / "auth" / "session.key");
+
+    AuthRequest byHeader;
+    byHeader.authorization = "Bearer tok-legacy";
+    CHECK (auth.resolve (byHeader).ok());
+
+    AuthRequest byKey;
+    byKey.authorization = "Bearer " + created.value().key;
+    auto k = auth.resolve (byKey);
+    REQUIRE (k.ok());
+    CHECK (k.value().tenant == "acme");
+
+    AuthRequest byQuery;
+    byQuery.queryToken = "tok-legacy";
+    CHECK (auth.resolve (byQuery).ok());
+    byQuery.queryToken = "wrong";
+    CHECK (! auth.resolve (byQuery).ok());
+
+    AuthRequest oldCookie;
+    oldCookie.cookie = "rovox_token=tok-legacy";
+    CHECK (auth.resolve (oldCookie).ok());
+    oldCookie.cookie = "rovox_token=" + created.value().key;      // a key never rides the old cookie
+    CHECK (! auth.resolve (oldCookie).ok());
+
+    // a wrong header does not block a valid cookie, and nothing at all is unauthorized
+    AuthRequest mixed;
+    mixed.authorization = "Bearer nope";
+    mixed.cookie = "rovox_session=" + auth.issueSession (k.value());
+    CHECK (auth.resolve (mixed).ok());
+    CHECK (auth.resolve (AuthRequest {}).error().code == errc::unauthorized);
+
+    CHECK (auth.challengeHeader().empty());
+    CHECK (! auth.resourceMetadata().has_value());
+
+    // open mode ignores credentials
+    Authenticator open (nullptr, "");
+    auto o = open.resolve (AuthRequest {});
+    REQUIRE (o.ok());
+    CHECK (o.value().authMode == "open");
+}

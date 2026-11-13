@@ -3,12 +3,14 @@
 
 // M2: MCP protocol conformance, tools as adapters over the command layer, two projects at once, one undo step per call,
 // events and external_changes, jobs (cancel, idempotency, restart), preview and analysis, HTTP transport.
+#include "Auth.h"
 #include "Delivery.h"
 #include "HttpServer.h"
 #include "Hmac.h"
 #include "JobCallback.h"
 #include "JobManager.h"
 #include "JsfxPlugin.h"
+#include "KeyStore.h"
 #include "Loudness.h"
 #include "McpHttp.h"
 #include "McpStdio.h"
@@ -26,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <set>
 #include <thread>
@@ -2785,4 +2788,125 @@ ROVOX_TEST (mcp, a_render_result_carries_usage_and_the_journal_and_usage_tools_a
     CHECK_NEAR (report["data"]["total"]["cpu_s"].get<double>(), cpuS, std::max (0.002, cpuS * 0.01));
     CHECK_NEAR (report["data"]["total"]["audio_s"].get<double>(), audioS, audioS * 0.01);
     CHECK (report["data"]["groups"][0]["key"] == "render");
+}
+
+//==============================================================================
+// E11-02: authentication wiring of the MCP transports
+
+ROVOX_TEST (mcp, http_session_is_bound_to_the_key_that_created_it)
+{
+    const auto dir = test::makeTempDir ("mcp-bind");
+    KeyStore keys (dir / "auth" / "keys.json");
+    KeyStore::CreateSpec specA, specB;
+    specA.label = specB.label = "bind";
+    specA.tenant = "bind-a";
+    specB.tenant = "bind-b";
+    specA.scopes = specB.scopes = ScopeSet::of ({ Scope::catalogRead, Scope::projectsRead });
+    auto keyA = keys.create (specA);
+    auto keyB = keys.create (specB);
+    REQUIRE (keyA.ok());
+    REQUIRE (keyB.ok());
+    Authenticator auth (&keys, "");
+
+    Harness h;
+    ServerOptions so;
+    so.port = 0;
+    so.authenticator = &auth;
+    so.sessionKeyFile = dir / "auth" / "session.key";
+    HttpServer server (test::host(), h.env.pm, h.env.bus, h.env.hub, so);
+    server.mount ([&] (httplib::Server& svr) { mcp::installMcpRoutes (svr, h.server, { .authenticator = &auth, .loopbackBind = true }); });
+    REQUIRE (server.start().ok());
+
+    const auto hs = [] (const std::string& key, const std::string& session = {})
+    {
+        httplib::Headers out { { "Accept", "application/json, text/event-stream" }, { "MCP-Protocol-Version", "2025-06-18" } };
+
+        if (! key.empty())
+            out.emplace ("Authorization", "Bearer " + key);
+
+        if (! session.empty())
+            out.emplace ("Mcp-Session-Id", session);
+
+        return out;
+    };
+
+    const json summary { { "jsonrpc", "2.0" }, { "id", 7 }, { "method", "tools/call" }, { "params", { { "name", "usage.summary" }, { "arguments", json::object() } } } };
+    const json ping { { "jsonrpc", "2.0" }, { "id", 8 }, { "method", "ping" } };
+
+    auto out = h.onClient ([&]
+    {
+        httplib::Client c ("127.0.0.1", server.port());
+        std::vector<HttpReply> r;
+        r.push_back (post (c, hs (""), initBody()));                                                // 0: no credentials
+        r.push_back (post (c, hs (keyA.value().key), initBody()));                                  // 1: A initializes
+        const auto sidA = r[1].session;
+        r.push_back (post (c, hs (keyB.value().key), initBody()));                                  // 2: B initializes its own
+        const auto sidB = r[2].session;
+        r.push_back (post (c, hs (keyA.value().key, sidA), summary));                               // 3: A on its session
+        r.push_back (post (c, hs (keyB.value().key, sidA), summary));                               // 4: B with A's session id
+        r.push_back (post (c, hs (keyB.value().key, sidA), ping));                                  // 5: same, a request that needs no scope
+        r.push_back (post (c, hs (keyB.value().key, sidB), summary));                               // 6: B on its own
+        auto stolenDelete = c.Delete ("/mcp", hs (keyB.value().key, sidA));
+        HttpReply d;
+        d.status = stolenDelete ? stolenDelete->status : 0;
+        r.push_back (d);                                                                            // 7: B cannot close A's session
+        r.push_back (post (c, hs (keyA.value().key, sidA), ping));                                  // 8: A's session is still there
+        auto stolenStream = c.Get ("/mcp", hs (keyB.value().key, sidA));
+        HttpReply g;
+        g.status = stolenStream ? stolenStream->status : 0;
+        r.push_back (g);                                                                            // 9: B cannot listen to A's session
+        r.push_back (post (c, hs (keyB.value().key, "unknown-session"), ping));                     // 10: the text of an unknown session
+        return r;
+    });
+
+    h.server.shutdown();
+    server.stop();
+
+    REQUIRE (out.size() == 11);
+    CHECK (out[0].status == 401);
+    CHECK (out[1].status == 200);
+    CHECK (out[2].status == 200);
+    CHECK (out[1].session != out[2].session);
+    CHECK (out[3].status == 200);
+    CHECK (out[3].body.dump().find ("bind-a") != std::string::npos);
+    CHECK (out[4].status == 404);
+    CHECK (out[5].status == 404);
+    CHECK (out[4].body["error"]["message"].get<std::string>() == out[10].body["error"]["message"].get<std::string>());     // indistinguishable from "unknown session"
+    CHECK (out[6].status == 200);
+    CHECK (out[6].body.dump().find ("bind-b") != std::string::npos);
+    CHECK (out[7].status == 404);
+    CHECK (out[8].status == 200);
+    CHECK (out[9].status == 404);
+}
+
+ROVOX_TEST (mcp, stdio_tenant_session_has_every_scope_but_admin)
+{
+    Harness h;
+    Principal principal = Principal::local();
+    principal.tenant = "stdio-acme";
+    principal.scopes = ScopeSet::all();
+    principal.scopes.remove (Scope::admin);
+
+    std::stringstream in, out;
+    in << R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t"}}})" << "\n"
+       << R"({"jsonrpc":"2.0","method":"notifications/initialized"})" << "\n"
+       << R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"usage.summary","arguments":{}}})" << "\n"
+       << R"({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"usage.report","arguments":{}}})" << "\n";
+
+    h.onClient ([&] { mcp::StdioTransport (h.server, in, out, principal).run(); return 0; });
+
+    std::map<std::string, json> byId;
+    std::string line;
+
+    while (std::getline (out, line))
+    {
+        const auto j = json::parse (line);
+        byId[j["id"].dump()] = j;
+    }
+
+    REQUIRE (byId.count ("2") == 1);
+    REQUIRE (byId.count ("3") == 1);
+    CHECK (byId["2"].dump().find ("stdio-acme") != std::string::npos);
+    CHECK (byId["3"]["result"]["isError"] == true);
+    CHECK (byId["3"].dump().find ("FORBIDDEN_SCOPE") != std::string::npos);
 }

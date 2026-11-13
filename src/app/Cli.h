@@ -25,6 +25,7 @@ struct Options
     std::vector<std::string> allowOrigins;
     std::vector<std::string> allowHosts;
     std::string connectUrl;             // mcp --connect: URL of a running `rovox serve`
+    std::string tenant;                 // mcp (in-process): the tenant of this stdio session, every scope but admin (default: local, the operator)
 
     // render
     std::string target, out, renderName, range, format, scope = "master", seed;

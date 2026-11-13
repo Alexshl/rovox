@@ -5,6 +5,7 @@
 // downloads, and the tus 1.0 upload endpoints. MCP and WebSocket arrive in M2/M3; they will use the same CommandBus.
 #pragma once
 
+#include "Auth.h"
 #include "CommandBus.h"
 #include "Peaks.h"
 #include "ProjectManager.h"
@@ -29,7 +30,9 @@ struct ServerOptions
 {
     std::string bind = "127.0.0.1";
     int port = 4810;                    // 0 = pick a free port (tests)
-    std::string token;                  // empty = no authentication (loopback default); otherwise `Authorization: Bearer <token>`
+    std::string token;                  // empty = no authentication (loopback default); otherwise `Authorization: Bearer <token>`; used only when `authenticator` is null
+    Authenticator* authenticator = nullptr;     // not owned; null = one built from `token` (no key store)
+    fs::path sessionKeyFile;            // secret of the `rovox_session` cookie, normally <data>/auth/session.key; empty = leave the authenticator's setting
     UploadLimits uploadLimits;
     fs::path webDir;                    // the built web UI (index.html + assets); empty or missing = API only
     std::string sourceUrl = "https://github.com/rovox/rovox";   // AGPL section 13: GET /source
@@ -64,6 +67,8 @@ private:
     CommandBus& bus_;
     EventHub& hub_;
     ServerOptions options_;
+    std::unique_ptr<Authenticator> ownAuth_;
+    Authenticator* auth_ = nullptr;
     std::vector<std::function<void (httplib::Server&)>> mounts_;
     std::unique_ptr<UploadStore> uploads_;
     std::unique_ptr<httplib::Server> server_;

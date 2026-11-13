@@ -2,10 +2,12 @@
 // Copyright (C) 2026 Rovox contributors
 
 // MCP Streamable HTTP (task 200, spec 2025-06-18): POST /mcp (request -> JSON or SSE), GET /mcp (server notifications as SSE),
-// DELETE /mcp (close the session). Origin is checked against DNS rebinding; the bearer token, when configured, is checked by
-// the HTTP server's pre-routing handler for every path.
+// DELETE /mcp (close the session). Origin is checked against DNS rebinding; the credentials are checked by the HTTP server's
+// pre-routing handler for every path, and again here to bind a session to the key that created it (another key presenting
+// the Mcp-Session-Id gets "unknown session") and to rate limit each POST.
 #pragma once
 
+#include "Auth.h"
 #include "Mcp.h"
 
 namespace httplib { class Server; }
@@ -15,6 +17,7 @@ namespace rovox::mcp
 
 struct McpHttpOptions
 {
+    Authenticator* authenticator = nullptr;     // not owned; null = no per-request identity: every session is the local operator's (the HTTP server's pre-routing may still require a token)
     std::vector<std::string> allowedOrigins;    // full origins such as https://example.com, besides loopback
     std::vector<std::string> allowedHosts;      // extra Host values accepted on a loopback bind (reverse proxy)
     bool loopbackBind = true;                   // the same Origin / Host rule as REST and WebSocket (rebinding defence; same-host Origin only off loopback)
