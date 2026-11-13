@@ -11,6 +11,7 @@ add_library(rovox_core STATIC
     Cgroup.cpp
     Delivery.cpp
     JobCallback.cpp
+    JobFiles.cpp
     EventWebhooks.cpp
     FsObjectStore.cpp
     DrumKit.cpp

@@ -4,6 +4,7 @@
 #include "JobCallback.h"
 
 #include "Hmac.h"
+#include "Ids.h"
 #include "JobManager.h"
 #include "Url.h"
 
@@ -153,9 +154,16 @@ Result<CallbackTarget> validateCallback (const json& callback, const CallbackSet
     if (! callback.is_object() || ! callback.contains ("url") || ! callback["url"].is_string() || ! callback.contains ("secret_ref") || ! callback["secret_ref"].is_string())
         return bad ("callback is {url, secret_ref}", "/callback");
 
+    if (callback.contains ("secret_ref_next") && ! callback["secret_ref_next"].is_string())
+        return bad ("callback.secret_ref_next is a secret name", "/callback/secret_ref_next");
+
     CallbackTarget target;
     target.url = callback["url"].get<std::string>();
     target.secretName = callback["secret_ref"].get<std::string>();
+
+    if (callback.contains ("secret_ref_next"))
+        target.nextSecretName = callback["secret_ref_next"].get<std::string>();
+
     const auto url = parseUrl (target.url);
 
     if (! url.valid || url.host.find ('@') != std::string::npos || url.port <= 0 || url.port > 65535)
@@ -188,6 +196,14 @@ Result<CallbackTarget> validateCallback (const json& callback, const CallbackSet
 
     if (it->second.resolve().empty())
         return bad ("the secret named by callback.secret_ref has no value (its environment variable or file is empty)", "/callback/secret_ref");
+
+    if (! target.nextSecretName.empty())
+    {
+        auto next = settings.secrets.find (target.nextSecretName);
+
+        if (next == settings.secrets.end() || next->second.resolve().empty())
+            return bad ("callback.secret_ref_next names no secret with a value in [callbacks.secrets] of the server configuration", "/callback/secret_ref_next");
+    }
 
     return target;
 }
@@ -251,6 +267,21 @@ std::string JobCallbackDispatcher::signature (const std::string& secret, const s
     return "sha256=" + hmacSha256Hex (secret, timestamp + "." + body);
 }
 
+std::string JobCallbackDispatcher::signatureHeader (const std::vector<std::string>& secrets, const std::string& timestamp, const std::string& body)
+{
+    std::string out;
+
+    for (auto& secret : secrets)
+    {
+        if (secret.empty())
+            continue;
+
+        out += (out.empty() ? "" : ",") + signature (secret, timestamp, body);
+    }
+
+    return out;
+}
+
 void JobCallbackDispatcher::enqueue (const JobInfo& finished, CallbackTarget target)
 {
     auto j = finished.toJson();
@@ -264,10 +295,12 @@ void JobCallbackDispatcher::enqueueBody (const std::string& id, const std::strin
     Task t;
     t.jobId = id;
     t.event = event;
+    t.eventId = newUlid();
     t.group = group;
     t.body = std::move (body);
     t.url = std::move (target.url);
     t.secretName = std::move (target.secretName);
+    t.nextSecretName = std::move (target.nextSecretName);
     t.ip = std::move (target.resolvedIp);
     t.due = std::chrono::steady_clock::now();
     std::vector<Task> dropped;
@@ -309,7 +342,7 @@ void JobCallbackDispatcher::enqueueBody (const std::string& id, const std::strin
 
 Result<void> JobCallbackDispatcher::deliver (const Task& t)
 {
-    SecretRef ref;
+    SecretRef ref, nextRef;
 
     {
         std::lock_guard<std::mutex> lock (mutex_);
@@ -317,9 +350,14 @@ Result<void> JobCallbackDispatcher::deliver (const Task& t)
 
         if (it != secrets_.end())
             ref = it->second;
+
+        if (! t.nextSecretName.empty())
+            if (auto next = secrets_.find (t.nextSecretName); next != secrets_.end())
+                nextRef = next->second;
     }
 
     const auto secret = ref.resolve();
+    const auto nextSecret = nextRef.resolve();
 
     if (secret.empty())
         return makeError (errc::preconditionFailed, "the callback secret has no value");
@@ -333,7 +371,8 @@ Result<void> JobCallbackDispatcher::deliver (const Task& t)
     httplib::Headers headers;
     headers.emplace ("X-Rovox-Timestamp", timestamp);
     headers.emplace ("X-Rovox-Event", t.event.empty() ? std::string ("job.finished") : t.event);
-    headers.emplace ("X-Rovox-Signature", signature (secret, timestamp, t.body));
+    headers.emplace ("X-Rovox-Event-Id", t.eventId);
+    headers.emplace ("X-Rovox-Signature", signatureHeader ({ secret, nextSecret }, timestamp, t.body));
 
     httplib::Client client (url.origin);
     client.set_hostname_addr_map ({ { url.host, t.ip } });      // connect to the address that was checked, not to a second DNS answer

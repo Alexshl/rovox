@@ -7,6 +7,8 @@
 // The URL must be http(s), its host listed in [callbacks] allow_hosts, and the address it resolves to must not be loopback / private / link-local
 // unless [callbacks] allow_private = true. The connection goes to the address that was checked. Secrets are read from [callbacks.secrets.<name>]
 // (env = "VAR" or file = "path") and never appear in a result, an error or a log line.
+// Every delivery carries X-Rovox-Event-Id (a ULID, the same on every retry: receivers de-duplicate on it). During a secret rotation callback.secret_ref_next
+// names a second secret; X-Rovox-Signature is then "sha256=<by the first>,sha256=<by the second>" and the receiver accepts any of them.
 #pragma once
 
 #include "Delivery.h"
@@ -43,6 +45,7 @@ struct CallbackSettings
 struct CallbackTarget
 {
     std::string url, secretName, resolvedIp;
+    std::string nextSecretName;                         // optional second active secret (rotation): the signature header then carries both
 };
 
 /** True for loopback, private (RFC 1918), link-local, unique-local (fc00::/7), unspecified, multicast, carrier-grade NAT (100.64/10) and benchmarking (198.18/15) addresses;
@@ -88,10 +91,13 @@ public:
 
     static std::string signature (const std::string& secret, const std::string& timestamp, const std::string& body);
 
+    /** The X-Rovox-Signature value for one or two active secrets (empty ones are skipped): "sha256=a" or "sha256=a,sha256=b". */
+    static std::string signatureHeader (const std::vector<std::string>& secrets, const std::string& timestamp, const std::string& body);
+
 private:
     struct Task
     {
-        std::string jobId, event, group, body, url, secretName, ip;
+        std::string jobId, event, eventId, group, body, url, secretName, nextSecretName, ip;
         int attempts = 0;
         std::chrono::steady_clock::time_point due;
     };
