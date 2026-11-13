@@ -66,10 +66,10 @@ def main():
             raise RuntimeError(f"{method}: {m['error']}")
         return m["result"]
 
-    def ok(name, **args):
-        r = rpc("tools/call", {"name": name, "arguments": args})["structuredContent"]
+    def ok(tool, /, **args):        # positional-only: tools take a `name` argument of their own
+        r = rpc("tools/call", {"name": tool, "arguments": args})["structuredContent"]
         if not r.get("ok"):
-            raise RuntimeError(f"{name} failed: {json.dumps(r.get('error'))}")
+            raise RuntimeError(f"{tool} failed: {json.dumps(r.get('error'))}")
         return r
 
     init = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "smoke_e2e.py", "version": "1"}})
