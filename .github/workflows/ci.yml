@@ -141,7 +141,9 @@ jobs:
         run: |
           set -euo pipefail
           # stdio: the container itself is the server command
-          npx --yes "$INSPECTOR" --cli docker run -i --rm rovox:ci mcp --method tools/list --format json | tee /tmp/inspector-stdio.json
+          # the server command goes through a wrapper: the Inspector CLI would read `-i` / `--rm` after `docker run` as its own options
+          printf '#!/bin/sh\nexec docker run -i --rm rovox:ci mcp\n' > /tmp/rovox-stdio.sh && chmod +x /tmp/rovox-stdio.sh
+          npx --yes "$INSPECTOR" --cli /tmp/rovox-stdio.sh --method tools/list --format json | tee /tmp/inspector-stdio.json
           jq -e '.tools | length > 0' /tmp/inspector-stdio.json
           # HTTP: against a running container, with the bearer token (exit codes: 0 ok, 3 auth, 4 unreachable, 5 tool error)
           token="ci-$(openssl rand -hex 16)"
