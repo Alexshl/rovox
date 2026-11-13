@@ -203,7 +203,7 @@ struct Importer
 
         // every resolved path (absolute FILE, ../ , RECORD_PATH, the basename index) obeys the same path policy as a direct path parameter
         if (found)
-            if (auto allowed = project.host().checkPath (*found); ! allowed.ok())
+            if (auto allowed = project.host().checkPath (*found, project.tenant()); ! allowed.ok())
             {
                 refused = allowed.error().message;
                 report.warnings.push_back ({ { "code", "MEDIA_PATH_FORBIDDEN" }, { "message", refused } });
@@ -1102,14 +1102,14 @@ void registerRppCommands (CommandRegistry& r)
         { { "type", "object" } }, true,
         [] (Project& p, const json& params, const CommandContext&) -> Result<json>
         {
-            if (auto allowed = p.host().checkPath (params["path"].get<std::string>()); ! allowed.ok())
+            if (auto allowed = p.host().checkPath (params["path"].get<std::string>(), p.tenant()); ! allowed.ok())
                 return allowed.error();
 
             fs::path sidecar;
 
             if (params.contains ("fx_sidecar"))
             {
-                if (auto allowed = p.host().checkPath (params["fx_sidecar"].get<std::string>()); ! allowed.ok())
+                if (auto allowed = p.host().checkPath (params["fx_sidecar"].get<std::string>(), p.tenant()); ! allowed.ok())
                     return allowed.error();
 
                 sidecar = params["fx_sidecar"].get<std::string>();

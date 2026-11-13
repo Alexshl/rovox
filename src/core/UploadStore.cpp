@@ -53,7 +53,7 @@ std::string readFile (const fs::path& p)
 
 json UploadInfo::toJson() const
 {
-    return { { "upload_id", id }, { "filename", filename }, { "relpath", relpath }, { "batch_id", batchId }, { "length", length },
+    return { { "upload_id", id }, { "tenant", tenant }, { "filename", filename }, { "relpath", relpath }, { "batch_id", batchId }, { "length", length },
              { "offset", offset }, { "complete", complete }, { "sha256", sha256 } };
 }
 
@@ -97,6 +97,16 @@ Result<void> UploadStore::save (const UploadInfo& u)
     return ec ? Result<void> (makeError (errc::io, ec.message())) : Result<void>();
 }
 
+Result<UploadInfo> UploadStore::load (const std::string& id, const std::string& tenant)
+{
+    auto u = load (id);
+
+    if (u.ok() && u.value().tenant != tenant)
+        return makeError (errc::notFound, "no such upload");
+
+    return u;
+}
+
 Result<UploadInfo> UploadStore::load (const std::string& id)
 {
     if (! validId (id))
@@ -114,6 +124,7 @@ Result<UploadInfo> UploadStore::load (const std::string& id)
 
     UploadInfo u;
     u.id = id;
+    u.tenant = j.value ("tenant", "local");         // uploads written before tenancy belong to local
     u.filename = j.value ("filename", "");
     u.relpath = j.value ("relpath", "");
     u.batchId = j.value ("batch_id", "");
@@ -130,7 +141,7 @@ Result<UploadInfo> UploadStore::load (const std::string& id)
     return u;
 }
 
-Result<UploadInfo> UploadStore::create (std::uint64_t length, const std::map<std::string, std::string>& metadata)
+Result<UploadInfo> UploadStore::create (std::uint64_t length, const std::map<std::string, std::string>& metadata, const std::string& tenant)
 {
     if (length > limits_.maxFileBytes)
         return makeError (errc::invalidParams, "file is larger than the limit of " + std::to_string (limits_.maxFileBytes) + " bytes", json { { "max_bytes", limits_.maxFileBytes } });
@@ -142,6 +153,7 @@ Result<UploadInfo> UploadStore::create (std::uint64_t length, const std::map<std
         return makeError (errc::preconditionFailed, "not enough free disk space for this upload", json { { "available_bytes", space.available }, { "needed_bytes", length } });
 
     UploadInfo u;
+    u.tenant = tenant;
     u.id = "up_" + randomHex (16);              // 128 bits, not guessable
     u.length = length;
     u.createdAt = std::time (nullptr);
@@ -163,17 +175,17 @@ Result<UploadInfo> UploadStore::create (std::uint64_t length, const std::map<std
     return u;
 }
 
-Result<UploadInfo> UploadStore::info (const std::string& id)
+Result<UploadInfo> UploadStore::info (const std::string& id, const std::string& tenant)
 {
     std::lock_guard<std::mutex> lock (mutex_);
-    return load (id);
+    return load (id, tenant);
 }
 
-Result<void> UploadStore::terminate (const std::string& id)
+Result<void> UploadStore::terminate (const std::string& id, const std::string& tenant)
 {
     std::lock_guard<std::mutex> lock (mutex_);
 
-    if (auto u = load (id); ! u.ok())
+    if (auto u = load (id, tenant); ! u.ok())
         return u.error();
 
     std::error_code ec;
@@ -230,10 +242,10 @@ void UploadStore::releaseWriter (const std::string& id)
     patching_.erase (id);
 }
 
-Result<std::unique_ptr<UploadStore::Writer>> UploadStore::openWriter (const std::string& id, std::uint64_t expectedOffset)
+Result<std::unique_ptr<UploadStore::Writer>> UploadStore::openWriter (const std::string& id, std::uint64_t expectedOffset, const std::string& tenant)
 {
     std::lock_guard<std::mutex> lock (mutex_);
-    auto u = load (id);
+    auto u = load (id, tenant);
 
     if (! u.ok())
         return u.error();
@@ -358,9 +370,9 @@ Result<UploadInfo> UploadStore::finishPatch (Writer& w)
     return done;
 }
 
-Result<UploadInfo> UploadStore::append (const std::string& id, std::uint64_t expectedOffset, const char* data, size_t size)
+Result<UploadInfo> UploadStore::append (const std::string& id, std::uint64_t expectedOffset, const char* data, size_t size, const std::string& tenant)
 {
-    auto w = openWriter (id, expectedOffset);
+    auto w = openWriter (id, expectedOffset, tenant);
 
     if (! w.ok())
         return w.error();
@@ -371,7 +383,7 @@ Result<UploadInfo> UploadStore::append (const std::string& id, std::uint64_t exp
     return finishPatch (*w.value());
 }
 
-Result<json> UploadStore::createBatch (const json& files)
+Result<json> UploadStore::createBatch (const json& files, const std::string& tenant)
 {
     if (! files.is_array() || files.empty())
         return makeError (errc::invalidParams, "files must be a non-empty array");
@@ -397,7 +409,7 @@ Result<json> UploadStore::createBatch (const json& files)
             return makeError (errc::invalidParams, "invalid relpath '" + rel + "'");
 
         std::map<std::string, std::string> md { { "filename", fs::path (rel).filename().string() }, { "relpath", rel }, { "batch_id", batchId }, { "sha256", f.value ("sha256", "") } };
-        auto u = create (f.value ("size", (std::uint64_t) 0), md);
+        auto u = create (f.value ("size", (std::uint64_t) 0), md, tenant);
 
         if (! u.ok())
             return u.error();
@@ -408,13 +420,14 @@ Result<json> UploadStore::createBatch (const json& files)
     return json { { "batch_id", batchId }, { "files", out } };
 }
 
-Result<json> UploadStore::batchStatus (const std::string& batchId)
+Result<json> UploadStore::batchStatus (const std::string& batchId, const std::string& tenant)
 {
     std::lock_guard<std::mutex> lock (mutex_);
     json files = json::array();
     std::uint64_t total = 0, done = 0;
     int complete = 0;
     bool placedAll = true;
+    std::string owner;
     std::error_code ec;
 
     for (auto& e : fs::directory_iterator (root_, ec))
@@ -422,8 +435,9 @@ Result<json> UploadStore::batchStatus (const std::string& batchId)
         {
             auto u = load (e.path().stem().string());
 
-            if (u.ok() && u.value().batchId == batchId)
+            if (u.ok() && u.value().batchId == batchId && (tenant.empty() || u.value().tenant == tenant))
             {
+                owner = u.value().tenant;
                 placedAll = placedAll && ! u.value().placed.empty();
                 files.push_back (u.value().toJson());
                 total += u.value().length;
@@ -435,7 +449,7 @@ Result<json> UploadStore::batchStatus (const std::string& batchId)
     if (files.empty())
         return makeError (errc::notFound, "no such batch");
 
-    json out { { "batch_id", batchId }, { "files", files }, { "total_bytes", total }, { "received_bytes", done },
+    json out { { "batch_id", batchId }, { "tenant", owner }, { "files", files }, { "total_bytes", total }, { "received_bytes", done },
                { "completed_files", complete }, { "complete", complete == (int) files.size() } };
 
     if (complete == (int) files.size() && placedAll)
@@ -560,7 +574,7 @@ std::vector<UploadInfo> UploadStore::membersOf (const std::string& id)      // c
     return out;
 }
 
-Result<json> UploadStore::finish (const std::string& id)
+Result<json> UploadStore::finish (const std::string& id, const std::string& tenant)
 {
     if (! validId (id) && ! validBatchId (id))
         return makeError (errc::notFound, "no such upload or batch");
@@ -571,7 +585,7 @@ Result<json> UploadStore::finish (const std::string& id)
         std::lock_guard<std::mutex> lock (mutex_);
         members = membersOf (id);
 
-        if (members.empty())
+        if (members.empty() || (! tenant.empty() && members.front().tenant != tenant))
             return makeError (errc::notFound, "no such upload or batch");
 
         for (auto& m : members)
@@ -706,7 +720,7 @@ Result<json> UploadStore::finish (const std::string& id)
             path = dir / fs::path (rpps.front());     // import.rpp takes the .RPP file; media beside it is found by relative path
     }
 
-    return json { { "path", path.string() }, { "files", files }, { "detected", detected } };
+    return json { { "path", path.string() }, { "files", files }, { "detected", detected }, { "tenant", members.front().tenant } };
 }
 
 int UploadStore::cleanup (std::int64_t now)

@@ -3,7 +3,7 @@
 
 // Quotas and rate limits per tenant and key. Profiles come from the configuration file:
 //   [quota_profiles.<name>]  requests_per_min, cpu_seconds_per_day, concurrent_jobs, projects, storage_bytes, audio_minutes_per_month
-//   [tenants.<id>]           quota_profile = "<name>"
+//   [tenants.<id>]           quota_profile = "<name>", licence_policy = "any" | "server_use_ok"
 // A missing limit is unlimited. Tenant `local` is unlimited unless configured; any other tenant without an explicit profile gets the profile
 // named "default" (built in: 120 requests/min, 3600 CPU-seconds/day, 4 concurrent jobs, 50 projects, 20 GiB; the file may override it).
 // CPU accounting of in-process renders is approximate (CLOCK_THREAD_CPUTIME_ID of the job's worker thread); child renders are exact (rusage).
@@ -38,12 +38,17 @@ struct QuotaConfig
 {
     std::map<std::string, QuotaProfile> profiles;
     std::map<std::string, std::string> tenantProfile;
+    std::map<std::string, std::string> tenantLicence;        // [tenants.<id>] licence_policy, as written
 
     static QuotaConfig load (const fs::path& tomlFile);         // missing or unparsable file = empty
     static QuotaProfile builtInDefault();
 
     /** `explicitProfile` (a key's own profile) wins, then [tenants.<id>], then local = unlimited, then "default". An unknown name falls through. */
     QuotaProfile resolve (const std::string& tenant, const std::string& explicitProfile = {}) const;
+
+    /** True when the tenant may only use plugins with server_use_ok: [tenants.<id>] licence_policy = "server_use_ok". An explicit "any" lifts it;
+        without a record `local` is unrestricted and every other tenant is restricted (fail closed). */
+    bool licenceRequiresServerUse (const std::string& tenant) const;
 };
 
 //==============================================================================
@@ -139,6 +144,8 @@ public:
     bool configured() const;
 
     QuotaProfile profile (const std::string& tenant, const std::string& explicitProfile = {});
+    /** The licence policy of the tenant, see QuotaConfig::licenceRequiresServerUse. */
+    bool licenceRequiresServerUse (const std::string& tenant);
 
     /** Per request (HTTP, each WS command, each MCP POST): the token bucket of the principal's key. */
     RateDecision checkRate (const Principal&);

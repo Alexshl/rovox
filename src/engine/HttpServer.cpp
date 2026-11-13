@@ -139,8 +139,12 @@ HttpServer::HttpServer (EngineHost& host, ProjectManager& pm, CommandBus& bus, E
         auth_->setSessionKeyFile (options_.sessionKeyFile);
 
     UploadStore::Listener listener;
-    listener.onCompleted = [this] (const UploadInfo& u) { hub_.publish ("local", "", { { "type", "upload.completed" }, { "upload", u.toJson() } }); };
-    listener.onBatchCompleted = [this] (const std::string& id) { hub_.publish ("local", "", { { "type", "upload.batch_completed" }, { "batch_id", id } }); };
+    listener.onCompleted = [this] (const UploadInfo& u) { hub_.publish (u.tenant, "", { { "type", "upload.completed" }, { "upload", u.toJson() } }); };
+    listener.onBatchCompleted = [this] (const std::string& id)
+    {
+        const auto status = uploads_->batchStatus (id);         // the operator's view: only to learn which tenant owns the batch
+        hub_.publish (status.ok() ? status.value().value ("tenant", "local") : std::string ("local"), "", { { "type", "upload.batch_completed" }, { "batch_id", id } });
+    };
     uploads_ = std::make_unique<UploadStore> (host_.dataDir() / "uploads", options_.uploadLimits, std::move (listener));
     server_ = makeServerWithUpgrade ([this] (int fd, WsRequest req)
     {
@@ -674,11 +678,11 @@ void HttpServer::installRoutes()
         try { length = std::stoull (req.get_header_value ("Upload-Length")); }
         catch (...) { return reply (res, 400, { { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "bad Upload-Length" } } } }); }
 
-        // the tenant's storage quota is checked before the first byte is accepted (the owner of the upload is recorded by E11-04)
+        // the tenant's storage quota is checked before the first byte is accepted (the upload is recorded under this tenant)
         if (auto quota = quotas().checkStorage (principal->tenant, (std::int64_t) std::min<std::uint64_t> (length, (std::uint64_t) std::numeric_limits<std::int64_t>::max()), principal->quotaProfile); ! quota.ok())
             return replyError (res, quota.error());
 
-        auto created = uploads_->create (length, parseTusMetadata (req.get_header_value ("Upload-Metadata")));
+        auto created = uploads_->create (length, parseTusMetadata (req.get_header_value ("Upload-Metadata")), principal->tenant);
 
         if (! created.ok())
             return replyError (res, created.error());
@@ -688,10 +692,15 @@ void HttpServer::installRoutes()
         res.status = 201;
     });
 
-    svr.Get (R"(/api/uploads/([^/]+))", [this] (const httplib::Request& req, httplib::Response& res)
+    svr.Get (R"(/api/uploads/([^/]+))", [this, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
         tusHeaders (res);
-        auto u = uploads_->info (req.matches[1]);
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
+        auto u = uploads_->info (req.matches[1], principal->tenant);
 
         if (! u.ok())
         {
@@ -705,16 +714,25 @@ void HttpServer::installRoutes()
         res.status = 200;
     });
 
-    svr.Delete (R"(/api/uploads/([^/]+))", [this] (const httplib::Request& req, httplib::Response& res)
+    svr.Delete (R"(/api/uploads/([^/]+))", [this, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
         tusHeaders (res);
-        auto r = uploads_->terminate (req.matches[1]);
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
+        auto r = uploads_->terminate (req.matches[1], principal->tenant);
         res.status = r.ok() ? 204 : 404;
     });
 
-    svr.Patch (R"(/api/uploads/([^/]+))", [this] (const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& reader)
+    svr.Patch (R"(/api/uploads/([^/]+))", [this, principalFor] (const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& reader)
     {
         tusHeaders (res);
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
 
         if (req.get_header_value ("Content-Type") != "application/offset+octet-stream")
         {
@@ -727,7 +745,7 @@ void HttpServer::installRoutes()
         try { offset = std::stoull (req.get_header_value ("Upload-Offset")); }
         catch (...) { res.status = 400; return; }
 
-        auto writer = uploads_->openWriter (req.matches[1], offset);
+        auto writer = uploads_->openWriter (req.matches[1], offset, principal->tenant);
 
         if (! writer.ok())
         {
@@ -813,20 +831,30 @@ void HttpServer::installRoutes()
         res.status = 204;
     });
 
-    svr.Post ("/api/upload-batches", [this] (const httplib::Request& req, httplib::Response& res)
+    svr.Post ("/api/upload-batches", [this, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
         const auto body = json::parse (req.body, nullptr, false);
 
         if (body.is_discarded() || ! body.contains ("files"))
             return reply (res, 400, { { "ok", false }, { "error", { { "code", errc::invalidParams }, { "message", "body must be {\"files\": [{\"relpath\", \"size\"}]}" } } } });
 
-        auto batch = uploads_->createBatch (body["files"]);
+        auto batch = uploads_->createBatch (body["files"], principal->tenant);
         batch.ok() ? reply (res, 201, batch.value()) : replyError (res, batch.error());
     });
 
-    svr.Get (R"(/api/upload-batches/([^/]+))", [this] (const httplib::Request& req, httplib::Response& res)
+    svr.Get (R"(/api/upload-batches/([^/]+))", [this, principalFor] (const httplib::Request& req, httplib::Response& res)
     {
-        auto status = uploads_->batchStatus (req.matches[1]);
+        const auto principal = principalFor (req, res);
+
+        if (! principal)
+            return;
+
+        auto status = uploads_->batchStatus (req.matches[1], principal->tenant);
         status.ok() ? reply (res, 200, status.value()) : replyError (res, status.error());
     });
 }

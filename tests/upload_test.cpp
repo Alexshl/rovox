@@ -813,3 +813,131 @@ ROVOX_TEST (upload, create_checks_the_storage_quota_of_the_calling_tenant)
 
     quotas().setConfigFile ({});
 }
+
+ROVOX_TEST (upload, an_upload_belongs_to_the_tenant_that_created_it)
+{
+    const auto dir = test::makeTempDir ("upload-tenants");
+    UploadStore store (dir);
+
+    auto mine = store.create (6, { { "filename", "a.wav" } }, "upl_a");
+    REQUIRE (mine.ok());
+    CHECK (mine.value().tenant == "upl_a");
+    CHECK (mine.value().toJson()["tenant"] == "upl_a");
+    const auto id = mine.value().id;
+
+    // another tenant sees exactly what a missing upload looks like
+    auto info = store.info (id, "upl_b");
+    REQUIRE (! info.ok());
+    CHECK (info.error().code == errc::notFound);
+    CHECK (store.info (id, "upl_a").ok());
+    CHECK (store.openWriter (id, 0, "upl_b").error().code == errc::notFound);
+    CHECK (store.append (id, 0, "abc", 3, "upl_b").error().code == errc::notFound);
+    CHECK (store.terminate (id, "upl_b").error().code == errc::notFound);
+    CHECK (store.info (id, "local").error().code == errc::notFound);        // not even the operator's default tenant
+
+    // the owner is unaffected by the attempts, and the owner is stored with the state (survives a restart of the store)
+    CHECK (store.append (id, 0, "abcdef", 6, "upl_a").ok());
+    UploadStore reopened (dir);
+    CHECK (reopened.info (id, "upl_a").value().complete);
+    CHECK (! reopened.info (id, "upl_b").ok());
+
+    // batches: status and finish are tenant-checked when a tenant is given, and the result names the owner
+    auto batch = store.createBatch (json::array ({ { { "relpath", "x.wav" }, { "size", 2 } } }), "upl_a");
+    REQUIRE (batch.ok());
+    const std::string batchId = batch.value()["batch_id"], member = batch.value()["files"][0]["upload_id"];
+    CHECK (store.info (member, "upl_a").ok());
+    CHECK (! store.info (member, "upl_b").ok());
+    CHECK (store.batchStatus (batchId, "upl_a").value()["tenant"] == "upl_a");
+    CHECK (store.batchStatus (batchId, "upl_b").error().code == errc::notFound);
+    CHECK (store.batchStatus (batchId).ok());                                // empty tenant: the operator's view
+    REQUIRE (store.append (member, 0, "xy", 2, "upl_a").ok());
+    CHECK (store.finish (batchId, "upl_b").error().code == errc::notFound);
+    CHECK (! fs::exists (store.materialisedDir (batchId)));
+    auto finished = store.finish (batchId, "upl_a");
+    REQUIRE (finished.ok());
+    CHECK (finished.value()["tenant"] == "upl_a");
+
+    // an upload without a tenant in its state (written before tenancy) belongs to local
+    auto legacy = store.create (1, { { "filename", "old.wav" } });
+    REQUIRE (legacy.ok());
+    CHECK (legacy.value().tenant == "local");
+    CHECK (store.info (legacy.value().id, "local").ok());
+    CHECK (! store.info (legacy.value().id, "upl_a").ok());
+}
+
+ROVOX_TEST (upload, http_head_patch_and_delete_of_another_tenants_upload_answer_404)
+{
+    const auto dir = test::makeTempDir ("upload-http-tenants");
+    KeyStore keys (dir / "auth" / "keys.json");
+    auto keyFor = [&] (const std::string& tenant)
+    {
+        KeyStore::CreateSpec spec;
+        spec.label = tenant;
+        spec.tenant = tenant;
+        spec.scopes = ScopeSet::of ({ Scope::projectsRead, Scope::projectsWrite });
+        auto created = keys.create (spec);
+        REQUIRE (created.ok());
+        return created.value().key;
+    };
+
+    const auto keyA = keyFor ("upl_http_a");
+    const auto keyB = keyFor ("upl_http_b");
+    Authenticator auth (&keys, "");
+    ServerOptions so;
+    so.authenticator = &auth;
+    so.sessionKeyFile = dir / "auth" / "session.key";
+    Fixture f (so);
+
+    auto as = [] (const std::string& key) { return httplib::Headers { { "Authorization", "Bearer " + key }, { "Tus-Resumable", "1.0.0" } }; };
+    const std::string data = "0123456789";
+
+    auto h = as (keyA);
+    h.emplace ("Upload-Length", std::to_string (data.size()));
+    auto created = f.client->Post ("/api/uploads", h, "", "");
+    REQUIRE (created != nullptr);
+    REQUIRE (created->status == 201);
+    const auto loc = created->get_header_value ("Location");
+
+    auto patchHeaders = [&] (const std::string& key, size_t offset)
+    {
+        auto p = as (key);
+        p.emplace ("Upload-Offset", std::to_string (offset));
+        return p;
+    };
+
+    // tenant B: HEAD (served by the GET route), PATCH and DELETE of A's upload look like a missing upload
+    auto head = f.client->Head (loc, as (keyB));
+    REQUIRE (head != nullptr);
+    CHECK (head->status == 404);
+    CHECK (head->get_header_value ("Upload-Offset").empty());
+
+    auto patch = f.client->Patch (loc, patchHeaders (keyB, 0), data.substr (0, 4), "application/offset+octet-stream");
+    REQUIRE (patch != nullptr);
+    CHECK (patch->status == 404);
+
+    auto del = f.client->Delete (loc, as (keyB));
+    REQUIRE (del != nullptr);
+    CHECK (del->status == 404);
+
+    // none of it touched the upload: A still sees offset 0 and finishes it
+    auto own = f.client->Head (loc, as (keyA));
+    REQUIRE (own != nullptr);
+    CHECK (own->status == 200);
+    CHECK (own->get_header_value ("Upload-Offset") == "0");
+    auto done = f.client->Patch (loc, patchHeaders (keyA, 0), data, "application/offset+octet-stream");
+    REQUIRE (done != nullptr);
+    CHECK (done->status == 204);
+
+    // batches: B cannot read A's status
+    const json files = json::array ({ { { "relpath", "a/b.wav" }, { "size", 3 } } });
+    auto batch = f.client->Post ("/api/upload-batches", as (keyA), json { { "files", files } }.dump(), "application/json");
+    REQUIRE (batch != nullptr);
+    REQUIRE (batch->status == 201);
+    const std::string batchId = json::parse (batch->body)["batch_id"];
+    auto statusA = f.client->Get ("/api/upload-batches/" + batchId, as (keyA));
+    auto statusB = f.client->Get ("/api/upload-batches/" + batchId, as (keyB));
+    REQUIRE (statusA != nullptr);
+    REQUIRE (statusB != nullptr);
+    CHECK (statusA->status == 200);
+    CHECK (statusB->status == 404);
+}

@@ -9,6 +9,7 @@
 
 #include "PluginHost.h"
 #include "ProjectFormat.h"
+#include "Quota.h"
 #include "Sha256.h"
 
 #include <algorithm>
@@ -138,6 +139,11 @@ void PluginCatalog::reloadLicenses()
     licenses_ = std::move (fresh);
 }
 
+bool PluginCatalog::licenceGated (const std::string& tenant)
+{
+    return quotas().licenceRequiresServerUse (tenant);
+}
+
 Result<void> PluginCatalog::requireLicence (const std::string& tenant, const std::optional<json>& record, const std::string& what)
 {
     if (licenceAllows (tenant, record))
@@ -153,7 +159,7 @@ Result<void> PluginCatalog::requireLicence (const std::string& tenant, const std
 
 Result<void> PluginCatalog::requireLicencesInState (const std::string& tenant, const juce::ValueTree& editState) const
 {
-    if (tenant == "local")
+    if (! licenceGated (tenant))
         return {};
 
     json offending = json::array();

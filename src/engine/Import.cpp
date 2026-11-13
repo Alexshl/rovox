@@ -621,7 +621,7 @@ void registerImportCommands (CommandRegistry& r)
 
             for (auto& source : sources)
             {
-                auto allowed = p.host().checkPath (source);
+                auto allowed = p.host().checkPath (source, p.tenant());
 
                 if (! allowed.ok())
                     return allowed.error();

@@ -65,13 +65,17 @@ public:
     static bool originAllowed (const std::string& origin, const std::string& host, const std::vector<std::string>& allowed,
                               bool loopbackBind = false, const std::vector<std::string>& allowedHosts = {});
 
-private:
     struct Sub
     {
         int pidx = 0;
         bool state = true, transport = true, meters = true;
     };
 
+    /** Whether a hub event goes to a client of `clientTenant` holding `subs` (by project id): never across tenants (job.updated and events without a
+        project included); project state / transport events only to subscribers of that project and channel. Pure, so the isolation is unit-testable. */
+    static bool shouldDeliver (const std::string& clientTenant, const std::map<std::string, Sub>& subs, const Event&);
+
+private:
     struct Client
     {
         std::string session;
@@ -88,7 +92,7 @@ private:
     void onMessage (const std::shared_ptr<Client>&, const std::string& text);
     void handleSub (const std::shared_ptr<Client>&, const json&);
     void handleCmd (const std::shared_ptr<Client>&, const json&);
-    json buildSnapshot (const std::string& projectId, int pidx);
+    json buildSnapshot (const std::string& projectId, const std::string& tenant, int pidx);
     void onHubEvent (const Event&);
     void onAudioPacket (const std::vector<std::uint8_t>&);
     std::vector<std::shared_ptr<Client>> clients();

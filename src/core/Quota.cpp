@@ -145,8 +145,13 @@ QuotaConfig QuotaConfig::load (const fs::path& tomlFile)
         if (auto* tenants = doc["tenants"].as_table())
             for (auto&& [id, node] : *tenants)
                 if (auto* t = node.as_table())
+                {
                     if (auto name = (*t)["quota_profile"].value<std::string>())
                         c.tenantProfile[std::string (id.str())] = *name;
+
+                    if (auto policy = (*t)["licence_policy"].value<std::string>())
+                        c.tenantLicence[std::string (id.str())] = *policy;
+                }
     }
     catch (const toml::parse_error&)
     {
@@ -173,6 +178,14 @@ QuotaProfile QuotaConfig::resolve (const std::string& tenant, const std::string&
         return it->second;
 
     return builtInDefault();
+}
+
+bool QuotaConfig::licenceRequiresServerUse (const std::string& tenant) const
+{
+    if (auto it = tenantLicence.find (tenant); it != tenantLicence.end())
+        return it->second != "any";             // anything but an explicit "any" restricts
+
+    return tenant != "local";
 }
 
 //==============================================================================
@@ -472,6 +485,11 @@ std::shared_ptr<const QuotaConfig> QuotaService::config()
 QuotaProfile QuotaService::profile (const std::string& tenant, const std::string& explicitProfile)
 {
     return config()->resolve (tenant, explicitProfile);
+}
+
+bool QuotaService::licenceRequiresServerUse (const std::string& tenant)
+{
+    return config()->licenceRequiresServerUse (tenant);
 }
 
 RateDecision QuotaService::checkRate (const Principal& p)

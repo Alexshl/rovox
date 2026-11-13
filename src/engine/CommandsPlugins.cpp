@@ -121,7 +121,7 @@ void registerPluginCommands (CommandRegistry& r)
             q.tag = params.value ("tag", "");
             q.status = params.value ("status", "");
             q.serverUseOk = params.value ("server_use_ok", false);
-            q.hideNonFree = ctx.tenant != "local";
+            q.hideNonFree = PluginCatalog::licenceGated (ctx.tenant);
             q.includePresets = params.value ("include_presets", false);
             q.limit = (size_t) params.value ("limit", 50);
             q.offset = params.contains ("cursor") ? (size_t) std::atoll (params["cursor"].get<std::string>().c_str()) : 0;

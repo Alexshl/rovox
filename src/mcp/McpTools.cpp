@@ -775,6 +775,10 @@ void McpServer::buildTools()
             if (! r.ok())
                 return ToolOutput::failure (r.error());
 
+            // another tenant's batch looks exactly like a missing one
+            if (r.value().value ("tenant", "local") != c.session.tenant)
+                return ToolOutput::failure (makeError (errc::notFound, "no such batch"));
+
             return ToolOutput::success (r.value());
         };
         add (std::move (t));
@@ -789,7 +793,7 @@ void McpServer::buildTools()
                         "Returns {path, files:[{relpath, bytes, sha256}], detected: zoom_r20|rpp|audio}; pass path to import.plan (or import.rpp for rpp). Idempotent.";
         t.inputSchema = schema ({ { "batch_id", str() }, { "upload_id", str() } });
         t.annotations = { { "idempotentHint", true } };
-        t.handler = [fn = config_.uploadFinish] (ToolCall& c) -> ToolOutput
+        t.handler = [fn = config_.uploadFinish, status = config_.uploadBatchStatus] (ToolCall& c) -> ToolOutput
         {
             const auto batch = c.args.value ("batch_id", "");
             const auto upload = c.args.value ("upload_id", "");
@@ -797,10 +801,18 @@ void McpServer::buildTools()
             if (batch.empty() == upload.empty())
                 return ToolOutput::failure (makeError (errc::invalidParams, "pass exactly one of batch_id or upload_id"));
 
+            // a batch is checked before anything is materialised (finish moves files); a single upload can only be checked on the result
+            if (! batch.empty() && status)
+                if (auto owner = status (batch); owner.ok() && owner.value().value ("tenant", "local") != c.session.tenant)
+                    return ToolOutput::failure (makeError (errc::notFound, "no such upload or batch"));
+
             auto r = fn (batch.empty() ? upload : batch);
 
             if (! r.ok())
                 return ToolOutput::failure (r.error());
+
+            if (r.value().value ("tenant", "local") != c.session.tenant)
+                return ToolOutput::failure (makeError (errc::notFound, "no such upload or batch"));
 
             return ToolOutput::success (r.value());
         };
@@ -1103,7 +1115,7 @@ void McpServer::buildTools()
         t.description = "Named multi-step procedures (built-in and saved): recipe_id, description and the parameters each takes.";
         t.inputSchema = schema (json::object());
         t.annotations = { { "readOnlyHint", true } };
-        t.handler = [] (ToolCall& c) -> ToolOutput { return ToolOutput::success ({ { "recipes", listRecipes (c.server.projects().host().dataDir()) } }); };
+        t.handler = [] (ToolCall& c) -> ToolOutput { return ToolOutput::success ({ { "recipes", listRecipes (recipesDirOf (c.server.projects().host().dataDir(), c.session.tenant)) } }); };
         add (std::move (t));
     }
 
@@ -1116,7 +1128,7 @@ void McpServer::buildTools()
         t.annotations = { { "readOnlyHint", true } };
         t.handler = [] (ToolCall& c) -> ToolOutput
         {
-            auto r = loadRecipe (c.server.projects().host().dataDir(), c.args["recipe_id"]);
+            auto r = loadRecipe (recipesDirOf (c.server.projects().host().dataDir(), c.session.tenant), c.args["recipe_id"]);
 
             if (! r)
                 return ToolOutput::failure (makeError (errc::notFound, "no recipe " + c.args["recipe_id"].get<std::string>()));
@@ -1135,7 +1147,7 @@ void McpServer::buildTools()
         t.annotations = { { "readOnlyHint", false } };
         t.handler = [] (ToolCall& c) -> ToolOutput
         {
-            auto r = saveRecipe (c.server.projects().host().dataDir(), c.args["recipe"]);
+            auto r = saveRecipe (recipesDirOf (c.server.projects().host().dataDir(), c.session.tenant), c.args["recipe"]);
 
             if (! r.ok())
                 return ToolOutput::failure (r.error());
@@ -1154,7 +1166,7 @@ void McpServer::buildTools()
         t.annotations = { { "readOnlyHint", false }, { "destructiveHint", true } };
         t.handler = [] (ToolCall& c) -> ToolOutput
         {
-            auto r = deleteRecipe (c.server.projects().host().dataDir(), c.args["recipe_id"]);
+            auto r = deleteRecipe (recipesDirOf (c.server.projects().host().dataDir(), c.session.tenant), c.args["recipe_id"]);
             return r.ok() ? ToolOutput::success ({ { "recipe_id", c.args["recipe_id"] } }) : ToolOutput::failure (r.error());
         };
         add (std::move (t));
@@ -1170,7 +1182,7 @@ void McpServer::buildTools()
         t.mayBlock = true;
         t.handler = [] (ToolCall& c) -> ToolOutput
         {
-            auto r = loadRecipe (c.server.projects().host().dataDir(), c.args["recipe_id"]);
+            auto r = loadRecipe (recipesDirOf (c.server.projects().host().dataDir(), c.session.tenant), c.args["recipe_id"]);
 
             if (! r)
                 return ToolOutput::failure (makeError (errc::notFound, "no recipe " + c.args["recipe_id"].get<std::string>()));

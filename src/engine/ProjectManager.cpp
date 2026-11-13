@@ -180,7 +180,7 @@ Result<std::string> ProjectManager::open (const std::string& target, const OpenO
     else if (target.find ('/') != std::string::npos || target.rfind ('.', 0) == 0)
     {
         // anything that looks like a path is checked against the path policy before it is even looked at (no probing outside)
-        auto allowed = host_.checkPath (target);
+        auto allowed = host_.checkPath (target, opts.tenant);
 
         if (! allowed.ok())
             return allowed.error();
@@ -193,7 +193,7 @@ Result<std::string> ProjectManager::open (const std::string& target, const OpenO
     }
     else if (std::error_code probe; fs::exists (target, probe))
     {
-        auto allowed = host_.checkPath (target);
+        auto allowed = host_.checkPath (target, opts.tenant);
 
         if (! allowed.ok())
             return allowed.error();
