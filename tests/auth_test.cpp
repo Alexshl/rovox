@@ -3,13 +3,21 @@
 
 // E11-01: API keys (format, hash, expiry, revocation), the Authenticator (legacy token, open mode) and scopes as a set.
 #include "Auth.h"
+#include "ExternalAuth.h"
+#include "Hmac.h"
 #include "KeyStore.h"
+#include "MockServer.h"
 #include "Origin.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/evp.h>
+
 #include <sys/stat.h>
 
+#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -571,4 +579,661 @@ ROVOX_TEST (auth, auth_request_tries_header_cookie_and_query_and_old_cookie_is_l
     auto o = open.resolve (AuthRequest {});
     REQUIRE (o.ok());
     CHECK (o.value().authMode == "open");
+}
+
+//==============================================================================
+// E11-08: external authentication (trusted proxy, introspection, JWT). No network: injected fetchers and fixed keys.
+namespace
+{
+fs::path writeConfig (const std::string& tag, const std::string& text)
+{
+    const auto file = test::makeTempDir (tag) / "rovox.toml";
+    std::ofstream out (file);
+    out << text;
+    return file;
+}
+
+const char* proxyToml = R"([auth]
+mode = "trusted_proxy"
+[auth.trusted_proxy]
+allow = ["10.0.0.0/8", "fd00::/8"]
+secret = "proxy-secret"
+max_skew_s = 60
+)";
+
+AuthRequest proxyRequest (const std::string& addr, std::int64_t ts, const std::string& path = "/api/projects", const std::string& tenant = "acme",
+                          const std::string& scopes = "read,render", const std::string& secret = "proxy-secret")
+{
+    const std::string method = "GET", subject = "user-7", client = "flute";
+    AuthRequest r;
+    r.remoteAddr = addr;
+    r.method = method;
+    r.path = path;
+    r.headers["x-rovox-tenant"] = tenant;
+    r.headers["x-rovox-subject"] = subject;
+    r.headers["x-rovox-scopes"] = scopes;
+    r.headers["x-rovox-client"] = client;
+    r.headers["x-rovox-ts"] = std::to_string (ts);
+    r.headers["x-rovox-signature"] = hmacSha256Hex (secret, std::to_string (ts) + "\n" + method + "\n" + path + "\n" + tenant + "\n" + subject + "\n" + scopes + "\n" + client);
+    return r;
+}
+
+std::string b64url (const std::string& in)
+{
+    static const char a[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    std::uint32_t acc = 0;
+    int bits = 0;
+
+    for (unsigned char c : in)
+    {
+        acc = (acc << 8) | c;
+        bits += 8;
+
+        while (bits >= 6)
+        {
+            bits -= 6;
+            out += a[(acc >> bits) & 63];
+        }
+    }
+
+    if (bits > 0)
+        out += a[(acc << (6 - bits)) & 63];
+
+    return out;
+}
+
+std::string bnBytes (EVP_PKEY* k, const char* name)
+{
+    BIGNUM* bn = nullptr;
+    EVP_PKEY_get_bn_param (k, name, &bn);
+    std::string out ((size_t) BN_num_bytes (bn), '\0');
+    BN_bn2bin (bn, reinterpret_cast<unsigned char*> (out.data()));
+    BN_free (bn);
+    return out;
+}
+
+struct TestKey
+{
+    EVP_PKEY* key = nullptr;
+    std::string kid, kty;
+
+    TestKey (const std::string& id, bool ec) : kid (id), kty (ec ? "EC" : "RSA")
+    {
+        key = ec ? EVP_PKEY_Q_keygen (nullptr, nullptr, "EC", "P-256") : EVP_PKEY_Q_keygen (nullptr, nullptr, "RSA", (size_t) 2048);
+    }
+
+    ~TestKey() { EVP_PKEY_free (key); }
+    TestKey (const TestKey&) = delete;
+    TestKey& operator= (const TestKey&) = delete;
+
+    json jwk() const
+    {
+        json j = json::object();
+        j["kid"] = kid;
+        j["kty"] = kty;
+
+        if (kty == "RSA")
+        {
+            j["n"] = b64url (bnBytes (key, "n"));
+            j["e"] = b64url (bnBytes (key, "e"));
+            return j;
+        }
+
+        unsigned char pub[65];
+        size_t len = 0;
+        EVP_PKEY_get_octet_string_param (key, "pub", pub, sizeof (pub), &len);
+        j["crv"] = "P-256";
+        j["x"] = b64url (std::string (reinterpret_cast<char*> (pub + 1), 32));
+        j["y"] = b64url (std::string (reinterpret_cast<char*> (pub + 33), 32));
+        return j;
+    }
+
+    std::string sign (const std::string& message) const
+    {
+        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+        EVP_DigestSignInit (ctx, nullptr, EVP_sha256(), nullptr, key);
+        size_t len = 0;
+        EVP_DigestSign (ctx, nullptr, &len, reinterpret_cast<const unsigned char*> (message.data()), message.size());
+        std::string sig (len, '\0');
+        EVP_DigestSign (ctx, reinterpret_cast<unsigned char*> (sig.data()), &len, reinterpret_cast<const unsigned char*> (message.data()), message.size());
+        sig.resize (len);
+        EVP_MD_CTX_free (ctx);
+
+        if (kty == "EC")
+        {
+            const auto* p = reinterpret_cast<const unsigned char*> (sig.data());
+            ECDSA_SIG* es = d2i_ECDSA_SIG (nullptr, &p, (long) sig.size());
+            const BIGNUM* r = nullptr;
+            const BIGNUM* sv = nullptr;
+            ECDSA_SIG_get0 (es, &r, &sv);
+            std::string raw (64, '\0');
+            BN_bn2binpad (r, reinterpret_cast<unsigned char*> (raw.data()), 32);
+            BN_bn2binpad (sv, reinterpret_cast<unsigned char*> (raw.data()) + 32, 32);
+            ECDSA_SIG_free (es);
+            return raw;
+        }
+
+        return sig;
+    }
+
+    std::string jwt (const json& claims, const std::string& alg = "") const
+    {
+        json header = json::object();
+        header["alg"] = alg.empty() ? std::string (kty == "EC" ? "ES256" : "RS256") : alg;
+        header["typ"] = "JWT";
+        header["kid"] = kid;
+        const auto head = b64url (header.dump());
+        const auto body = b64url (claims.dump());
+        return head + "." + body + "." + b64url (sign (head + "." + body));
+    }
+};
+
+/** A scripted identity provider: counts the calls, answers from the fields. */
+struct FakeIdp
+{
+    std::atomic<int> introspections { 0 }, jwksFetches { 0 };
+    std::mutex mutex;
+    int introspectStatus = 200;
+    std::string introspectBody, jwksBody, lastIntrospectBody, lastAuthorization;
+
+    HttpFetcher fetcher()
+    {
+        return [this] (const std::string& method, const std::string& url, const std::string& body, const std::map<std::string, std::string>& headers) -> HttpReply
+        {
+            std::lock_guard<std::mutex> lock (mutex);
+
+            if (method == "POST" && url == "https://idp.test/introspect")
+            {
+                ++introspections;
+                lastIntrospectBody = body;
+                lastAuthorization = headers.count ("Authorization") != 0 ? headers.at ("Authorization") : std::string();
+                return { introspectStatus, introspectBody };
+            }
+
+            if (method == "GET" && url == "https://idp.test/jwks.json")
+            {
+                ++jwksFetches;
+                return { jwksBody.empty() ? 0 : 200, jwksBody };
+            }
+
+            return {};
+        };
+    }
+};
+
+const char* introspectionToml = R"([auth]
+mode = "introspection"
+[auth.introspection]
+url = "https://idp.test/introspect"
+client_id = "rovox"
+client_secret = "idp-secret"
+jwks_url = "https://idp.test/jwks.json"
+issuer = "https://idp.test"
+audience = "rovox-api"
+resource = "https://rovox.example.com/"
+)";
+
+AuthRequest bearer (const std::string& token)
+{
+    AuthRequest r;
+    r.authorization = "Bearer " + token;
+    return r;
+}
+} // namespace
+
+ROVOX_TEST (auth, external_cidr_matching_v4_v6_and_boundaries)
+{
+    auto net = parseCidr ("10.0.0.0/8");
+    REQUIRE (net.has_value());
+    CHECK (cidrContains (*net, "10.0.0.0"));
+    CHECK (cidrContains (*net, "10.255.255.255"));
+    CHECK (! cidrContains (*net, "11.0.0.0"));
+    CHECK (! cidrContains (*net, "9.255.255.255"));
+    CHECK (! cidrContains (*net, "::1"));
+    CHECK (! cidrContains (*net, "not an address"));
+    CHECK (cidrContains (*net, "::ffff:10.1.2.3"));        // IPv4-mapped counts as IPv4
+
+    auto odd = parseCidr ("192.168.1.128/25");
+    REQUIRE (odd.has_value());
+    CHECK (cidrContains (*odd, "192.168.1.200"));
+    CHECK (! cidrContains (*odd, "192.168.1.127"));
+
+    auto single = parseCidr ("203.0.113.5");
+    REQUIRE (single.has_value());
+    CHECK (cidrContains (*single, "203.0.113.5"));
+    CHECK (! cidrContains (*single, "203.0.113.6"));
+
+    auto v6 = parseCidr ("fd00::/8");
+    REQUIRE (v6.has_value());
+    CHECK (cidrContains (*v6, "fd12:3456::1"));
+    CHECK (! cidrContains (*v6, "fe80::1"));
+    CHECK (! cidrContains (*v6, "10.0.0.1"));
+
+    auto all = parseCidr ("0.0.0.0/0");
+    REQUIRE (all.has_value());
+    CHECK (cidrContains (*all, "198.51.100.1"));
+
+    CHECK (! parseCidr ("10.0.0.0/33").has_value());
+    CHECK (! parseCidr ("10.0.0.0/").has_value());
+    CHECK (! parseCidr ("nonsense/8").has_value());
+    CHECK (! parseCidr ("").has_value());
+}
+
+ROVOX_TEST (auth, trusted_proxy_accepts_signed_requests_and_rejects_the_rest)
+{
+    const auto cfg = writeConfig ("auth-proxy", proxyToml);
+    Authenticator auth (nullptr, "", cfg);
+    std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+    CHECK (! auth.open());
+
+    auto ok = auth.resolve (proxyRequest ("10.1.2.3", now));
+    REQUIRE (ok.ok());
+    CHECK (ok.value().tenant == "acme");
+    CHECK (ok.value().subject == "user-7");
+    CHECK (ok.value().client == "flute");
+    CHECK (ok.value().authMode == "trusted_proxy");
+    CHECK (ok.value().has (Scope::projectsRead));
+    CHECK (ok.value().has (Scope::render));
+    CHECK (! ok.value().has (Scope::projectsWrite));
+    CHECK (auth.resolve (proxyRequest ("fd00::5", now)).ok());
+
+    // a bad signature, another path than the signed one, another tenant, other scopes
+    CHECK (auth.resolve (proxyRequest ("10.1.2.3", now, "/api/projects", "acme", "read,render", "other-secret")).error().code == errc::unauthorized);
+    auto movedPath = proxyRequest ("10.1.2.3", now);
+    movedPath.path = "/api/admin";
+    CHECK (! auth.resolve (movedPath).ok());
+    auto movedTenant = proxyRequest ("10.1.2.3", now);
+    movedTenant.headers["x-rovox-tenant"] = "rival";
+    CHECK (! auth.resolve (movedTenant).ok());
+    auto movedScopes = proxyRequest ("10.1.2.3", now);
+    movedScopes.headers["x-rovox-scopes"] = "write";
+    CHECK (! auth.resolve (movedScopes).ok());
+
+    // the timestamp: 60 s on either side passes, 61 s does not
+    CHECK (auth.resolve (proxyRequest ("10.1.2.3", now - 60)).ok());
+    CHECK (auth.resolve (proxyRequest ("10.1.2.3", now + 60)).ok());
+    CHECK (! auth.resolve (proxyRequest ("10.1.2.3", now - 61)).ok());
+    CHECK (! auth.resolve (proxyRequest ("10.1.2.3", now + 61)).ok());
+
+    // invalid tenant id and unknown scope, even when correctly signed
+    CHECK (! auth.resolve (proxyRequest ("10.1.2.3", now, "/x", "Bad Tenant!")).ok());
+    CHECK (! auth.resolve (proxyRequest ("10.1.2.3", now, "/x", "acme", "teleport")).ok());
+}
+
+ROVOX_TEST (auth, trusted_proxy_admin_is_for_the_local_tenant_only)
+{
+    const auto cfg = writeConfig ("auth-proxy-admin", proxyToml);
+    Authenticator auth (nullptr, "", cfg);
+    const std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+
+    auto acme = auth.resolve (proxyRequest ("10.0.0.9", now, "/x", "acme", "admin,render"));
+    REQUIRE (acme.ok());
+    CHECK (! acme.value().has (Scope::admin));
+    CHECK (acme.value().has (Scope::render));
+
+    auto local = auth.resolve (proxyRequest ("10.0.0.9", now, "/x", "local", "admin"));
+    REQUIRE (local.ok());
+    CHECK (local.value().has (Scope::admin));
+}
+
+ROVOX_TEST (auth, trusted_proxy_ignores_headers_from_outside_the_allowlist)
+{
+    const auto cfg = writeConfig ("auth-proxy-spoof", proxyToml);
+    Authenticator auth (nullptr, "legacy-tok", cfg);
+    const std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+
+    // a perfectly signed request, but from 203.0.113.5: the headers are not a credential
+    auto spoofed = proxyRequest ("203.0.113.5", now);
+    auto r = auth.resolve (spoofed);
+    CHECK (! r.ok());
+    CHECK (r.error().code == errc::unauthorized);
+
+    // with a valid bearer the request is that bearer's principal, never the one the headers claim
+    spoofed.authorization = "Bearer legacy-tok";
+    auto viaBearer = auth.resolve (spoofed);
+    REQUIRE (viaBearer.ok());
+    CHECK (viaBearer.value().tenant == "local");
+    CHECK (viaBearer.value().authMode == "legacy");
+    CHECK (viaBearer.value().subject.empty());
+
+    // from an allowlisted address without any X-Rovox-* headers the request is an ordinary one
+    AuthRequest plain;
+    plain.remoteAddr = "10.1.1.1";
+    plain.authorization = "Bearer legacy-tok";
+    CHECK (auth.resolve (plain).value().authMode == "legacy");
+    plain.authorization.clear();
+    CHECK (! auth.resolve (plain).ok());
+}
+
+ROVOX_TEST (auth, trusted_proxy_fails_closed_without_a_secret)
+{
+    const auto cfg = writeConfig ("auth-proxy-nosecret", "[auth]\nmode = \"trusted_proxy\"\n[auth.trusted_proxy]\nallow = [\"10.0.0.0/8\"]\nsecret_ref = \"ROVOX_TEST_UNSET_SECRET_VAR\"\n");
+    Authenticator auth (nullptr, "", cfg);
+    const std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+    CHECK (! auth.resolve (proxyRequest ("10.0.0.1", now, "/x", "acme", "read", "")).ok());
+}
+
+ROVOX_TEST (auth, native_keys_are_valid_only_in_the_token_mode)
+{
+    KeyStore store (keyFile ("auth-ext-native"));
+    auto created = store.create (spec ("acme", ScopeSet::of ({ Scope::render })));
+    REQUIRE (created.ok());
+    const auto key = created.value().key;
+
+    CHECK (Authenticator (&store, "").resolve (key).ok());
+
+    const auto proxyCfg = writeConfig ("auth-ext-native-proxy", proxyToml);
+    Authenticator proxied (&store, "tok", proxyCfg);
+    CHECK (proxied.resolve (key).error().code == errc::unauthorized);
+    CHECK (! proxied.resolve (bearer (key)).ok());
+    CHECK (proxied.resolve ("tok").ok());                       // the legacy operator token works in every mode
+
+    // in introspection mode a native key is refused without asking the provider
+    FakeIdp idp;
+    idp.introspectBody = R"({"active":true,"tenant":"acme"})";
+    const auto cfg = writeConfig ("auth-ext-native-introspection", introspectionToml);
+    Authenticator introspected (&store, "", cfg);
+    introspected.external().setFetcher (idp.fetcher());
+    CHECK (introspected.resolve (key).error().code == errc::unauthorized);
+    CHECK (idp.introspections.load() == 0);
+
+    // a session cookie of a native key does not outlive the switch to an external mode
+    Authenticator tokenMode (&store, "");
+    auto principal = tokenMode.resolve (key);
+    REQUIRE (principal.ok());
+    AuthRequest cookieOnly;
+    cookieOnly.cookie = "rovox_session=" + tokenMode.issueSession (principal.value());
+    CHECK (tokenMode.resolve (cookieOnly).ok());
+    CHECK (! proxied.resolve (cookieOnly).ok());
+}
+
+ROVOX_TEST (auth, introspection_cache_honours_positive_and_negative_ttl)
+{
+    FakeIdp idp;
+    const auto cfg = writeConfig ("auth-introspection-cache", introspectionToml);
+    Authenticator auth (nullptr, "", cfg);
+    std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+    auth.external().setFetcher (idp.fetcher());
+
+    idp.introspectBody = R"({"active":true,"sub":"u1","client_id":"app","tenant":"acme","scope":"read render openid"})";
+    auto p = auth.resolve (bearer ("opaque-token-1"));
+    REQUIRE (p.ok());
+    CHECK (p.value().tenant == "acme");
+    CHECK (p.value().subject == "u1");
+    CHECK (p.value().client == "app");
+    CHECK (p.value().authMode == "introspection");
+    CHECK (p.value().has (Scope::render));
+    CHECK (p.value().has (Scope::catalogRead));
+    CHECK (idp.introspections.load() == 1);
+    CHECK (test::contains (idp.lastIntrospectBody, "token=opaque-token-1"));
+    CHECK (idp.lastAuthorization.rfind ("Basic ", 0) == 0);
+
+    // within the TTL the provider is not asked again; after 61 s it is
+    now += 59;
+    CHECK (auth.resolve (bearer ("opaque-token-1")).ok());
+    CHECK (idp.introspections.load() == 1);
+    now += 2;
+    CHECK (auth.resolve (bearer ("opaque-token-1")).ok());
+    CHECK (idp.introspections.load() == 2);
+
+    // an inactive token is remembered for about 5 s
+    idp.introspectBody = R"({"active":false})";
+    CHECK (! auth.resolve (bearer ("opaque-token-2")).ok());
+    CHECK (! auth.resolve (bearer ("opaque-token-2")).ok());
+    CHECK (idp.introspections.load() == 3);
+    now += 4;
+    CHECK (! auth.resolve (bearer ("opaque-token-2")).ok());
+    CHECK (idp.introspections.load() == 3);
+    now += 2;
+    idp.introspectBody = R"({"active":true,"tenant":"acme"})";
+    CHECK (auth.resolve (bearer ("opaque-token-2")).ok());     // the negative entry has expired
+    CHECK (idp.introspections.load() == 4);
+}
+
+ROVOX_TEST (auth, introspection_positive_entry_never_outlives_exp_and_errors_are_not_cached)
+{
+    FakeIdp idp;
+    const auto cfg = writeConfig ("auth-introspection-exp", introspectionToml);
+    Authenticator auth (nullptr, "", cfg);
+    std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+    auth.external().setFetcher (idp.fetcher());
+
+    idp.introspectBody = R"({"active":true,"tenant":"acme","exp":1800000010})";
+    CHECK (auth.resolve (bearer ("short-lived")).ok());
+    now += 9;
+    CHECK (auth.resolve (bearer ("short-lived")).ok());
+    CHECK (idp.introspections.load() == 1);
+    now += 2;                                                   // past exp: asked again, and the answer is "expired"
+    CHECK (! auth.resolve (bearer ("short-lived")).ok());
+    CHECK (idp.introspections.load() == 2);
+
+    // a provider failure fails closed and is not cached: the next request asks again
+    idp.introspectStatus = 503;
+    CHECK (! auth.resolve (bearer ("flaky")).ok());
+    CHECK (! auth.resolve (bearer ("flaky")).ok());
+    CHECK (idp.introspections.load() == 4);
+    idp.introspectStatus = 200;
+    idp.introspectBody = R"({"active":true,"tenant":"acme"})";
+    CHECK (auth.resolve (bearer ("flaky")).ok());
+
+    // no tenant claim, or a malformed one, is no principal
+    idp.introspectBody = R"({"active":true,"sub":"u"})";
+    CHECK (! auth.resolve (bearer ("no-tenant")).ok());
+    idp.introspectBody = R"({"active":true,"tenant":"Not Valid"})";
+    CHECK (! auth.resolve (bearer ("bad-tenant")).ok());
+    idp.introspectBody = "not json";
+    CHECK (! auth.resolve (bearer ("garbage")).ok());
+
+    // admin from a provider is stripped for foreign tenants
+    idp.introspectBody = R"({"active":true,"tenant":"acme","scope":"admin render"})";
+    auto p = auth.resolve (bearer ("greedy"));
+    REQUIRE (p.ok());
+    CHECK (! p.value().has (Scope::admin));
+}
+
+ROVOX_TEST (auth, introspection_over_real_http_posts_a_form_with_client_credentials)
+{
+    test::Mock idp;
+    idp.defaultReply = { 200, R"({"active":true,"tenant":"acme","sub":"u9"})" };
+    const auto cfg = writeConfig ("auth-introspection-http", "[auth]\nmode = \"introspection\"\n[auth.introspection]\nurl = \"" + idp.url() + "/oauth/introspect\"\nclient_id = \"rovox\"\nclient_secret = \"idp-secret\"\n");
+    Authenticator auth (nullptr, "", cfg);
+
+    auto p = auth.resolve (bearer ("t0k3n"));
+    REQUIRE (p.ok());
+    CHECK (p.value().subject == "u9");
+    REQUIRE (idp.count() == 1);
+    const auto got = idp.at (0);
+    CHECK (got.method == "POST");
+    CHECK (got.path == "/oauth/introspect");
+    CHECK (test::contains (got.body, "token=t0k3n"));
+    CHECK (test::contains (test::header (got, "Authorization"), "Basic "));
+    CHECK (! test::contains (test::header (got, "Authorization"), "idp-secret"));     // base64 only, never the plain secret
+
+    // a dead endpoint is a 401, not a hang
+    Authenticator dead (nullptr, "", writeConfig ("auth-introspection-dead", "[auth]\nmode = \"introspection\"\n[auth.introspection]\nurl = \"http://127.0.0.1:1/introspect\"\n"));
+    CHECK (! dead.resolve (bearer ("t0k3n")).ok());
+}
+
+ROVOX_TEST (auth, jwt_rs256_and_es256_are_verified_against_the_jwks)
+{
+    TestKey rsa ("rsa-1", false), ec ("ec-1", true);
+    FakeIdp idp;
+    idp.jwksBody = json { { "keys", json::array ({ rsa.jwk(), ec.jwk() }) } }.dump();
+    const auto cfg = writeConfig ("auth-jwt", introspectionToml);
+    Authenticator auth (nullptr, "", cfg);
+    const std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+    auth.external().setFetcher (idp.fetcher());
+
+    json good = json::object();
+    good["iss"] = "https://idp.test";
+    good["aud"] = "rovox-api";
+    good["exp"] = now + 3600;
+    good["nbf"] = now - 10;
+    good["sub"] = "u1";
+    good["tenant"] = "acme";
+    good["scope"] = "read render";
+    good["client_id"] = "flute";
+
+    auto viaRsa = auth.resolve (bearer (rsa.jwt (good)));
+    REQUIRE (viaRsa.ok());
+    CHECK (viaRsa.value().tenant == "acme");
+    CHECK (viaRsa.value().subject == "u1");
+    CHECK (viaRsa.value().client == "flute");
+    CHECK (viaRsa.value().has (Scope::render));
+
+    auto viaEc = auth.resolve (bearer (ec.jwt (good)));
+    REQUIRE (viaEc.ok());
+    CHECK (viaEc.value().tenant == "acme");
+
+    // the audience may be an array
+    json arrayAud = good;
+    arrayAud["aud"] = json::array ({ "other", "rovox-api" });
+    CHECK (auth.resolve (bearer (rsa.jwt (arrayAud))).ok());
+
+    CHECK (idp.jwksFetches.load() == 1);                        // the key set is cached
+    CHECK (idp.introspections.load() == 0);                     // a JWT does not go to the introspection endpoint
+}
+
+ROVOX_TEST (auth, jwt_with_wrong_claims_signature_or_algorithm_is_unauthorized)
+{
+    TestKey rsa ("rsa-1", false), stranger ("rsa-1", false);
+    FakeIdp idp;
+    idp.jwksBody = json { { "keys", json::array ({ rsa.jwk() }) } }.dump();
+    const auto cfg = writeConfig ("auth-jwt-bad", introspectionToml);
+    Authenticator auth (nullptr, "", cfg);
+    const std::int64_t now = 1'800'000'000;
+    auth.external().setClock ([&] { return now; });
+    auth.external().setFetcher (idp.fetcher());
+
+    json good = json::object();
+    good["iss"] = "https://idp.test";
+    good["aud"] = "rovox-api";
+    good["exp"] = now + 3600;
+    good["tenant"] = "acme";
+    REQUIRE (auth.resolve (bearer (rsa.jwt (good))).ok());
+
+    auto with = [&] (const char* name, const json& value) { json c = good; c[name] = value; return c; };
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("iss", "https://evil.test")))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("aud", "someone-else")))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("aud", json::array ({ "a", "b" }))))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("exp", now - 1)))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("exp", now)))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("nbf", now + 100)))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (with ("tenant", "Not Valid")))).ok());
+
+    json noExp = good;
+    noExp.erase ("exp");
+    CHECK (! auth.resolve (bearer (rsa.jwt (noExp))).ok());
+
+    // signed with another key under the same kid
+    CHECK (! auth.resolve (bearer (stranger.jwt (good))).ok());
+
+    // a tampered payload keeps the old signature
+    const auto token = rsa.jwt (good);
+    const auto firstDot = token.find ('.');
+    const auto secondDot = token.find ('.', firstDot + 1);
+    json forged = good;
+    forged["tenant"] = "rival";
+    CHECK (! auth.resolve (bearer (token.substr (0, firstDot + 1) + b64url (forged.dump()) + token.substr (secondDot))).ok());
+
+    // alg none, with and without a signature; HS256 keyed with the public material
+    const auto noneHead = b64url (R"({"alg":"none","typ":"JWT"})");
+    const auto body = b64url (good.dump());
+    CHECK (! auth.resolve (bearer (noneHead + "." + body + ".")).ok());
+    CHECK (! auth.resolve (bearer (noneHead + "." + body + ".AAAA")).ok());
+    const auto hsHead = b64url (R"({"alg":"HS256","typ":"JWT","kid":"rsa-1"})");
+    const auto hsMac = hmacSha256 (rsa.jwk()["n"].get<std::string>(), hsHead + "." + body);
+    CHECK (! auth.resolve (bearer (hsHead + "." + body + "." + b64url (std::string (hsMac.begin(), hsMac.end())))).ok());
+
+    // an RS256 header over an EC key (algorithm confusion)
+    TestKey ec ("rsa-1", true);
+    idp.jwksBody = json { { "keys", json::array ({ ec.jwk() }) } }.dump();
+    Authenticator second (nullptr, "", cfg);
+    second.external().setClock ([&] { return now; });
+    second.external().setFetcher (idp.fetcher());
+    CHECK (! second.resolve (bearer (ec.jwt (good, "RS256"))).ok());
+    CHECK (second.resolve (bearer (ec.jwt (good))).ok());
+}
+
+ROVOX_TEST (auth, jwt_needs_a_pinned_issuer_and_audience_and_an_answering_issuer)
+{
+    TestKey rsa ("rsa-1", false);
+    FakeIdp idp;
+    idp.jwksBody = json { { "keys", json::array ({ rsa.jwk() }) } }.dump();
+    const std::int64_t now = 1'800'000'000;
+    json claims = json::object();
+    claims["iss"] = "https://idp.test";
+    claims["aud"] = "rovox-api";
+    claims["exp"] = now + 60;
+    claims["tenant"] = "acme";
+
+    // no audience configured: JWTs are not accepted at all
+    Authenticator unpinned (nullptr, "", writeConfig ("auth-jwt-unpinned", "[auth]\nmode = \"introspection\"\n[auth.introspection]\njwks_url = \"https://idp.test/jwks.json\"\nissuer = \"https://idp.test\"\n"));
+    unpinned.external().setClock ([&] { return now; });
+    unpinned.external().setFetcher (idp.fetcher());
+    CHECK (! unpinned.resolve (bearer (rsa.jwt (claims))).ok());
+
+    // the JWKS endpoint is down: 401, and the next request tries again
+    FakeIdp down;
+    Authenticator auth (nullptr, "", writeConfig ("auth-jwt-down", introspectionToml));
+    auth.external().setClock ([&] { return now; });
+    auth.external().setFetcher (down.fetcher());
+    CHECK (! auth.resolve (bearer (rsa.jwt (claims))).ok());
+    CHECK (! auth.resolve (bearer (rsa.jwt (claims))).ok());
+    CHECK (down.jwksFetches.load() == 2);
+    down.jwksBody = idp.jwksBody;
+    CHECK (auth.resolve (bearer (rsa.jwt (claims))).ok());
+}
+
+ROVOX_TEST (auth, protected_resource_metadata_and_challenge_follow_the_mode)
+{
+    Authenticator introspected (nullptr, "", writeConfig ("auth-metadata", introspectionToml));
+    CHECK (introspected.challengeHeader() == "Bearer resource_metadata=\"https://rovox.example.com/.well-known/oauth-protected-resource\"");
+    auto meta = introspected.resourceMetadata();
+    REQUIRE (meta.has_value());
+    CHECK ((*meta)["resource"] == "https://rovox.example.com/");
+    CHECK ((*meta)["authorization_servers"][0] == "https://idp.test");
+    CHECK ((*meta)["bearer_methods_supported"][0] == "header");
+
+    // nothing is advertised in the other modes, nor without a resource
+    Authenticator proxied (nullptr, "", writeConfig ("auth-metadata-proxy", proxyToml));
+    CHECK (proxied.challengeHeader().empty());
+    CHECK (! proxied.resourceMetadata().has_value());
+    Authenticator bare (nullptr, "", writeConfig ("auth-metadata-bare", "[auth]\nmode = \"introspection\"\n[auth.introspection]\nurl = \"https://idp.test/introspect\"\n"));
+    CHECK (bare.challengeHeader().empty());
+    CHECK (! bare.resourceMetadata().has_value());
+
+    // no config file, an unknown mode and a broken file all mean the token mode
+    Authenticator missing (nullptr, "", test::makeTempDir ("auth-metadata-none") / "missing.toml");
+    CHECK (missing.external().mode() == AuthMode::token);
+    Authenticator unknown (nullptr, "", writeConfig ("auth-metadata-unknown", "[auth]\nmode = \"magic\"\n"));
+    CHECK (unknown.external().mode() == AuthMode::token);
+    Authenticator broken (nullptr, "", writeConfig ("auth-metadata-broken", "[auth\nmode = "));
+    CHECK (broken.external().mode() == AuthMode::token);
+}
+
+ROVOX_TEST (auth, external_modes_never_open_the_server_and_secrets_stay_out_of_errors)
+{
+    Authenticator proxied (nullptr, "", writeConfig ("auth-closed", proxyToml));
+    CHECK (! proxied.open());
+    auto r = proxied.resolve (AuthRequest {});
+    CHECK (! r.ok());
+    CHECK (! test::contains (r.error().message, "proxy-secret"));
+
+    FakeIdp idp;
+    idp.introspectBody = R"({"active":false})";
+    Authenticator introspected (nullptr, "", writeConfig ("auth-closed-introspection", introspectionToml));
+    introspected.external().setFetcher (idp.fetcher());
+    auto q = introspected.resolve (bearer ("super-secret-token"));
+    CHECK (! q.ok());
+    CHECK (! test::contains (q.error().message, "super-secret-token"));
+    CHECK (q.error().details.is_null());
 }
