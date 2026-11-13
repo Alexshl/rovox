@@ -98,15 +98,7 @@ void installMcpRoutes (httplib::Server& svr, McpServer& server, McpHttpOptions o
         if (auth == nullptr)
             return Principal::local();
 
-        AuthRequest a;
-        a.authorization = req.get_header_value ("Authorization");
-        a.cookie = req.get_header_value ("Cookie");
-        a.remoteAddr = req.remote_addr;
-        a.method = req.method;
-        a.path = req.path;
-
-        if (req.method == "GET" && req.has_param ("token"))
-            a.queryToken = req.get_param_value ("token");
+        const auto a = authRequestOf (req);
 
         auto resolved = auth->resolve (a);
 

@@ -25,7 +25,9 @@
 #include "WebSocket.h"
 
 #include <atomic>
+#include <chrono>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 
@@ -77,7 +79,7 @@ private:
         std::shared_ptr<WsConnection> conn;
         std::mutex mutex;
         std::map<std::string, Sub> subs;        // by project id
-        std::atomic<bool> wantAudio { false }, needDiscontinuity { false };
+        std::atomic<bool> wantAudio { false }, needDiscontinuity { false }, revoked { false };
         std::string coalesceKey, coalesceProject;
         std::chrono::steady_clock::time_point coalesceAt;
     };

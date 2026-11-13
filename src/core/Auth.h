@@ -7,6 +7,9 @@
 
 #include "Result.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
@@ -115,6 +118,9 @@ public:
     /** True when there is no legacy token and no keys: every request is the local operator (today's loopback behaviour). */
     bool open() const;
 
+    /** Set by serve when the bind is not loopback: from then on open() is false even if keys.json disappears. It also latches by itself once keys were seen. */
+    void setRequireCredentials (bool on);
+
     /** `presented` is the Authorization header value ("Bearer ...") or a raw token; empty = nothing presented.
         Fails with UNAUTHORIZED; neither the message nor the details ever contain the secret. */
     Result<Principal> resolve (std::string_view presented) const;
@@ -149,6 +155,32 @@ private:
     mutable std::mutex keyMutex_;
     std::filesystem::path sessionKeyFile_;
     mutable std::string sessionKey_;
+    mutable std::atomic<bool> requireCredentials_ { false };
 };
+
+/** The credentials of one HTTP request (httplib::Request or alike) as an AuthRequest: headers copied with lower-case names; `?token=` only for GET. */
+template <class Request>
+AuthRequest authRequestOf (const Request& req)
+{
+    AuthRequest a;
+    a.authorization = req.get_header_value ("Authorization");
+    a.cookie = req.get_header_value ("Cookie");
+    a.remoteAddr = req.remote_addr;
+    a.method = req.method;
+    a.path = req.path;
+
+    // `?token=` opens the page URL (GET) only; it is never a credential for a state-changing request
+    if (req.method == "GET" && req.has_param ("token"))
+        a.queryToken = req.get_param_value ("token");
+
+    for (const auto& h : req.headers)
+    {
+        auto name = h.first;
+        std::transform (name.begin(), name.end(), name.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
+        a.headers[name] = h.second;
+    }
+
+    return a;
+}
 
 } // namespace rovox

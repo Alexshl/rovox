@@ -803,6 +803,8 @@ ROVOX_TEST (upload, create_checks_the_storage_quota_of_the_calling_tenant)
     REQUIRE (big != nullptr);
     CHECK (big->status == 429);
     CHECK (big->body.find ("QUOTA_EXCEEDED") != std::string::npos);
+    CHECK (! big->get_header_value ("Retry-After").empty());     // every 429 says when to come back
+    CHECK (std::stoi (big->get_header_value ("Retry-After")) >= 1);
 
     // no credentials: refused before the quota is looked at
     auto anonymous = f.client->Post ("/api/uploads", httplib::Headers { { "Tus-Resumable", "1.0.0" }, { "Upload-Length", "100" } }, "", "");

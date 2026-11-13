@@ -790,6 +790,7 @@ int runServe (const Options& o)
 
     Authenticator authenticator (&keys, so.token, configFile);
     authenticator.setSessionKeyFile (cfg.dataDir / "auth" / "session.key");
+    authenticator.setRequireCredentials (! loopback);   // keys.json removed later must not turn an exposed server into an open one
     so.authenticator = &authenticator;
     so.sessionKeyFile = cfg.dataDir / "auth" / "session.key";
 

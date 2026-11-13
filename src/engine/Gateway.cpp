@@ -497,8 +497,9 @@ void Gateway::timerCallback()
         lastRevocationCheck_ = now;
 
         for (auto& c : all)
-            if (! auth_->stillValid (c->principal))
+            if (! c->revoked && ! auth_->stillValid (c->principal))
             {
+                c->revoked = true;                                  // one close frame, however long the connection takes to wind down
                 const std::uint8_t status[2] = { 0x03, 0xF0 };      // 1008 policy violation
                 c->conn->sendBinary (encodeWsFrame (0x8, status, sizeof status), false);
                 c->conn->close();

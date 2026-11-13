@@ -93,6 +93,40 @@ Principal legacyPrincipal()
     return p;
 }
 
+/** What the session cookie's HMAC covers; the legacy cookie is bound to the token, so changing the token invalidates it. */
+std::string macInput (const std::string& keyId, const std::string& exp, const std::string& legacyToken)
+{
+    if (keyId == "legacy")
+        return "legacy:" + sha256Hex (legacyToken) + "." + exp;
+
+    return keyId + "." + exp;
+}
+
+/** The 32-byte secret in `file`, if it is there; a looser mode than 0600 is repaired. */
+bool readSessionKeyFile (const std::filesystem::path& file, std::string& out)
+{
+    std::error_code ec;
+
+    if (! std::filesystem::is_regular_file (file, ec) || std::filesystem::file_size (file, ec) != 32)
+        return false;
+
+    std::ifstream in (file, std::ios::binary);
+    std::string k (32, '\0');
+    in.read (k.data(), 32);
+
+    if (in.gcount() != 32)
+        return false;
+
+    using std::filesystem::perms;
+    const auto mode = std::filesystem::status (file, ec).permissions();
+
+    if ((mode & (perms::group_all | perms::others_all)) != perms::none)
+        std::filesystem::permissions (file, perms::owner_read | perms::owner_write, ec);
+
+    out = k;
+    return true;
+}
+
 Error unauthorized()
 {
     return makeError (errc::unauthorized, "missing or invalid credentials");
@@ -276,7 +310,20 @@ Authenticator::Authenticator (KeyStore* keys, std::string legacyToken, std::file
 
 bool Authenticator::open() const
 {
-    return legacyToken_.empty() && (keys_ == nullptr || ! keys_->inUse());
+    if (requireCredentials_.load())
+        return false;
+
+    const bool inUse = keys_ != nullptr && keys_->inUse();
+
+    if (inUse)
+        requireCredentials_ = true;     // latched: deleting keys.json later must not open the server
+
+    return legacyToken_.empty() && ! inUse;
+}
+
+void Authenticator::setRequireCredentials (bool on)
+{
+    requireCredentials_ = on;
 }
 
 Principal Authenticator::principalOf (const KeyRecord& rec) const
@@ -387,36 +434,41 @@ std::string Authenticator::sessionKey() const
 
     std::error_code ec;
 
-    if (! sessionKeyFile_.empty() && std::filesystem::is_regular_file (sessionKeyFile_, ec) && std::filesystem::file_size (sessionKeyFile_, ec) == 32)
-    {
-        std::ifstream in (sessionKeyFile_, std::ios::binary);
-        std::string k (32, '\0');
-        in.read (k.data(), 32);
+    std::string k;
 
-        if (in.gcount() == 32)
-            return sessionKey_ = k;
-    }
+    if (! sessionKeyFile_.empty() && readSessionKeyFile (sessionKeyFile_, k))
+        return sessionKey_ = k;
 
-    std::string k (32, '\0');
+    k.assign (32, '\0');
     randomBytes (reinterpret_cast<unsigned char*> (k.data()), 32);
 
     if (! sessionKeyFile_.empty())
     {
-        // atomic: a temporary file next to the target, mode 0600 from the start, then rename
+        // a temporary file next to the target (random suffix), mode 0600 from the start, then a no-clobber link
         std::filesystem::create_directories (sessionKeyFile_.parent_path(), ec);
-        const auto tmp = sessionKeyFile_.string() + ".tmp" + std::to_string ((long) ::getpid());
-        const int fd = ::open (tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        std::array<unsigned char, 8> r {};
+        randomBytes (r.data(), (int) r.size());
+        std::string suffix;
+
+        for (auto b : r)
+            suffix += base32[b & 31];
+
+        const auto tmp = sessionKeyFile_.string() + ".tmp" + suffix;
+        const int fd = ::open (tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 
         if (fd >= 0)
         {
             const bool written = ::write (fd, k.data(), k.size()) == (ssize_t) k.size();
             ::close (fd);
 
+            // link() fails when the file already exists: another process won the race and its key is the one to use
             if (written)
-                std::filesystem::rename (tmp, sessionKeyFile_, ec);
-            else
-                std::filesystem::remove (tmp, ec);
+                ::link (tmp.c_str(), sessionKeyFile_.c_str());
+
+            std::filesystem::remove (tmp, ec);
         }
+
+        readSessionKeyFile (sessionKeyFile_, k);    // adopts the winner's key; keeps ours if the file is unusable
     }
 
     return sessionKey_ = k;
@@ -428,8 +480,8 @@ std::string Authenticator::issueSession (const Principal& p, std::int64_t ttlSec
         return {};
 
     const std::int64_t now = keys_ != nullptr ? keys_->now() : (std::int64_t) std::time (nullptr);
-    const auto body = p.keyId + "." + std::to_string (now + ttlSeconds);
-    return body + "." + hmacSha256Hex (sessionKey(), body);
+    const auto exp = std::to_string (now + ttlSeconds);
+    return p.keyId + "." + exp + "." + hmacSha256Hex (sessionKey(), macInput (p.keyId, exp, legacyToken_));
 }
 
 Result<Principal> Authenticator::fromSession (std::string_view value) const
@@ -440,15 +492,15 @@ Result<Principal> Authenticator::fromSession (std::string_view value) const
     if (dot2 == std::string_view::npos)
         return unauthorized();
 
-    const std::string body (value.substr (0, dot2));
     const std::string keyId (value.substr (0, dot1));
+    const std::string expText (value.substr (dot1 + 1, dot2 - dot1 - 1));
 
-    if (! constantTimeEquals (value.substr (dot2 + 1), hmacSha256Hex (sessionKey(), body)))
+    if (! constantTimeEquals (value.substr (dot2 + 1), hmacSha256Hex (sessionKey(), macInput (keyId, expText, legacyToken_))))
         return unauthorized();
 
     std::int64_t exp = 0;
 
-    try { exp = std::stoll (std::string (value.substr (dot1 + 1, dot2 - dot1 - 1))); }
+    try { exp = std::stoll (expText); }
     catch (...) { return unauthorized(); }
 
     const std::int64_t now = keys_ != nullptr ? keys_->now() : (std::int64_t) std::time (nullptr);

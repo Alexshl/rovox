@@ -282,6 +282,28 @@ ROVOX_TEST (auth, with_no_token_and_no_keys_everyone_is_the_local_operator)
     CHECK (! auth.resolve ("").ok());
 }
 
+ROVOX_TEST (auth, a_server_that_required_credentials_stays_closed_when_the_key_file_disappears)
+{
+    // latched by itself: keys were seen once
+    const auto file = keyFile ("auth-latch");
+    KeyStore store (file);
+    Authenticator seen (&store, "");
+    REQUIRE (store.create (spec ("acme", ScopeSet::of ({ Scope::render }))).ok());
+    CHECK (! seen.open());
+    fs::remove (file);
+    std::this_thread::sleep_for (std::chrono::milliseconds (1100));
+    CHECK (! seen.open());
+    CHECK (! seen.resolve ("").ok());
+
+    // set by serve for a non-loopback bind, before any key exists
+    KeyStore none (keyFile ("auth-required"));
+    Authenticator exposed (&none, "");
+    CHECK (exposed.open());
+    exposed.setRequireCredentials (true);
+    CHECK (! exposed.open());
+    CHECK (! exposed.resolve ("").ok());
+}
+
 ROVOX_TEST (auth, an_unreadable_key_file_does_not_open_the_server)
 {
     const auto file = keyFile ("auth-broken");
@@ -444,6 +466,25 @@ ROVOX_TEST (auth, session_cookie_signs_verifies_and_never_holds_the_token)
     // open mode: nothing to log in to
     Authenticator open (nullptr, "");
     CHECK (open.issueSession (Principal::local()).empty());
+}
+
+ROVOX_TEST (auth, legacy_session_cookie_is_bound_to_the_token)
+{
+    const auto dir = test::makeTempDir ("auth-cookie-bound");
+    KeyStore store (dir / "auth" / "keys.json");
+    Authenticator before (&store, "token-one");
+    before.setSessionKeyFile (dir / "auth" / "session.key");
+    auto legacy = before.resolve ("Bearer token-one");
+    REQUIRE (legacy.ok());
+
+    AuthRequest req;
+    req.cookie = cookieOf (before.issueSession (legacy.value()));
+    CHECK (before.resolve (req).ok());
+
+    // the same secret on disk, another server token: the old cookie no longer opens anything
+    Authenticator after (&store, "token-two");
+    after.setSessionKeyFile (dir / "auth" / "session.key");
+    CHECK (! after.resolve (req).ok());
 }
 
 ROVOX_TEST (auth, session_cookie_expires_and_follows_the_key)

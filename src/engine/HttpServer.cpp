@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <ctime>
 #include <fstream>
 #include <limits>
 
@@ -51,11 +52,22 @@ void reply (httplib::Response& res, int status, const json& body)
     res.set_content (body.dump (-1, ' ', false, json::error_handler_t::replace), "application/json");
 }
 
-/** Retry-After (whole seconds, at least 1) from `retry_after_s` in an error's details, when there is one. */
+/** Retry-After for a 429, always: `retry_after_s` of the details, else the seconds until `resets_at` (ceil, at least 1), else 60. */
 void setRetryAfter (httplib::Response& res, const Error& e)
 {
+    double seconds = 60;
+
     if (e.details.is_object() && e.details.contains ("retry_after_s") && e.details["retry_after_s"].is_number())
-        res.set_header ("Retry-After", std::to_string (std::max (1, (int) std::ceil (e.details["retry_after_s"].get<double>()))));
+    {
+        seconds = e.details["retry_after_s"].get<double>();
+    }
+    else if (e.details.is_object() && e.details.contains ("resets_at") && e.details["resets_at"].is_string())
+    {
+        if (const auto at = parseIsoUtc (e.details["resets_at"].get<std::string>()))
+            seconds = *at - (double) std::time (nullptr);
+    }
+
+    res.set_header ("Retry-After", std::to_string (std::max (1, (int) std::ceil (seconds))));
 }
 
 void replyError (httplib::Response& res, const Error& e)
@@ -64,29 +76,6 @@ void replyError (httplib::Response& res, const Error& e)
         setRetryAfter (res, e);
 
     reply (res, statusFor (e.code), { { "ok", false }, { "error", e.toJson() } });
-}
-
-AuthRequest authRequestFrom (const httplib::Request& req)
-{
-    AuthRequest a;
-    a.authorization = req.get_header_value ("Authorization");
-    a.cookie = req.get_header_value ("Cookie");
-    a.remoteAddr = req.remote_addr;
-    a.method = req.method;
-    a.path = req.path;
-
-    // `?token=` opens the page URL (GET) only; it is never a credential for a state-changing request
-    if (req.method == "GET" && req.has_param ("token"))
-        a.queryToken = req.get_param_value ("token");
-
-    for (const auto& h : req.headers)
-    {
-        auto name = h.first;
-        std::transform (name.begin(), name.end(), name.begin(), [] (unsigned char c) { return (char) std::tolower (c); });
-        a.headers[name] = h.second;
-    }
-
-    return a;
 }
 
 /** tus "Upload-Metadata: key base64value,key2 base64value2" */
@@ -250,7 +239,7 @@ void HttpServer::installRoutes()
     // the caller of a request that passed pre-routing (resolved again here, cheap); answers 401 itself when there is none
     auto principalFor = [this] (const httplib::Request& req, httplib::Response& res) -> std::optional<Principal>
     {
-        auto r = auth_->resolve (authRequestFrom (req));
+        auto r = auth_->resolve (authRequestOf (req));
 
         if (r.ok())
             return r.value();
@@ -313,7 +302,7 @@ void HttpServer::installRoutes()
         if (auth_->open())
             return httplib::Server::HandlerResponse::Unhandled;
 
-        auto resolved = auth_->resolve (authRequestFrom (req));
+        auto resolved = auth_->resolve (authRequestOf (req));
 
         // opening the printed URL http://host:4810/?token=... sets the session cookie and drops the token from the address bar
         if (req.path == "/" && req.method == "GET" && req.has_param ("token"))
@@ -341,7 +330,8 @@ void HttpServer::installRoutes()
         if (resolved.ok())
         {
             // MCP POSTs are rate limited in McpHttp (which answers in JSON-RPC); counting them here too would halve the limit
-            if (! apiPath)
+            // tus PATCH chunks are one logical upload, bounded by the upload limits: not one request each against the rate
+            if (! apiPath || (uploadPath && req.method == "PATCH"))
                 return httplib::Server::HandlerResponse::Unhandled;
 
             const auto decision = quotas().checkRate (resolved.value());
@@ -402,7 +392,7 @@ void HttpServer::installRoutes()
 
     svr.Get ("/api/session", [this] (const httplib::Request& req, httplib::Response& res)
     {
-        const auto principal = auth_->resolve (authRequestFrom (req));
+        const auto principal = auth_->resolve (authRequestOf (req));
         json body { { "token_required", ! auth_->open() }, { "authenticated", principal.ok() }, { "version", rovoxVersion() }, { "commit", rovoxGitSha() },
                     { "source_url", options_.sourceUrl }, { "audio", toString (host_.audioMode()) } };
 
@@ -515,7 +505,12 @@ void HttpServer::installRoutes()
         }
 
         auto result = future.get();
-        reply (res, result.ok ? 200 : (result.error ? statusFor (result.error->code) : 500), result.toJson());
+        const int status = result.ok ? 200 : (result.error ? statusFor (result.error->code) : 500);
+
+        if (status == 429 && result.error)
+            setRetryAfter (res, *result.error);
+
+        reply (res, status, result.toJson());
     };
 
     // the origin comes from the route (REST = an agent over HTTP), never from the body: a client must not pass its edits off as the UI's

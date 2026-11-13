@@ -2901,7 +2901,7 @@ ROVOX_TEST (mcp, stdio_tenant_session_has_every_scope_but_admin)
     while (std::getline (out, line))
     {
         const auto j = json::parse (line);
-        byId[j["id"].dump()] = j;
+        byId[j.value ("id", json()).dump()] = j;
     }
 
     REQUIRE (byId.count ("2") == 1);

@@ -153,13 +153,15 @@ std::string CommandBus::labelFor (const std::vector<Op>& ops, const CommandConte
 
 CommandResult CommandBus::runNow (const std::string& name, const json& params, const CommandContext& ctx)
 {
+    // the scope is checked before the command or the project is looked up: a caller without the scope learns nothing about what exists
+    // (a name without a table entry needs `admin`, so unknown names are refused too)
+    if (auto missing = missingScope (ctx.principal, name))
+        return CommandResult::fail (forbiddenScopeError (*missing, name));
+
     auto* cmd = registry_.find(name);
 
     if (cmd == nullptr)
         return CommandResult::fail (makeError (errc::notFound, "unknown command " + name));
-
-    if (auto missing = missingScope (ctx.principal, name))
-        return CommandResult::fail (forbiddenScopeError (*missing, name));
 
     if (cmd->isGlobal())
     {
