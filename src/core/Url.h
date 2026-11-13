@@ -56,7 +56,7 @@ Result<std::vector<std::string>> checkUrlHost (const Url&, const UrlGuard&);
 struct FetchOptions
 {
     std::uint64_t maxBytes = 0;         // 0 = no limit
-    int maxRedirects = 3;
+    int maxRedirects = 0;               // upload.from_url follows none (plan T11); callers may allow a few, each hop is guarded
     int connectTimeoutS = 10;
     int readTimeoutS = 30;
     double totalTimeoutS = 3600;        // a slow trickle cannot hold the job forever

@@ -246,20 +246,26 @@ ROVOX_TEST (url, fetch_checks_every_redirect)
     Site site;
     const auto dest = test::makeTempDir ("url_fetch") / "a.bin";
 
-    auto relative = fetchUrlToFile (site.url ("/relative"), dest, loopbackOptions());
+    // by default no redirect is followed at all
+    auto refused = fetchUrlToFile (site.url ("/relative"), dest, loopbackOptions());
+    CHECK (! refused.ok());
+
+    auto follow = loopbackOptions();
+    follow.maxRedirects = 3;
+    auto relative = fetchUrlToFile (site.url ("/relative"), dest, follow);
     REQUIRE (relative.ok());
     CHECK (relative.value().finalUrl == site.url ("/clip.wav"));
     CHECK (readAll (dest) == audioBytes);
 
-    auto metadata = fetchUrlToFile (site.url ("/to-metadata"), dest, loopbackOptions());       // a public-looking page that bounces to the cloud metadata address
+    auto metadata = fetchUrlToFile (site.url ("/to-metadata"), dest, follow);       // a public-looking page that bounces to the cloud metadata address
     REQUIRE (! metadata.ok());
     CHECK (metadata.error().code == errc::invalidParams);
     CHECK (! fs::exists (dest));
 
-    auto named = fetchUrlToFile (site.url ("/to-localhost-name"), dest, loopbackOptions());     // localhost:1 is loopback (allowed here) but nothing listens: a failure, not a hang
+    auto named = fetchUrlToFile (site.url ("/to-localhost-name"), dest, follow);     // localhost:1 is loopback (allowed here) but nothing listens: a failure, not a hang
     CHECK (! named.ok());
 
-    auto ftp = fetchUrlToFile (site.url ("/ftp"), dest, loopbackOptions());
+    auto ftp = fetchUrlToFile (site.url ("/ftp"), dest, follow);
     CHECK (! ftp.ok());
 
     auto o = loopbackOptions();
