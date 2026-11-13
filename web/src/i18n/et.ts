@@ -12,6 +12,7 @@
 import { etImport } from './parts/et.import';
 import type { MessageKey } from './uk';
 import { etNarrow } from './parts/et.narrow';
+import { etLog } from './parts/et.log';
 
 export const et: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -280,4 +281,5 @@ export const et: Record<MessageKey, string> = {
   'errors.UNKNOWN': 'Toimingut ei õnnestunud teha. Proovi uuesti.',
   ...etImport,
   ...etNarrow,
+  ...etLog,
 };

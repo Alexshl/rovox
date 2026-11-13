@@ -6,6 +6,7 @@
 import { enImport } from './parts/en.import';
 import type { MessageKey } from './uk';
 import { enNarrow } from './parts/en.narrow';
+import { enLog } from './parts/en.log';
 
 export const en: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -274,4 +275,5 @@ export const en: Record<MessageKey, string> = {
   'errors.UNKNOWN': 'The action failed. Try again.',
   ...enImport,
   ...enNarrow,
+  ...enLog,
 };

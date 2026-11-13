@@ -324,7 +324,8 @@ input, select { font: inherit; color: inherit; }
 .log-row .meta .tool.agent { color: var(--rx-agent-cyan); }
 .log-row .text { overflow-wrap: anywhere; }
 .mcp-actions { padding: 10px 12px; border-top: 1px solid var(--rx-hairline); display: flex; gap: 8px; flex: none; }
-.mcp-actions button { flex: 1 1 0; height: 30px; background: var(--rx-panel-700); border: 1px solid var(--rx-hairline); border-radius: var(--rx-radius-sm); }
+/* longer labels (lv, lt, de) take more of the row and end in an ellipsis instead of wrapping out of the 30 px button */
+.mcp-actions button { flex: 1 1 auto; min-width: 0; height: 30px; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--rx-panel-700); border: 1px solid var(--rx-hairline); border-radius: var(--rx-radius-sm); }
 .mcp-actions button:disabled { opacity: 0.45; cursor: default; }
 .mcp-actions button.primary { background: var(--rx-orange); color: var(--rx-panel-900); border: 0; font-weight: 600; }
 .mcp-actions button.primary:disabled { background: var(--rx-panel-700); color: var(--rx-ink-muted); border: 1px solid var(--rx-hairline); font-weight: 400; }

@@ -6,6 +6,7 @@
 // FX, MIDI, BPM, dB, dBFS, LUFS, Hz and the M / S button letters stay as they are (glossary: docs/research/ui-spec-2026-11.md, B).
 import { ukImport } from './parts/uk.import';
 import { ukNarrow } from './parts/uk.narrow';
+import { ukLog } from './parts/uk.log';
 
 export const uk = {
   // ---- menus -------------------------------------------------------------
@@ -274,6 +275,7 @@ export const uk = {
   'errors.UNKNOWN': 'Не вдалося виконати дію. Спробуйте ще раз.',
   ...ukImport,
   ...ukNarrow,
+  ...ukLog,
 } as const;
 
 export type MessageKey = keyof typeof uk;

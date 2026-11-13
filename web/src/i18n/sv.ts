@@ -12,6 +12,7 @@
 import { svImport } from './parts/sv.import';
 import type { MessageKey } from './uk';
 import { svNarrow } from './parts/sv.narrow';
+import { svLog } from './parts/sv.log';
 
 export const sv: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -280,4 +281,5 @@ export const sv: Record<MessageKey, string> = {
   'errors.UNKNOWN': 'Åtgärden misslyckades. Försök igen.',
   ...svImport,
   ...svNarrow,
+  ...svLog,
 };

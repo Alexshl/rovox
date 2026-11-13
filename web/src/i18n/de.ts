@@ -12,6 +12,7 @@
 import { deImport } from './parts/de.import';
 import type { MessageKey } from './uk';
 import { deNarrow } from './parts/de.narrow';
+import { deLog } from './parts/de.log';
 
 export const de: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -280,4 +281,5 @@ export const de: Record<MessageKey, string> = {
   'errors.UNKNOWN': 'Aktion fehlgeschlagen. Erneut versuchen.',
   ...deImport,
   ...deNarrow,
+  ...deLog,
 };

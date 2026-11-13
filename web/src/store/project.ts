@@ -4,6 +4,7 @@
 // Client-side mirror of one open project: normalised by id, kept in step with the server by snapshot + events, with the
 // optimistic edits of the UI and the "touched by an agent" marks (agent-cyan).
 import { Emitter } from '../lib/dom';
+import { plural, t as tr } from '../i18n';
 import { type TempoMap, DEFAULT_TEMPO } from '../lib/time';
 import { TrackItemIndex } from '../lib/itemIndex';
 import type {
@@ -227,11 +228,8 @@ export class ProjectStore {
     const prefix = `${ev.origin.label}: `;
     const label = ev.undo_label.startsWith(prefix) ? ev.undo_label.slice(prefix.length) : ev.undo_label;
     const tool = label.split(' ')[0] ?? label;
-    const fields = new Set<string>();
-    for (const c of ev.changes) for (const f of c.fields ?? []) fields.add(f);
-    const kinds = [...new Set(ev.changes.map((c) => c.kind))].join(', ');
     const rest = label.slice(tool.length).trim();
-    const text = rest || `${kinds}${fields.size ? ': ' + [...fields].slice(0, 4).join(', ') : ''}`;
+    const text = rest || summarizeChanges(ev.changes);
     this.log.unshift({ at: Date.now(), origin: ev.origin, tool, text, revision: ev.revision, ids: ev.changes.map((c) => c.id) });
     if (this.log.length > 200) this.log.length = 200;
     this.agentChanged.emit();
@@ -241,8 +239,8 @@ export class ProjectStore {
     const rows: LogEntry[] = [];
     for (const e of [...entries].reverse()) {
       if (e.ok === false || !e.revision || e.mutating === false) continue;
-      const params = e.params && typeof e.params === 'object' ? JSON.stringify(e.params) : '';
-      rows.push({ at: Date.parse(e.t), origin: e.origin, tool: e.name, text: params.length > 90 ? params.slice(0, 87) + '...' : params, revision: e.revision, ids: [] });
+      const params = describeParams(e.params);
+      rows.push({ at: Date.parse(e.t), origin: e.origin, tool: e.name, text: params.length > 90 ? params.slice(0, 87) + '…' : params, revision: e.revision, ids: [] });
     }
     // events seen since the page opened are newer than the history
     this.log = [...this.log, ...rows.filter((r) => !this.log.some((l) => l.revision === r.revision))].slice(0, 200);
@@ -356,4 +354,37 @@ export class ProjectStore {
   markersSeconds(): number[] {
     return this.markers.map((m) => m.time_s);
   }
+}
+
+const LOG_KINDS = ['track', 'item', 'plugin', 'marker', 'tempo'] as const;
+type LogKind = (typeof LOG_KINDS)[number] | 'other';
+
+/** The activity-log line of a change without a label of its own: counts per operation and kind in the UI language, e.g.
+    «+2 доріжки · +2 кліпи · змінено: 1 FX». Internal kinds and field names are never shown. */
+export function summarizeChanges(changes: readonly { kind: string; op: 'add' | 'update' | 'remove' }[]): string {
+  const parts: string[] = [];
+  for (const op of ['add', 'remove', 'update'] as const) {
+    const counts = new Map<LogKind, number>();
+    for (const c of changes) {
+      if (c.op !== op) continue;
+      const k: LogKind = (LOG_KINDS as readonly string[]).includes(c.kind) ? (c.kind as LogKind) : 'other';
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    const what = [...LOG_KINDS, 'other' as const].filter((k) => counts.has(k)).map((k) => plural(counts.get(k)!, `log.kind.${k}`));
+    if (what.length) parts.push(tr(`log.op.${op}`, { what: what.join(', ') }));
+  }
+  return parts.join(' · ');
+}
+
+/** The history line of a tool call: its plain arguments as `key: value`. Ids (`plan_id`, `track_ids`, …), the project and nested
+    objects are left out: they mean nothing to a person reading the log. */
+export function describeParams(params: unknown): string {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return '';
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
+    if (/(^|_)ids?$/.test(k) || k === 'project' || k === 'client_request_id') continue;
+    if (typeof v === 'string') out.push(`${k}: ${v.length > 40 ? v.slice(0, 39) + '…' : v}`);
+    else if (typeof v === 'number' || typeof v === 'boolean') out.push(`${k}: ${v}`);
+  }
+  return out.join(', ');
 }

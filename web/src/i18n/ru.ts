@@ -12,6 +12,7 @@
 import { ruImport } from './parts/ru.import';
 import type { MessageKey } from './uk';
 import { ruNarrow } from './parts/ru.narrow';
+import { ruLog } from './parts/ru.log';
 
 export const ru: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -280,4 +281,5 @@ export const ru: Record<MessageKey, string> = {
   'errors.UNKNOWN': 'Не удалось выполнить действие. Попробуйте ещё раз.',
   ...ruImport,
   ...ruNarrow,
+  ...ruLog,
 };

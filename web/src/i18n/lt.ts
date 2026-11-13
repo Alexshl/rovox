@@ -13,6 +13,7 @@
 import { ltImport } from './parts/lt.import';
 import type { MessageKey } from './uk';
 import { ltNarrow } from './parts/lt.narrow';
+import { ltLog } from './parts/lt.log';
 
 export const lt: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -281,4 +282,5 @@ export const lt: Record<MessageKey, string> = {
   'errors.UNKNOWN': 'Nepavyko atlikti veiksmo. Bandykite dar kartą.',
   ...ltImport,
   ...ltNarrow,
+  ...ltLog,
 };

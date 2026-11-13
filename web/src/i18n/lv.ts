@@ -12,6 +12,7 @@
 import { lvImport } from './parts/lv.import';
 import type { MessageKey } from './uk';
 import { lvNarrow } from './parts/lv.narrow';
+import { lvLog } from './parts/lv.log';
 
 export const lv: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -280,4 +281,5 @@ export const lv: Record<MessageKey, string> = {
   'errors.UNKNOWN': 'Neizdevās veikt darbību. Mēģiniet vēlreiz.',
   ...lvImport,
   ...lvNarrow,
+  ...lvLog,
 };
