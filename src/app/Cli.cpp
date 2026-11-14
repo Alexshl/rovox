@@ -1452,6 +1452,9 @@ private:
 
 int runMcpProxy (const Options& o)
 {
+    // httplib sends with flags 0 and only the Server ignores SIGPIPE: a client-only process dies with exit 141 when it writes a request on a socket that
+    // stopListenerThread (or the server) has just shut down. A failed write must surface as an error result instead.
+    std::signal (SIGPIPE, SIG_IGN);
     McpProxy proxy (o);
     return proxy.run();
 }

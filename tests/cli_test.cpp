@@ -482,6 +482,41 @@ ROVOX_TEST (cli, mcp_connect_survives_a_second_initialize)
     CHECK (waitExit (server, 10) == 0);
 }
 
+// httplib sends with flags 0, so a proxy that does not ignore SIGPIPE dies (exit 141) when its stop() shuts the notification stream's socket down
+// between connect and the request write; end of input right after initialize puts exactly that in the way.
+ROVOX_TEST (cli, mcp_connect_exits_zero_when_input_ends_right_after_initialize)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("mcp-connect3");
+    auto server = spawn ({ "serve", "--port", "0", "--token", "tok123" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const auto at = server.out.find ("http://127.0.0.1:");
+    REQUIRE (at != std::string::npos);
+    const int port = std::stoi (server.out.substr (at + 17));
+    const std::string init = R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test"}}})" "\n";
+    int bad = 0, last = 0;
+
+    for (int i = 0; i < 150; ++i)
+    {
+        int code = -1;
+        run ({ "mcp", "--connect", "http://127.0.0.1:" + std::to_string (port), "--token", "tok123" }, test::makeTempDir ("d"), 30, code, init + init);
+
+        if (code != 0)
+        {
+            ++bad;
+            last = code;
+        }
+    }
+
+    CHECK (bad == 0);
+    CHECK (last == 0);
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
 ROVOX_TEST (cli, mcp_stdio_refuses_a_data_dir_another_process_holds)
 {
     if (! haveCli())
