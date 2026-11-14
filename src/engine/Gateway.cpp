@@ -527,8 +527,8 @@ void Gateway::timerCallback()
         audibleTenant_ = audible;
     }
 
-    // a revoked or expired key closes its sockets within a second (the key store re-reads its file at most once a second itself)
-    if (const auto now = std::chrono::steady_clock::now(); now - lastRevocationCheck_ >= std::chrono::seconds (1))
+    // a revoked or expired key closes its sockets within a second (checked every 250 ms, as is the key store file: a stat call, off the audio path)
+    if (const auto now = std::chrono::steady_clock::now(); now - lastRevocationCheck_ >= std::chrono::milliseconds (250))
     {
         lastRevocationCheck_ = now;
 

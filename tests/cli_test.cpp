@@ -1149,7 +1149,7 @@ ROVOX_TEST (web, keys_cookie_session_scopes_and_legacy_token_regression)
     CHECK (waitExit (server, 10) == 0);
 }
 
-ROVOX_TEST (web, websocket_of_a_revoked_key_is_closed_within_two_seconds)
+ROVOX_TEST (web, websocket_of_a_revoked_key_is_closed_within_a_second)
 {
     if (! haveCli())
         return;
@@ -1191,10 +1191,58 @@ ROVOX_TEST (web, websocket_of_a_revoked_key_is_closed_within_two_seconds)
     }
 
     CHECK (closed);
-    CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() <= 2.5);
+    CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() <= 1.0);     // the ticket says one second
 
     // and the revoked key no longer opens a new socket
     { WsClient again; CHECK (again.open (port, { "Authorization: Bearer " + created.value().key }) == 401); }
+
+    kill (server.pid, SIGTERM);
+    CHECK (waitExit (server, 10) == 0);
+}
+
+ROVOX_TEST (web, per_key_rate_limit_answers_429_with_retry_after_and_leaves_other_keys_alone)
+{
+    if (! haveCli())
+        return;
+
+    const auto data = test::makeTempDir ("ratelimit");
+    fs::create_directories (data / "config");
+    {
+        std::ofstream out (data / "config" / "rovox.toml");
+        out << "[quota_profiles.tiny]\nrequests_per_min = 5\n\n[tenants.cli-rl-a]\nquota_profile = \"tiny\"\n\n[tenants.cli-rl-b]\nquota_profile = \"tiny\"\n";
+    }
+
+    KeyStore keys (data / "auth" / "keys.json");
+    auto a = keys.create (keySpec ("cli-rl-a", ScopeSet::of ({ Scope::catalogRead, Scope::projectsRead })));
+    auto b = keys.create (keySpec ("cli-rl-b", ScopeSet::of ({ Scope::catalogRead, Scope::projectsRead })));
+    REQUIRE (a.ok());
+    REQUIRE (b.ok());
+
+    auto server = spawn ({ "serve", "--port", "0" }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const int port = portOf (server);
+    REQUIRE (port > 0);
+    httplib::Client c ("127.0.0.1", port);
+    const httplib::Headers keyA { { "Authorization", "Bearer " + a.value().key } }, keyB { { "Authorization", "Bearer " + b.value().key } };
+
+    for (int i = 0; i < 5; ++i)
+    {
+        auto ok = c.Get ("/api/projects", keyA);
+        REQUIRE (ok != nullptr);
+        CHECK (ok->status == 200);
+    }
+
+    auto limited = c.Get ("/api/projects", keyA);                   // request N + 1 of the minute
+    REQUIRE (limited != nullptr);
+    CHECK (limited->status == 429);
+    CHECK (limited->body.find ("RATE_LIMITED") != std::string::npos);
+    const auto retryAfter = limited->get_header_value ("Retry-After");
+    CHECK (! retryAfter.empty());
+    CHECK (std::atoi (retryAfter.c_str()) >= 1);
+
+    auto other = c.Get ("/api/projects", keyB);                     // key B has a bucket of its own
+    REQUIRE (other != nullptr);
+    CHECK (other->status == 200);
 
     kill (server.pid, SIGTERM);
     CHECK (waitExit (server, 10) == 0);
