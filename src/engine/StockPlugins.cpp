@@ -967,8 +967,9 @@ private:
     bool reaReady_ = false;
 };
 //==============================================================================
-/** Imported ReaFir in EQ mode: the curve (frequency:gain-dB points, in the "curve" property of the plugin state) as an exact gain when it is flat, else as a
-    zero-phase FIR whose latency the host compensates (src/core/StockFx.h). */
+/** Imported ReaFir: the curve (frequency:gain-dB points, in the "curve" property of the plugin state). EQ mode: an exact gain when it is flat, else a
+    zero-phase FIR whose latency the host compensates. Gate / compressor / subtract modes: a per-bin threshold, an FFT-frame processor with a latency of
+    the FFT size (src/core/StockFx.h). */
 class RovoxFir : public StockPlugin
 {
 public:
@@ -1015,7 +1016,10 @@ private:
     static std::vector<ParamDef> definitions()
     {
         return { noAuto (num ("fft_size", "FFT size", 64.0f, 65536.0f, 4096.0f, "", 0, 4096.0f)),
-                 num ("gain", "Output gain", -96.0f, 12.0f, 0.0f, "dB", 2) };
+                 num ("gain", "Output gain", -96.0f, 12.0f, 0.0f, "dB", 2),
+                 noAuto (choice ("mode", "Mode", { "EQ", "Gate", "Compressor", "Subtract" }, 0)),      // the dynamics modes have a latency of the FFT size
+                 num ("gate_floor", "Gate floor", -96.0f, 0.0f, -96.0f, "dB", 1),
+                 num ("ratio", "Compressor ratio", 0.2f, 100.0f, 1.0f, ":1", 2, 4.0f) };
     }
 
     void valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& property) override
@@ -1052,6 +1056,9 @@ private:
 
         p.fftSize = (int) std::lround (value (0));
         p.outputGain = dbToLinOrZero (value (1));
+        p.mode = (int) std::lround (value (2));
+        p.gateFloor = dbToLinOrZero (value (3));
+        p.ratio = value (4);
         return p;
     }
 
@@ -1092,9 +1099,9 @@ private:
 
     void resetDsp() override                        { fir_.reset(); }
 
-    void run (float* const* io, int n, int count, const te::PluginRenderContext&) override
+    void run (float* const* io, int n, int count, const te::PluginRenderContext& rc) override
     {
-        fir_.process (io, n, count);
+        fir_.process (io, n, count, std::llround (rc.editTime.getStart().inSeconds() * sr_));
     }
 
     struct DesignWorker : juce::Thread
@@ -1155,7 +1162,7 @@ const std::vector<StockInfo>& stockPlugins()
           "Algorithmic reverb (damped combs and allpasses): room size, damping, pre-delay, width, low/high cut, wet/dry. Similar to ReaVerbate.",
           { "stock", "reverb", "space" } },
         { "rovox:fir", "fir", "Rovox FIR EQ", RovoxFir::xmlTypeName, "ReaFir",
-          "FFT-style EQ from a frequency/gain curve (property `curve`, points \"hz:db\"): a flat curve is an exact gain, any other curve a zero-phase FIR with reported latency. Imported ReaFir in EQ mode; its dynamics modes are not modelled.",
+          "FFT-style EQ from a frequency/gain curve (property `curve`, points \"hz:db\"): a flat curve is an exact gain, any other curve a zero-phase FIR with reported latency. Imported ReaFir: EQ mode, or its gate / compressor / subtract mode (param `mode`), where the curve is a per-bin threshold in dB and the latency is the FFT size.",
           { "stock", "eq", "filter" } },
         { "rovox:drums", "drums", "Rovox Drums", drumsXmlType, "MT-PowerDrumKit",
           "General MIDI drum sampler (instrument): plays MIDI drum parts written for MT-PowerDrumKit unchanged (kick 35/36, snare 38/40, side stick 37, hats 42/44/46 with choke, toms, cymbals, cowbell, tambourine) "

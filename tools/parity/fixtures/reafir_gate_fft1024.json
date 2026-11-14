@@ -1,0 +1,16 @@
+{
+ "name": "reafir_gate_fft1024",
+ "kind": "gate",
+ "fx": null,
+ "signal": "bursts",
+ "channels": 2,
+ "params": [],
+ "reafir_state": {
+  "i12": 1024,
+  "f36": -30.0,
+  "f44": -30.0,
+  "i48": 1,
+  "f52": 0.05
+ },
+ "description": "ReaFir gate at FFT size 1024, floor -26 dB, 1 kHz bursts"
+}

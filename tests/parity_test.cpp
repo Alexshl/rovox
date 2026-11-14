@@ -2427,3 +2427,216 @@ ROVOX_TEST (parity, reafir_import_warns_about_modes_other_than_eq_and_passes_the
     CHECK (warningCount (r.report, "REAFIR_MODE_UNSUPPORTED") == 1);
     CHECK_NEAR (r.left[30000], 0.5, 1e-6);
 }
+
+//------------------------------------------------------------------------------ ReaFir dynamics modes (fitted to REAPER renders, spec-reafir.md v3)
+namespace
+{
+const char* const reaFirGateState = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAADwwaUrSEUAAPDBAQAAAAAAAACtVQM8AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+const char* const reaFirCompState = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAADwwaUrSEUAAPDBAgAAAAAAAAC99Rs9AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+const char* const reaFirSubtractState = "nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAAAAAKUrSEUAAAAAAwAAAAAAAACtVQM8AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==";
+
+/** `count` samples of a sine of peak `amp` centred on bin `bin` of an `n`-point FFT at 48 kHz. */
+std::vector<float> binSine (int n, int bin, double amp, int count)
+{
+    std::vector<float> x ((size_t) count);
+
+    for (int i = 0; i < count; ++i)
+        x[(size_t) i] = (float) (amp * std::sin (2.0 * pi * bin * (double) i / n));
+
+    return x;
+}
+
+/** Runs the signal through a ReaFir in blocks of 500 samples (one or two channels), appending nothing: the output has the length of the input. */
+std::vector<std::vector<float>> runReaFir (const fx::ReaFirParams& p, std::vector<std::vector<float>> in)
+{
+    fx::ReaFir f;
+    f.prepare (48000.0);
+    f.setParams (p);
+    const size_t len = in[0].size();
+
+    for (size_t at = 0; at < len; at += 500)
+    {
+        float* io[2] = { in[0].data() + at, in.size() > 1 ? in[1].data() + at : nullptr };
+        f.process (io, (int) in.size(), (int) std::min<size_t> (500, len - at));
+    }
+
+    return in;
+}
+
+fx::ReaFirParams dynParams (fx::ReaFirMode mode, double thresholdDb, int fftSize = 1024)
+{
+    fx::ReaFirParams p;
+    p.fftSize = fftSize;
+    p.mode = (int) mode;
+    p.points = { { 382.45, thresholdDb }, { 3202.73, thresholdDb } };
+    return p;
+}
+
+double rmsOf (const std::vector<float>& x, size_t from, size_t to)
+{
+    double s = 0.0;
+
+    for (size_t i = from; i < to; ++i)
+        s += (double) x[i] * x[i];
+
+    return std::sqrt (s / (double) (to - from));
+}
+} // namespace
+
+ROVOX_TEST (parity, reafir_dynamics_modes_report_the_fft_size_as_latency_and_a_unit_gate_is_a_delay)
+{
+    auto p = dynParams (fx::ReaFirMode::Gate, -30.0);
+    p.gateFloor = 1.0;                              // a floor of 1: every bin passes whatever its level
+    CHECK (fx::ReaFir::latencyFor (p) == 1024);
+    fx::ReaFir f;
+    f.prepare (48000.0);
+    f.setParams (p);
+    CHECK (f.latencySamples() == 1024);
+    CHECK (! f.isFlat());
+
+    std::vector<float> x (6000);
+
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] = (float) (0.3 * std::sin (0.013 * (double) i * (double) i / 40.0) + 0.1 * std::sin (0.7 * (double) i));
+
+    const auto y = runReaFir (p, { x })[0];
+
+    for (size_t i = 1024; i < x.size(); ++i)        // the overlap-add windows sum to 1: the output is the input delayed by the FFT size
+        CHECK_NEAR (y[i], x[i - 1024], 1e-5);
+
+    for (size_t i = 0; i < 1024; ++i)
+        CHECK (std::abs (y[i]) < 1e-9);
+}
+
+ROVOX_TEST (parity, reafir_gate_passes_a_bin_above_the_threshold_and_applies_the_floor_below_it)
+{
+    auto p = dynParams (fx::ReaFirMode::Gate, -30.0);
+    const int bin = 21;                             // 984 Hz, on a bin
+
+    // above: -29 dBFS peak against -30 dB passes untouched; below: -31 dBFS goes to the floor (zero for floor -inf, an amplitude otherwise)
+    const auto loud = runReaFir (p, { binSine (1024, bin, std::pow (10.0, -29.0 / 20.0), 12000) })[0];
+    CHECK_NEAR (rmsOf (loud, 6144, 10240), std::pow (10.0, -29.0 / 20.0) / std::sqrt (2.0), 1e-5);
+
+    const auto quiet = runReaFir (p, { binSine (1024, bin, std::pow (10.0, -31.0 / 20.0), 12000) })[0];
+    CHECK (rmsOf (quiet, 6144, 10240) < 1e-9);
+
+    p.gateFloor = 0.25;
+    const auto floored = runReaFir (p, { binSine (1024, bin, std::pow (10.0, -31.0 / 20.0), 12000) })[0];
+    CHECK_NEAR (rmsOf (floored, 6144, 10240), 0.25 * std::pow (10.0, -31.0 / 20.0) / std::sqrt (2.0), 1e-6);
+}
+
+ROVOX_TEST (parity, reafir_compressor_has_a_hard_knee_and_the_measured_ratio_laws)
+{
+    const int bin = 21;
+    const auto gainDb = [&] (double ratio, double levelDb)
+    {
+        auto p = dynParams (fx::ReaFirMode::Compressor, -30.0);
+        p.ratio = ratio;
+        const auto y = runReaFir (p, { binSine (1024, bin, std::pow (10.0, levelDb / 20.0), 12000) })[0];
+        return 20.0 * std::log10 (rmsOf (y, 6144, 10240) * std::sqrt (2.0) / std::pow (10.0, levelDb / 20.0));
+    };
+
+    CHECK_NEAR (gainDb (4.0, -40.0), 0.0, 1e-4);                // below the threshold: untouched
+    CHECK_NEAR (gainDb (4.0, -10.0), -15.0, 1e-3);              // slope 1 - 1/4 above it
+    CHECK_NEAR (gainDb (2.0, -10.0), -10.0, 1e-3);
+    CHECK_NEAR (gainDb (1.0, -10.0), 0.0, 1e-4);
+    CHECK_NEAR (gainDb (98.0, -10.0), -20.0 * (1.0 - 1.0 / 98.0), 1e-3);
+    CHECK_NEAR (gainDb (99.0, -10.0), -20.0, 1e-3);             // 99 and above: a limiter
+    CHECK_NEAR (gainDb (100.0, -10.0), -20.0, 1e-3);
+    CHECK_NEAR (gainDb (0.5, -10.0), 20.0, 1e-3);               // below 0.5 the ratio acts as 0.5: an upward expander of slope 1
+    CHECK_NEAR (gainDb (0.2, -10.0), 20.0, 1e-3);
+}
+
+ROVOX_TEST (parity, reafir_subtract_squares_the_spectrum_and_two_channels_are_coupled)
+{
+    // a sine of peak A on a bin with a 0 dB curve comes out with the peak A^2 under a |cos| envelope of the frame rate (the phase doubles, so the
+    // frames do not add up to a steady sine); the output gain scales it
+    auto p = dynParams (fx::ReaFirMode::Subtract, 0.0);
+    const auto y = runReaFir (p, { binSine (1024, 21, 0.5, 12000) })[0];
+    const auto peak = *std::max_element (y.begin() + 6144, y.begin() + 10240);
+    CHECK_NEAR (peak, 0.25, 5e-3);
+    CHECK_NEAR (rmsOf (y, 6144, 10240), 0.1297, 2e-3);
+    p.outputGain = 0.5;
+    CHECK_NEAR (rmsOf (runReaFir (p, { binSine (1024, 21, 0.5, 12000) })[0], 6144, 10240), 0.0648556, 1e-3);
+
+    // two channels: the product of both spectra reaches both outputs; a silent right channel silences them
+    const auto left = binSine (1024, 21, 0.5, 12000);
+    const std::vector<float> silent (left.size(), 0.0f);
+    p.outputGain = 1.0;
+    const auto both = runReaFir (p, { left, left });
+    CHECK_NEAR (rmsOf (both[0], 6144, 10240), 0.1297, 2e-3);
+    CHECK (both[0] == both[1]);
+    const auto one = runReaFir (p, { left, silent });
+    CHECK (rmsOf (one[0], 0, 12000) < 1e-9);
+    CHECK (rmsOf (one[1], 0, 12000) < 1e-9);
+}
+
+ROVOX_TEST (parity, reafir_gate_and_compressor_read_the_mean_of_both_channel_magnitudes)
+{
+    // left alone at -20 dBFS passes a -23 dB gate as a mono signal, but with a silent right channel the mean level is -26 dB: the gate shuts both
+    auto p = dynParams (fx::ReaFirMode::Gate, -23.0);
+    const auto left = binSine (1024, 21, std::pow (10.0, -20.0 / 20.0), 12000);
+    const std::vector<float> silent (left.size(), 0.0f);
+    CHECK (rmsOf (runReaFir (p, { left })[0], 6144, 10240) > 0.05);
+    const auto stereo = runReaFir (p, { left, silent });
+    CHECK (rmsOf (stereo[0], 6144, 10240) < 1e-9);
+
+    // a right channel as loud as the left keeps the mean at -20 dB: both pass
+    const auto pair = runReaFir (p, { left, left });
+    CHECK_NEAR (rmsOf (pair[0], 6144, 10240), 0.1 / std::sqrt (2.0), 1e-4);
+}
+
+ROVOX_TEST (parity, reafir_dynamics_frames_follow_the_timeline_and_a_jump_starts_them_again)
+{
+    // the frame grid is anchored at the position of the first block: starting 256 samples off the hop moves the frames, the output differs
+    auto p = dynParams (fx::ReaFirMode::Gate, -27.0);
+    std::vector<float> x = binSine (1024, 21, 0.05, 6000);
+
+    for (size_t i = 3000; i < x.size(); ++i)
+        x[i] = 0.0f;
+
+    const auto run = [&] (long long start)
+    {
+        fx::ReaFir f;
+        f.prepare (48000.0);
+        f.setParams (p);
+        auto y = x;
+        float* io[1] = { y.data() };
+        f.process (io, 1, (int) y.size(), start);
+        return y;
+    };
+
+    const auto a = run (0), a2 = run (1024), b = run (256);
+    CHECK (a == a2);                                // a shift by a multiple of the hop changes nothing
+    CHECK (a != b);
+
+    // seeking: a second block that is not where the first ended starts the frames again (the old frames do not leak into it)
+    fx::ReaFir f;
+    f.prepare (48000.0);
+    f.setParams (p);
+    auto first = binSine (1024, 21, 0.2, 2048);
+    float* io[1] = { first.data() };
+    f.process (io, 1, 2048, 0);
+    std::vector<float> zeros (2048, 0.0f);
+    io[0] = zeros.data();
+    f.process (io, 1, 2048, 100000);
+    CHECK (rmsOf (zeros, 0, 2048) < 1e-9);
+}
+
+ROVOX_TEST (parity, reafir_import_maps_the_gate_compressor_and_subtract_modes)
+{
+    test::Env env;
+    const auto gate = importReaFir (env, reaFirGateState);
+    REQUIRE (gate.report["mapped"].size() == 1);
+    CHECK (gate.report["warnings"].empty());
+    CHECK (gate.report["mapped"][0]["status"].get<std::string>().find ("gate / compressor / subtract") != std::string::npos);
+    CHECK_NEAR (gate.left[30000], 0.5, 1e-4);       // DC at 0 dB is above the -30 dB threshold: passes
+
+    const auto comp = importReaFir (env, reaFirCompState);
+    CHECK (comp.report["warnings"].empty());
+    CHECK_NEAR (comp.left[30000], 0.5 * std::pow (10.0, -22.5 / 20.0), 1e-4);      // 4:1 above -30 dB: 30 dB over, -22.5 dB
+
+    const auto sub = importReaFir (env, reaFirSubtractState);
+    CHECK (sub.report["warnings"].empty());
+    CHECK_NEAR (sub.left[30000], 0.5, 2e-3);        // DC of 0.5 reads 1.0 on the normalised DC bin, T = 1 (0 dB): 2 * 0.5^2
+}

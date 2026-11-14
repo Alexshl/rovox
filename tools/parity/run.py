@@ -7,7 +7,7 @@
 #   run.py --all                       all fixtures in fixtures/*.json
 #   run.py reacomp_fast reaeq         fixtures whose name contains one of the words
 #   run.py --list
-# A fixture with "reafir_state" (fields of the ReaFir state blob, reafir_project.py) or "items" (play rates, item_project.py) renders a generated project; "known_gap": true marks a
+# A fixture with "reafir_state" (fields of the ReaFir state blob, reafir_project.py; "reafir_points": [[hz, dB], ...] sets the curve) or "items" (play rates, item_project.py) renders a generated project; "thresholds" overrides the defaults of the kind (null drops a check); "known_gap": true marks a
 # documented difference (printed GAP, not a failure; FIXED when it starts to pass); "skip_s": S leaves the first S seconds out of the comparison.
 #   run.py project "<file>.RPP" [--start S --end E]    whole-project comparison (REAPER renders the RPP in a new tab, Rovox import.rpp)
 # Options: --out DIR (default ~/.rovox-parity), --reuse-reaper (use the REAPER renders already in DIR), --reuse-rovox.
@@ -70,7 +70,7 @@ def run_fixture(fx, out, reuse_reaper, reuse_rovox):
         else:
             import reafir_project
             end = soundfile.info(sig).duration
-            gen = reafir_project.write_rpp(os.path.join(work, name + ".gen.RPP"), sig, end, fx["reafir_state"])
+            gen = reafir_project.write_rpp(os.path.join(work, name + ".gen.RPP"), sig, end, fx["reafir_state"], points=fx.get("reafir_points"))
         end += fx.get("tail_ms", 0) / 1000.0
         if reuse_reaper and os.path.exists(ref_wav) and os.path.exists(log_path):
             log = json.load(open(log_path, encoding="utf-8", errors="replace"))
@@ -191,6 +191,7 @@ def main():
         for fx in sel:
             th = dict(DEFAULT_THRESHOLDS[fx["kind"]])
             th.update(fx.get("thresholds", {}))
+            th = {k: v for k, v in th.items() if v is not None}       # a null threshold drops that check (e.g. a reference below the LUFS gate)
             try:
                 ref_wav, rovox_wav, sig, log, imp, opts = run_fixture(fx, a.out, a.reuse_reaper, a.reuse_rovox)
                 finish(fx["name"], fx["kind"], th, ref_wav, rovox_wav, sig, opts, log, imp, bool(fx.get("known_gap")))

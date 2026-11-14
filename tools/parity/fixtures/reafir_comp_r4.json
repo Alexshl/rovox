@@ -11,6 +11,5 @@
   "i48": 2,
   "f56": 0.038076152304609215
  },
- "description": "ReaFir compressor mode (field 48 = 2), threshold curve -30 dB, ratio 4",
- "known_gap": true
+ "description": "ReaFir compressor mode (field 48 = 2), threshold curve -30 dB, ratio 4"
 }

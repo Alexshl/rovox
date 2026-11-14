@@ -15,19 +15,31 @@ L3 = "AFByb2dyYW0gMQAQAAAA"
 DEFAULT = ("nBIAAAAAtMIAAMBBABAAAAAAgD8AAAAAAgAAAAIAAADXOb9DAAAAAKUrSEUAAAAAAAAAAAAAAACtVQM8AACAP7OiBDgAAAA+AAAAAAAAAAACAAACAACAPw==")
 
 
-def state_blob(fields):
+def state_blob(fields, points=None):
+    """`points` [[hz, dB], ...] replaces the two curve points of the default state; the offsets in `fields` stay those of the 2-point layout
+    (byte 48 = mode, 52 gate floor, 56 ratio, 60 output gain), the points shift the tail."""
     b = bytearray(base64.b64decode(DEFAULT))
     for key, value in fields.items():
         off = int(key[1:])
         b[off:off + 4] = struct.pack("<f" if key[0] == "f" else "<i", value)
+    if points:
+        b = b[:28] + struct.pack("<i", len(points)) + b"".join(struct.pack("<ff", hz, db) for hz, db in points) + b[48:]
     return base64.b64encode(bytes(b)).decode()
 
 
-def write_rpp(path, signal_wav, length_s, fields, sample_rate=48000):
-    blob = state_blob(fields)
+def header_line(blob_bytes):
+    """The first wrapper line of the chunk carries the length of the state."""
+    l1 = bytearray(base64.b64decode(L1))
+    l1[48:52] = struct.pack("<i", blob_bytes)
+    return base64.b64encode(bytes(l1)).decode()
+
+
+def write_rpp(path, signal_wav, length_s, fields, sample_rate=48000, points=None):
+    blob = state_blob(fields, points)
+    l1 = header_line(len(base64.b64decode(blob)))
     lines = [blob[i:i + 128] for i in range(0, len(blob), 128)]
     rpp = "\n".join(['<REAPER_PROJECT 0.1 "7.81/macOS-arm64" 0', "  SAMPLERATE %d 1 0" % sample_rate, "  <TRACK", "    NAME fir", "    NCHAN 2",
-                     "    <FXCHAIN", "      SHOW 0", "      LASTSEL 0", "      DOCKED 0", "      BYPASS 0 0 0", "      " + HDR, "        " + L1]
+                     "    <FXCHAIN", "      SHOW 0", "      LASTSEL 0", "      DOCKED 0", "      BYPASS 0 0 0", "      " + HDR, "        " + l1]
                     + ["        " + b for b in lines]
                     + ["        " + L3, "      >", "      FLOATPOS 0 0 0 0", "      WAK 0 0", "    >", "    <ITEM", "      POSITION 0",
                        "      LENGTH %.9f" % length_s, "      <SOURCE WAVE", '        FILE "%s"' % signal_wav, "      >", "    >", "  >", ">", ""])

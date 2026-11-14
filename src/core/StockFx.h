@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -491,10 +492,20 @@ private:
 };
 
 //==============================================================================
-/** ReaFir (EQ mode) from its saved state. The curve is a list of (frequency Hz, gain dB) points: flat beyond the end points, a smoothstep in
+/** ReaFir from its saved state. EQ mode: the curve is a list of (frequency Hz, gain dB) points: flat beyond the end points, a smoothstep in
     log-frequency between neighbours (approximate: the measured transition is within 0.35 dB of it). A flat curve is an exact gain without any latency
     (the REAPER render is the input once its reported latency is compensated). Any other curve is a zero-phase linear-phase FIR (frequency sampling on
-    a grid of fftSize bins, cosine-tapered to +-fftSize/4 samples; approximate), delayed by latencySamples() = fftSize/4 which the host compensates. */
+    a grid of fftSize bins, cosine-tapered to +-fftSize/4 samples; approximate), delayed by latencySamples() = fftSize/4 which the host compensates.
+
+    Dynamics modes (gate, compressor, subtract; fitted to REAPER renders of probe signals, docs/parity/spec-reafir.md): the curve is a per-bin threshold in
+    dB (same interpolation). A frame of fftSize samples every fftSize/2 samples goes through an unwindowed FFT; the bin magnitude is scaled so that a sine
+    of peak amplitude A sitting on a bin reads A (2/N), and then per bin
+      gate        gain 1 above the threshold, `gateFloor` (an amplitude) at or below it;
+      compressor  above the threshold gain dB = (1/r - 1) * (level - threshold) (hard knee), r = ratio clamped to >= 0.5, a ratio >= 99 is a limiter;
+      subtract    Y = T * X^2 on the normalised complex bin X, T the linear threshold (the phase doubles: the output is not the input minus anything).
+    The frames are inverse-transformed, weighted with an asymmetric overlap-add window (w(i) + w(i + N/2) = 1) and added; the latency is fftSize samples. */
+enum class ReaFirMode : int { Eq = 0, Gate = 1, Compressor = 2, Subtract = 3 };
+
 struct ReaFirPoint
 {
     double freqHz = 1000.0, gainDb = 0.0;
@@ -506,6 +517,9 @@ struct ReaFirParams
     int fftSize = 4096;
     std::vector<ReaFirPoint> points;        // sorted by frequency; empty = flat 0 dB
     double outputGain = 1.0;                // amplitude
+    int mode = 0;                           // ReaFirMode
+    double gateFloor = 0.0;                 // gate: amplitude of the bins below the threshold
+    double ratio = 1.0;                     // compressor: 0.2 .. 100
     bool operator== (const ReaFirParams&) const = default;
 };
 
@@ -520,6 +534,23 @@ struct ReaFirDesign
     std::vector<double> taps;               // 2 * half + 1
     mutable std::array<std::vector<double>, 2> history;
     mutable size_t pos = 0;
+
+    // dynamics modes (params.mode != 0)
+    bool dynActive = false;
+    int dynN = 0;                           // FFT size, a power of two
+    std::vector<double> thresholdDb;        // per bin 0 .. N/2
+    std::vector<double> window;             // the synthesis window, N
+    std::vector<double> cosTable, sinTable; // N / 2 twiddles
+    std::vector<int> bitRev;
+    struct DynChannel
+    {
+        std::vector<float> ring;            // the last N input samples
+        std::vector<double> acc;            // overlap-add ring of 2N processed samples
+        std::vector<double> re, im;         // scratch frame
+        long long t = 0;                    // input samples seen (the frame grid is t = multiples of N/2)
+        bool anchored = false;              // t was set from the position of the timeline
+    };
+    mutable std::array<DynChannel, 2> dyn;
 };
 
 class ReaFir
@@ -528,7 +559,11 @@ public:
     void prepare (double sampleRate);       // designs for the current parameters and installs (allocates)
     void reset();
     void setParams (const ReaFirParams&);   // designs the FIR and installs it at once (allocates): not for the audio thread
-    void process (float* const* io, int numChannels, int numSamples);   // no allocation, no design work: it only reads the installed design
+    /** No allocation, no design work: it only reads the installed design. `blockStart` is the timeline position of the first sample in samples (the dynamics
+        modes put their frame grid on the timeline, like REAPER's: frames start at multiples of fftSize/2; a jump of the position starts them again);
+        noPosition: the grid starts with the first sample. */
+    static constexpr long long noPosition = INT64_MIN;
+    void process (float* const* io, int numChannels, int numSamples, long long blockStart = noPosition);
 
     /** The design of a parameter set without touching a processor: for a worker / the message thread (allocates, up to 65536 points). */
     static std::shared_ptr<const ReaFirDesign> design (const ReaFirParams&, double sampleRate);

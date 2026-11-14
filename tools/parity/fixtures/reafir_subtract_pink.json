@@ -10,6 +10,11 @@
   "f44": -30.0,
   "i48": 3
  },
- "description": "ReaFir subtract mode (field 48 = 3) with the default (empty) noise profile, curve -30 dB",
- "known_gap": true
+ "description": "ReaFir subtract mode (field 48 = 3), curve -30 dB: Y = T * L * R per bin (the REAPER output stays far below the LUFS gate of -70, so no loudness check)",
+ "thresholds": {
+  "null_db": -45,
+  "lufs_db": null,
+  "peak_db": 0.1,
+  "env_db": 0.5
+ }
 }

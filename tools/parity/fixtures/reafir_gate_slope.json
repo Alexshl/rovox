@@ -1,0 +1,33 @@
+{
+ "name": "reafir_gate_slope",
+ "kind": "gate",
+ "fx": null,
+ "signal": "pink",
+ "channels": 2,
+ "params": [],
+ "reafir_state": {
+  "i48": 1,
+  "f52": 0.1
+ },
+ "reafir_points": [
+  [
+   200.0,
+   -50.0
+  ],
+  [
+   2000.0,
+   -20.0
+  ],
+  [
+   9000.0,
+   -45.0
+  ]
+ ],
+ "description": "ReaFir gate, sloped three-point threshold curve (200 Hz -50, 2 kHz -20, 9 kHz -45 dB), floor -20 dB. Known residual: REAPER's interpolation of the curve between points is not the smoothstep Rovox uses (threshold off by up to about 2 dB mid-segment): null about -52 dB, bands 0.7 dB, envelope 2.4 dB, so the envelope limit is 3 dB",
+ "thresholds": {
+  "null_db": -45,
+  "lufs_db": 0.1,
+  "peak_db": 0.1,
+  "env_db": 3.0
+ }
+}

@@ -10,6 +10,5 @@
   "f44": -30.0,
   "i48": 1
  },
- "description": "ReaFir gate mode, threshold -30 dB, floor -inf, 1 kHz bursts -40/-6 dB",
- "known_gap": true
+ "description": "ReaFir gate mode, threshold -30 dB, floor -inf, 1 kHz bursts -40/-6 dB"
 }

@@ -663,7 +663,8 @@ struct Importer
     }
 
     /** ReaFir: the curve and the output gain of the saved state go to the Rovox FIR EQ. A flat curve (the default state) is an exact pass-through, so
-        the render equals REAPER's; any other curve is an approximate zero-phase FIR. Modes other than EQ are not modelled (warning REAFIR_MODE_UNSUPPORTED). */
+        the render equals REAPER's; any other curve is an approximate zero-phase FIR. The gate, compressor and subtract modes (field after the curve points) go to
+        the dynamics modes of the Rovox FIR (curve = per-bin threshold, gate floor, ratio). Other modes are not modelled (warning REAFIR_MODE_UNSUPPORTED). */
     void mapReaFir (const RppNode& node, te::Plugin& plugin, json& entry, const std::string& trackId)
     {
         const auto state = reaFirState (node);
@@ -697,12 +698,15 @@ struct Importer
         const double outGain = f32 (tail + 12);
         const bool plainProcessing = std::abs (f32 (20)) < 1.0e-6;
         const int dynamicsMode = i32 (tail);            // the 4-byte field after the curve points: 0 EQ, 1 gate, 2 compressor, 3 subtract (measured)
-        const bool curveApplies = dynamicsMode == 0 && plainProcessing && (mode == 2 || mode == 0 || mode == 3 || mode == 4);
+        const bool dynamics = dynamicsMode >= 1 && dynamicsMode <= 3 && plainProcessing;
+        const bool curveApplies = dynamics || (dynamicsMode == 0 && plainProcessing && (mode == 2 || mode == 0 || mode == 3 || mode == 4));
 
-        if (dynamicsMode != 0)
-            warn ("REAFIR_MODE_UNSUPPORTED", std::string ("ReaFir ") + (dynamicsMode == 1 ? "gate" : dynamicsMode == 2 ? "compressor" : dynamicsMode == 3 ? "subtract" : "dynamics")
-                                              + " mode is not modelled (the curve is a per-bin threshold there, not a gain); the audio passes through unchanged");
-        else if (mode != 2 || ! plainProcessing)
+        if (dynamicsMode < 0 || dynamicsMode > 3)
+            warn ("REAFIR_MODE_UNSUPPORTED", "ReaFir dynamics mode " + std::to_string (dynamicsMode) + " is unknown; the audio passes through unchanged");
+        else if (dynamicsMode != 0 && ! plainProcessing)
+            warn ("REAFIR_MODE_UNSUPPORTED", std::string ("ReaFir ") + (dynamicsMode == 1 ? "gate" : dynamicsMode == 2 ? "compressor" : "subtract")
+                                              + " mode with processing mode 1 is not modelled; the audio passes through unchanged");
+        else if (dynamicsMode == 0 && (mode != 2 || ! plainProcessing))
             warn ("REAFIR_MODE_UNSUPPORTED", "ReaFir mode " + std::to_string (mode) + (plainProcessing ? "" : " with processing mode 1")
                                               + " is not modelled (only the EQ mode is); "
                                               + (curveApplies ? "the EQ curve is applied" : "the audio passes through unchanged"));
@@ -719,7 +723,19 @@ struct Importer
         plugin.state.setProperty ("curve", toJuce (curve.str()), nullptr);
         setStockParam (plugin, "fft_size", fftSize);
         setStockParam (plugin, "gain", std::isfinite (outGain) && outGain > 1.0e-5 ? 20.0 * std::log10 (outGain) : (outGain == 0.0 ? -96.0 : 0.0));
-        entry["status"] = "mapped (ReaFir EQ curve and output gain from the saved state)";
+
+        if (dynamics)
+        {
+            // gate floor and output gain are amplitudes, the ratio field n is ratio = 0.2 + 99.8 n (measured, docs/parity/spec-reafir.md)
+            const double floorAmp = f32 (tail + 4), ratioField = f32 (tail + 8);
+            setStockParam (plugin, "mode", dynamicsMode);
+            setStockParam (plugin, "gate_floor", std::isfinite (floorAmp) && floorAmp > 1.0e-5 ? 20.0 * std::log10 (floorAmp) : -96.0);
+
+            if (std::isfinite (ratioField))
+                setStockParam (plugin, "ratio", std::clamp (0.2 + 99.8 * ratioField, 0.2, 100.0));
+        }
+
+        entry["status"] = dynamics ? "mapped (ReaFir gate / compressor / subtract from the saved state)" : "mapped (ReaFir EQ curve and output gain from the saved state)";
         entry["fft_size"] = fftSize;
         entry["curve_points"] = (int) points.size();
         entry["approximate"] = ! rovox::fx::ReaFir::curveIsFlat (points);

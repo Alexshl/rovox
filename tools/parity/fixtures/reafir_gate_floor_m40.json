@@ -11,6 +11,5 @@
   "i48": 1,
   "f52": 0.005
  },
- "description": "ReaFir gate mode (state field 48 = 1), threshold curve -30 dB, gate floor -40 dB: bins below the threshold go to the floor",
- "known_gap": true
+ "description": "ReaFir gate mode (state field 48 = 1), threshold curve -30 dB, gate floor -40 dB: bins below the threshold go to the floor"
 }

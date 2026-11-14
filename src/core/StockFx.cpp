@@ -1885,8 +1885,138 @@ std::atomic<int> firDesignCounter { 0 };
 
 int ReaFir::designCountForTest()            { return firDesignCounter.load(); }
 
+namespace
+{
+/** The FFT size of the dynamics modes: the requested size rounded down to a power of two in 64 .. 65536. */
+int dynFftSize (int requested)
+{
+    int n = 64;
+
+    while (n * 2 <= std::clamp (requested, 64, 65536))
+        n *= 2;
+
+    return n;
+}
+
+/** In-place radix-2 FFT (forward, unnormalised) of the design's size. */
+void dynFft (const ReaFirDesign& d, double* re, double* im, bool inverse)
+{
+    const int n = d.dynN;
+
+    for (int i = 0; i < n; ++i)
+    {
+        const int j = d.bitRev[(size_t) i];
+
+        if (j > i)
+        {
+            std::swap (re[i], re[j]);
+            std::swap (im[i], im[j]);
+        }
+    }
+
+    for (int len = 2; len <= n; len <<= 1)
+    {
+        const int halfLen = len / 2, step = n / len;
+
+        for (int i = 0; i < n; i += len)
+            for (int k = 0; k < halfLen; ++k)
+            {
+                const double wr = d.cosTable[(size_t) (k * step)], wi = inverse ? d.sinTable[(size_t) (k * step)] : -d.sinTable[(size_t) (k * step)];
+                const int a = i + k, b = a + halfLen;
+                const double tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
+                re[b] = re[a] - tr;
+                im[b] = im[a] - ti;
+                re[a] += tr;
+                im[a] += ti;
+            }
+    }
+}
+
+/** One frame of a dynamics mode. re / im hold the N input samples of each channel (the right pair is null for a mono signal), on return the N processed
+    samples (before the synthesis window). The channels are coupled the way REAPER's are (measured with correlated and independent noise): the gate and
+    the compressor read the mean of the two bin magnitudes and apply one gain to both channels, subtract multiplies the two spectra (Y = T * L * R)
+    and gives that to both channels. */
+void dynProcessFrame (const ReaFirDesign& d, double* re0, double* im0, double* re1, double* im1)
+{
+    const int n = d.dynN, nyq = n / 2;
+    const double norm = 2.0 / n;
+    const auto& p = d.params;
+    const double slope = p.ratio >= 99.0 ? -1.0 : 1.0 / std::max (p.ratio, 0.5) - 1.0;
+    const bool stereo = re1 != nullptr;
+    dynFft (d, re0, im0, false);
+
+    if (stereo)
+        dynFft (d, re1, im1, false);
+
+    for (int b = 0; b <= nyq; ++b)
+    {
+        const double thr = d.thresholdDb[(size_t) b];
+        double r0 = re0[b], i0 = im0[b], r1 = stereo ? re1[b] : r0, i1 = stereo ? im1[b] : i0;
+
+        if (p.mode == (int) ReaFirMode::Subtract)
+        {
+            const double k = std::pow (10.0, thr / 20.0) * norm;
+            const double yr = k * (r0 * r1 - i0 * i1), yi = k * (r0 * i1 + i0 * r1);
+            r0 = r1 = yr;
+            i0 = i1 = yi;
+        }
+        else
+        {
+            const double mag = 0.5 * (std::hypot (r0, i0) + std::hypot (r1, i1));
+            const double level = 20.0 * std::log10 (std::max (mag * norm, 1.0e-12));
+            double g = 1.0;
+
+            if (p.mode == (int) ReaFirMode::Gate)
+                g = level > thr ? 1.0 : p.gateFloor;
+            else if (level > thr)
+                g = std::pow (10.0, slope * (level - thr) / 20.0);
+
+            r0 *= g;
+            i0 *= g;
+            r1 *= g;
+            i1 *= g;
+        }
+
+        re0[b] = r0;
+        im0[b] = i0;
+
+        if (b > 0 && b < nyq)
+        {
+            re0[n - b] = r0;
+            im0[n - b] = -i0;
+        }
+
+        if (stereo)
+        {
+            re1[b] = r1;
+            im1[b] = i1;
+
+            if (b > 0 && b < nyq)
+            {
+                re1[n - b] = r1;
+                im1[n - b] = -i1;
+            }
+        }
+    }
+
+    im0[0] = 0.0;
+    im0[nyq] = 0.0;
+    dynFft (d, re0, im0, true);
+
+    if (stereo)
+    {
+        im1[0] = 0.0;
+        im1[nyq] = 0.0;
+        dynFft (d, re1, im1, true);
+    }
+}
+}
+
 int ReaFir::latencyFor (const ReaFirParams& p)
 {
+    if (p.mode != 0)
+        return dynFftSize (p.fftSize);
+
     return curveIsFlat (p.points) ? 0 : std::clamp (p.fftSize, 64, 65536) / 4;
 }
 
@@ -1896,7 +2026,64 @@ std::shared_ptr<const ReaFirDesign> ReaFir::design (const ReaFirParams& p, doubl
     auto d = std::make_shared<ReaFirDesign>();
     d->params = p;
     std::sort (d->params.points.begin(), d->params.points.end(), [] (const ReaFirPoint& a, const ReaFirPoint& b) { return a.freqHz < b.freqHz; });
-    d->firActive = ! curveIsFlat (d->params.points);
+    d->firActive = p.mode == 0 && ! curveIsFlat (d->params.points);
+
+    if (p.mode != 0)
+    {
+        const int n = dynFftSize (p.fftSize);
+        d->dynActive = true;
+        d->dynN = n;
+        d->thresholdDb.resize ((size_t) n / 2 + 1);
+
+        for (size_t k = 0; k < d->thresholdDb.size(); ++k)
+            d->thresholdDb[k] = curveGainDb (d->params.points, (double) k * sampleRate / n);
+
+        // the synthesis window: a Hann window skewed by a sin^2 term, w(i) + w(i + n/2) = 1 (fitted to REAPER's frames, the coefficient 0.16 to 1e-8)
+        d->window.resize ((size_t) n);
+
+        for (int i = 0; i < n; ++i)
+        {
+            const double th = 2.0 * pi * i / n, sn = std::sin (th);
+            d->window[(size_t) i] = 0.5 - 0.5 * std::cos (th) - 0.16 * sn * std::abs (sn);
+        }
+
+        d->cosTable.resize ((size_t) n / 2);
+        d->sinTable.resize ((size_t) n / 2);
+
+        for (int i = 0; i < n / 2; ++i)
+        {
+            d->cosTable[(size_t) i] = std::cos (2.0 * pi * i / n);
+            d->sinTable[(size_t) i] = std::sin (2.0 * pi * i / n);
+        }
+
+        d->bitRev.resize ((size_t) n);
+        int bits = 0;
+
+        while ((1 << bits) < n)
+            ++bits;
+
+        for (int i = 0; i < n; ++i)
+        {
+            int r = 0;
+
+            for (int bit = 0; bit < bits; ++bit)
+                if (i & (1 << bit))
+                    r |= 1 << (bits - 1 - bit);
+
+            d->bitRev[(size_t) i] = r;
+        }
+
+        for (auto& c : d->dyn)
+        {
+            c.ring.assign ((size_t) n, 0.0f);
+            c.acc.assign ((size_t) n * 2, 0.0);
+            c.re.assign ((size_t) n, 0.0);
+            c.im.assign ((size_t) n, 0.0);
+            c.t = 0;
+        }
+
+        return d;
+    }
 
     if (! d->firActive)
     {
@@ -1965,6 +2152,14 @@ void ReaFir::reset()
             std::fill (h.begin(), h.end(), 0.0);
 
         d->pos = 0;
+
+        for (auto& c : d->dyn)
+        {
+            std::fill (c.ring.begin(), c.ring.end(), 0.0f);
+            std::fill (c.acc.begin(), c.acc.end(), 0.0);
+            c.t = 0;
+            c.anchored = false;
+        }
     }
 }
 
@@ -1977,16 +2172,20 @@ void ReaFir::setParams (const ReaFirParams& p)
 int ReaFir::latencySamples() const
 {
     const auto* d = active_.load (std::memory_order_acquire);
+
+    if (d != nullptr && d->dynActive)
+        return d->dynN;
+
     return d != nullptr && d->firActive ? d->half : 0;
 }
 
 bool ReaFir::isFlat() const
 {
     const auto* d = active_.load (std::memory_order_acquire);
-    return d == nullptr || ! d->firActive;
+    return d == nullptr || (! d->firActive && ! d->dynActive);
 }
 
-void ReaFir::process (float* const* io, int numChannels, int numSamples)
+void ReaFir::process (float* const* io, int numChannels, int numSamples, long long blockStart)
 {
     const auto* d = active_.load (std::memory_order_acquire);
 
@@ -1994,6 +2193,69 @@ void ReaFir::process (float* const* io, int numChannels, int numSamples)
         return;
 
     const int nch = std::min (numChannels, 2);
+
+    if (d->dynActive)
+    {
+        const int n = d->dynN, hop = n / 2, ring = 2 * n;
+        const double outGain = d->params.outputGain;
+        auto& c0 = d->dyn[0];
+        auto& c1 = d->dyn[1];
+
+        if (blockStart != noPosition && (! c0.anchored || c0.t != blockStart))
+        {
+            for (auto& c : d->dyn)
+            {
+                std::fill (c.ring.begin(), c.ring.end(), 0.0f);
+                std::fill (c.acc.begin(), c.acc.end(), 0.0);
+                c.t = blockStart;
+                c.anchored = true;
+            }
+        }
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // per channel: the processed sample of n samples ago (its last frame is in), then the new input
+            for (int ch = 0; ch < nch; ++ch)
+            {
+                auto& c = d->dyn[(size_t) ch];
+                const auto outIdx = (size_t) ((((c.t - n) % ring) + ring) % ring);
+                const double out = c.acc[outIdx];
+                c.acc[outIdx] = 0.0;
+                c.ring[(size_t) (((c.t % n) + n) % n)] = io[ch][i];
+                ++c.t;
+                io[ch][i] = toFloat (out * outGain);
+            }
+
+            if (c0.t % hop != 0)
+                continue;
+
+            const long long start = c0.t - n;
+            const long long base = ((start % ring) + ring) % ring;
+
+            for (int ch = 0; ch < nch; ++ch)
+            {
+                auto& c = d->dyn[(size_t) ch];
+
+                for (int j = 0; j < n; ++j)
+                {
+                    c.re[(size_t) j] = c.ring[(size_t) ((((start + j) % n) + n) % n)];
+                    c.im[(size_t) j] = 0.0;
+                }
+            }
+
+            dynProcessFrame (*d, c0.re.data(), c0.im.data(), nch > 1 ? c1.re.data() : nullptr, nch > 1 ? c1.im.data() : nullptr);
+
+            for (int ch = 0; ch < nch; ++ch)
+            {
+                auto& c = d->dyn[(size_t) ch];
+
+                for (int j = 0; j < n; ++j)
+                    c.acc[(size_t) ((base + j) % ring)] += c.re[(size_t) j] / n * d->window[(size_t) j];
+            }
+        }
+
+        return;
+    }
 
     if (! d->firActive)
     {
