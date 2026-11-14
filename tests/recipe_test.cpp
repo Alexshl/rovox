@@ -8,11 +8,15 @@
 #include "InstrumentPacks.h"
 #include "JobManager.h"
 #include "Mcp.h"
+#include "Project.h"
+#include "Quota.h"
 #include "RenderJobs.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
 
 #include <atomic>
+#include <cmath>
+#include <fstream>
 #include <thread>
 
 using namespace rovox;
@@ -462,4 +466,224 @@ ROVOX_TEST (recipe, accompaniment_cancel_mid_run_removes_the_ephemeral_project)
     CHECK (job["state"] == "cancelled");
     CHECK (job["error"]["code"] == "CANCELLED");
     CHECK (! hasProject (h, s, "accompaniment rec-acc-cancel"));
+}
+
+//==============================================================================
+// E8-08: eartraining.*.v1
+
+ROVOX_TEST (recipe, eartraining_recipes_are_listed_with_their_params_schema)
+{
+    Harness h;
+    auto s = h.session();
+
+    for (auto* id : { "eartraining.intervals.v1", "eartraining.chords.v1", "eartraining.cadences.v1", "eartraining.dictation.v1" })
+    {
+        auto got = h.tool (s, "recipe.get", { { "recipe_id", id } });
+        REQUIRE (got["ok"] == true);
+        CHECK (got["data"]["recipe"]["procedural"] == true);
+        CHECK (got["data"]["recipe"]["params"]["properties"]["count"]["maximum"] == 50);
+        CHECK (got["data"]["recipe"]["params"]["properties"].contains ("seed"));
+    }
+}
+
+ROVOX_TEST (recipe, eartraining_refuses_a_bad_spec_before_anything_is_made)
+{
+    Harness h;
+    auto s = h.session();
+    CHECK (h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "count", 51 } } } })["error"]["code"] == "INVALID_PARAMS");
+    CHECK (h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "items_spec", { 40 } } } } })["error"]["code"] == "INVALID_PARAMS");
+    CHECK (h.tool (s, "recipe.run", { { "recipe_id", "eartraining.chords.v1" }, { "params", { { "items_spec", { "nonsense" } } } } })["error"]["code"] == "INVALID_PARAMS");
+    CHECK (h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "range", { { "low", 60 }, { "high", 62 } } } } } })["error"]["code"] == "INVALID_PARAMS");
+    // 4 bars at 40 bpm are 24 s
+    CHECK (h.tool (s, "recipe.run", { { "recipe_id", "eartraining.dictation.v1" }, { "params", { { "bars", 4 }, { "tempo", 40 } } } })["error"]["code"] == "INVALID_PARAMS");
+}
+
+ROVOX_TEST (recipe, eartraining_two_runs_with_one_seed_give_identical_answers_and_files)
+{
+    if (! haveSoundfont())
+        return;
+
+    Harness h;
+    auto s = h.session();
+    json first;
+    std::vector<std::string> sha[2];
+
+    for (int i = 0; i < 2; ++i)
+    {
+        auto r = h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "count", 20 }, { "seed", 7 }, { "format", "wav" } } } });
+        REQUIRE (r["ok"] == true);
+        const auto result = r["data"]["result"];
+        REQUIRE (result["answers"].size() == 20);
+        REQUIRE (result["clips"].size() == 20);
+
+        for (auto& f : result["clips"])
+        {
+            sha[i].push_back (f["sha256"]);
+            CHECK (f["sha256"].get<std::string>().size() == 64);
+            CHECK (f["duration_s"].get<double>() <= 15.0);
+            CHECK (f["duration_s"].get<double>() > 1.0);
+            CHECK (! f.contains ("abs_path"));
+        }
+
+        if (i == 0)
+            first = result["answers"];
+        else
+            CHECK (result["answers"] == first);
+
+        // the answers are in the manifest only, never in the clip metadata
+        CHECK (result["clips"].dump().find ("interval") == std::string::npos);
+        CHECK (h.tool (s, "project.delete", { { "project_id", result["ephemeral_project_id"] } })["ok"] == true);
+    }
+
+    CHECK (sha[0] == sha[1]);
+
+    // another seed gives other exercises
+    auto other = h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "count", 20 }, { "seed", 8 }, { "format", "wav" } } } });
+    REQUIRE (other["ok"] == true);
+    CHECK (other["data"]["result"]["answers"] != first);
+    CHECK (h.tool (s, "project.delete", { { "project_id", other["data"]["result"]["ephemeral_project_id"] } })["ok"] == true);
+}
+
+/** The pitch of a stretch of a clip: the candidate (within +-7 semitones of the expected note, 0.1 semitone steps) whose first three harmonics carry the most energy. */
+double measuredMidi (const std::vector<float>& x, double sampleRate, double fromS, double toS, double expectedMidi)
+{
+    const size_t a = (size_t) (fromS * sampleRate), b = std::min (x.size(), (size_t) (toS * sampleRate));
+    double bestScore = -1.0, best = expectedMidi;
+
+    for (double m = expectedMidi - 7.0; m <= expectedMidi + 7.0; m += 0.1)
+    {
+        const double f0 = 440.0 * std::pow (2.0, (m - 69.0) / 12.0);
+        double score = 0.0;
+
+        for (int harmonic = 1; harmonic <= 3; ++harmonic)
+        {
+            const double w = 2.0 * M_PI * f0 * harmonic / sampleRate;
+            double re = 0.0, im = 0.0;
+
+            for (size_t i = a; i < b; ++i)
+            {
+                const double win = 0.5 - 0.5 * std::cos (2.0 * M_PI * (double) (i - a) / (double) (b - a));
+                re += win * x[i] * std::cos (w * (double) i);
+                im += win * x[i] * std::sin (w * (double) i);
+            }
+
+            score += std::sqrt (re * re + im * im) / harmonic;
+        }
+
+        if (score > bestScore)
+        {
+            bestScore = score;
+            best = m;
+        }
+    }
+
+    return best;
+}
+
+ROVOX_TEST (recipe, eartraining_intervals_sound_like_the_answers_and_are_loud_enough)
+{
+    if (! haveSoundfont())
+        return;
+
+    Harness h;
+    auto s = h.session();
+    auto r = h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "count", 8 }, { "seed", 3 }, { "format", "wav" }, { "tempo", 80 } } } });
+    REQUIRE (r["ok"] == true);
+    const auto result = r["data"]["result"];
+    const std::string projectId = result["ephemeral_project_id"];
+    const auto renders = h.env.project (projectId).dir() / "renders";
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    REQUIRE (result["clips"].size() == 8);
+
+    for (size_t i = 0; i < 8; ++i)
+    {
+        const auto& clip = result["clips"][i];
+        CHECK (std::abs (clip["loudness"]["after_lufs"].get<double>() - (-16.0)) <= 1.0);
+        CHECK (clip["duration_s"].get<double>() <= 15.0);
+
+        const auto file = renders / fs::path (clip["path"].get<std::string>()).filename();
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (juce::File (file.string())));
+        REQUIRE (reader != nullptr);
+        juce::AudioBuffer<float> buffer ((int) reader->numChannels, (int) reader->lengthInSamples);
+        reader->read (&buffer, 0, (int) reader->lengthInSamples, 0, true, true);
+        std::vector<float> samples (buffer.getReadPointer (0), buffer.getReadPointer (0) + buffer.getNumSamples());
+
+        // a 150 ms silence first: nothing is audible before the first note
+        double lead = 0.0;
+
+        for (size_t k = 0; k < (size_t) (0.1 * reader->sampleRate); ++k)
+            lead = std::max (lead, (double) std::abs (samples[k]));
+
+        CHECK (lead < 0.01);
+
+        const auto& notes = result["answers"][i]["notes"];
+        const double first = measuredMidi (samples, reader->sampleRate, 0.35, 1.05, notes[0].get<double>());
+        const double second = measuredMidi (samples, reader->sampleRate, 1.35, 2.05, notes[1].get<double>());
+        const double semis = result["answers"][i]["interval_semitones"].get<double>();
+        CHECK (std::abs (std::abs (second - first) - semis) <= 0.3);
+    }
+
+    CHECK (h.tool (s, "project.delete", { { "project_id", projectId } })["ok"] == true);
+}
+
+ROVOX_TEST (recipe, eartraining_chords_cadences_and_dictation_make_clips_with_answers)
+{
+    if (! haveSoundfont())
+        return;
+
+    Harness h;
+    auto s = h.session();
+
+    for (auto* kind : { "chords", "cadences", "dictation" })
+    {
+        auto r = h.tool (s, "recipe.run", { { "recipe_id", std::string ("eartraining.") + kind + ".v1" }, { "params", { { "count", 4 }, { "seed", "abc" }, { "format", "wav" } } } });
+        REQUIRE (r["ok"] == true);
+        const auto result = r["data"]["result"];
+        REQUIRE (result["clips"].size() == 4);
+        REQUIRE (result["answers"].size() == 4);
+
+        for (size_t i = 0; i < 4; ++i)
+        {
+            CHECK (result["answers"][i]["file"] == result["clips"][i]["variant_name"]);
+            CHECK (result["answers"][i]["item_seed"].get<std::string>().size() > 0);
+            CHECK (result["clips"][i]["duration_s"].get<double>() <= 15.0);
+        }
+
+        CHECK (h.tool (s, "project.delete", { { "project_id", result["ephemeral_project_id"] } })["ok"] == true);
+    }
+}
+
+ROVOX_TEST (recipe, eartraining_count_over_the_tenant_quota_is_quota_exceeded)
+{
+    if (! haveSoundfont())
+        return;
+
+    const auto dir = test::makeTempDir ("rec-ear-quota");
+    const auto config = dir / "rovox.toml";
+    {
+        std::ofstream out (config);
+        out << "[quota_profiles.rec-ear-tiny]\naudio_minutes_per_month = 0.1\n\n[tenants.rec_ear]\nquota_profile = \"rec-ear-tiny\"\n";
+    }
+
+    Harness h;
+    quotas().setConfigFile (config);
+    Principal p;
+    p.tenant = "rec_ear";
+    auto s = h.session (p);
+    auto r = h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "count", 20 }, { "seed", 7 }, { "format", "wav" } } } });
+    CHECK (r["ok"] == false);
+    CHECK (r["error"]["code"] == "QUOTA_EXCEEDED");
+    quotas().setConfigFile ({});
+}
+
+ROVOX_TEST (recipe, eartraining_needs_the_render_scope)
+{
+    Harness h;
+    Principal p;
+    p.tenant = "rec_ear_scope";
+    p.scopes = ScopeSet::of ({ Scope::projectsRead });
+    auto s = h.session (p);
+    auto r = h.tool (s, "recipe.run", { { "recipe_id", "eartraining.intervals.v1" }, { "params", { { "count", 2 } } } });
+    CHECK (r["ok"] == false);
 }
