@@ -77,13 +77,17 @@ describe.skipIf(!hasCanvas)('arrange performance', () => {
     (view as unknown as { paint(): void }).paint();
     await new Promise((r) => setTimeout(r, 200));
     (view as unknown as { paint(): void }).paint();
-    const f0 = performance.now();
-    const frames = 20;
+    // the median frame: a shared CI runner's GC pauses or noisy neighbours spike single frames, a slow code path moves them all
+    const frames = 21;
+    const times: number[] = [];
     for (let i = 0; i < frames; i++) {
       store.view.start = 100 + i * 3;
+      const f0 = performance.now();
       (view as unknown as { paint(): void }).paint();
+      times.push(performance.now() - f0);
     }
-    const perFrame = (performance.now() - f0) / frames;
+    times.sort((x, y) => x - y);
+    const perFrame = times[Math.floor(frames / 2)]!;
     console.log(`paint: ${perFrame.toFixed(1)} ms per frame (node-canvas, 1200x640, ${items.length} items in the project)`);
     expect(perFrame).toBeLessThan(FRAME_BUDGET_MS);
   });
