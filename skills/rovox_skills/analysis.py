@@ -147,7 +147,7 @@ def tempo_map(core, params, download=None):
     if not isinstance(project_id, str) or "/" in project_id or "\\" in project_id or ".." in project_id:
         raise ValueError("project_id must not contain path separators")
     source = params.get("source", "master")
-    args = {"project_id": project_id, "name": "tempo_probe", "format": {"container": "wav", "bit_depth": 16, "channels": 1}, "wait_s": 120}
+    args = {"project_id": project_id, "name": "tempo_probe", "format": {"container": "wav", "bit_depth": 16, "channels": 1}, "wait_s": 60}     # the core caps wait_s at 60
     if source == "master":
         args["scope"] = "master"
     elif isinstance(source, dict) and source.get("track_id"):
@@ -158,6 +158,10 @@ def tempo_map(core, params, download=None):
     if params.get("range"):
         args["range"] = params["range"]
     render = core.call("render.start", **args)
+    for _ in range(10):                     # a long render: keep waiting on the job, 60 s at a time (up to ~11 min in all)
+        if render.get("state") not in ("queued", "running") or not render.get("job_id"):
+            break
+        render = core.call("job.get", job_id=render["job_id"], wait_s=60)
     if render.get("state") != "succeeded":
         raise RuntimeError("the render did not finish: %s" % render.get("state"))
     files = render.get("result", {}).get("file") or (render.get("result", {}).get("files") or [None])[0] or {}

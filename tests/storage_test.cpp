@@ -97,6 +97,8 @@ public:
                 return makeError (errc::cancelled, "cancelled between parts");
             }
 
+            partsStarted++;
+
             if (partDelayMs > 0)
                 std::this_thread::sleep_for (std::chrono::milliseconds (partDelayMs));
         }
@@ -157,7 +159,7 @@ public:
     int failPuts = 0, nextVersion = 1;
     bool honourConditions = true;
     std::string slowKey;                    // puts of keys containing this take slowPutMs
-    std::atomic<int> slowPutMs { 0 }, headDelayMs { 0 }, fileParts { 1 }, partDelayMs { 0 }, cancelledUploads { 0 };
+    std::atomic<int> slowPutMs { 0 }, headDelayMs { 0 }, fileParts { 1 }, partDelayMs { 0 }, cancelledUploads { 0 }, partsStarted { 0 };
 
 private:
     std::string etagOf (const std::string& key) const      // call with the mutex held
@@ -586,7 +588,8 @@ ROVOX_TEST (storage, push_does_not_write_head_after_the_lease_was_taken_over)
     a->start();
     REQUIRE (a->acquireLease ("local", c.id).ok());
     a->enqueue (jobFor (c));
-    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+    // take the lease away only once the upload is really on the wire (a slow machine may not have started the push after a fixed sleep)
+    REQUIRE (waitFor ([&] { return store->partsStarted >= 1; }, 20000));
 
     store->setObject (a->keys().lease ("local", c.id), json { { "owner", "server-b" }, { "expires", ProjectLease::systemNow() + 60 }, { "acquired", ProjectLease::systemNow() } }.dump());
 
