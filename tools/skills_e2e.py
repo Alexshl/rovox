@@ -146,8 +146,9 @@ def main():
     pid = core.ok("project.new", name="skills-e2e")["project_id"]
     try:
         folder = core.upload("Click.wav", click_wav(30, a.bpm))
-        plan = core.ok("import.plan", project_id=pid, paths=[folder], preset="auto", takes_mode="separate")
-        core.ok("import.apply", project_id=pid, plan_id=plan["plan_id"])
+        job = core.ok("import.plan", project_id=pid, paths=[folder], preset="auto", takes_mode="separate", wait_s=60)     # a job over MCP
+        assert job.get("state") == "succeeded", job
+        core.ok("import.apply", project_id=pid, plan_id=job["result"]["plan_id"])
         core.ok("tempo.set", project_id=pid, points=[{"bpm": 100}])     # so that 120 can only come from the sidecar
         before = core.ok("tempo.get", project_id=pid)["points"][0]["bpm"]
         assert abs(before - 100) < 0.01, before
