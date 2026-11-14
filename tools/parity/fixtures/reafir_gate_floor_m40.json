@@ -1,0 +1,16 @@
+{
+ "name": "reafir_gate_floor_m40",
+ "kind": "gate",
+ "fx": null,
+ "signal": "sine_steps",
+ "channels": 2,
+ "params": [],
+ "reafir_state": {
+  "f36": -30.0,
+  "f44": -30.0,
+  "i48": 1,
+  "f52": 0.005
+ },
+ "description": "ReaFir gate mode (state field 48 = 1), threshold curve -30 dB, gate floor -40 dB: bins below the threshold go to the floor",
+ "known_gap": true
+}

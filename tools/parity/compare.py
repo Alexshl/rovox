@@ -199,7 +199,7 @@ def rt60_bands(x, sr=48000, centres=(125, 250, 500, 1000, 2000, 4000)):
 
 
 # ---------------------------------------------------------------------------------------------------------------- compare
-def compare(ref_path, test_path, input_path=None, max_lag_s=0.05, want_rt60=False):
+def compare(ref_path, test_path, input_path=None, max_lag_s=0.05, want_rt60=False, skip_s=0.0):
     ref, sr = load(ref_path)
     test, sr2 = load(test_path)
     if sr != sr2:
@@ -215,6 +215,10 @@ def compare(ref_path, test_path, input_path=None, max_lag_s=0.05, want_rt60=Fals
     opt = optimize.minimize_scalar(cost, bounds=(-1.0, 1.0), method="bounded", options={"xatol": 1e-4})
     lag = base + float(opt.x) if opt.fun < cost(lag - base) else lag
     test_al = shift(test, lag)
+    if skip_s > 0:                                   # fixtures with a documented start-up difference are judged after it
+        k = int(skip_s * sr)
+        ref, test_al = ref[k:], test_al[k:]
+        inp = inp[k:] if inp is not None else None
     res = ref - test_al
     rep = {"sample_rate": sr, "frames": {"ref": int(len(ref)), "test": int(len(test))}, "lag_samples": round(lag, 4), "correlation": round(corr, 6),
            "null": {"rms_dbfs": dbfs(np.sqrt(np.mean(res ** 2))), "peak_dbfs": dbfs(np.abs(res).max()),

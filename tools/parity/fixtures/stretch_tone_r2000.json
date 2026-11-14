@@ -1,0 +1,22 @@
+{
+ "name": "stretch_tone_r2000",
+ "kind": "project",
+ "fx": null,
+ "signal": "pink20",
+ "channels": 2,
+ "params": [],
+ "items": [
+  {
+   "pos": 0,
+   "len": 9.75,
+   "rate": 2.0,
+   "preserve": 1
+  }
+ ],
+ "description": "preserve-pitch item at play rate 2: the stretch-tone shelves (FadeStage), 20 s pink noise; thresholds are the measured envelope of the stretcher difference (REAPER's stretcher is not Signalsmith), the tone is checked on long-term spectra, see E1-08 Log",
+ "thresholds": {
+  "lufs_db": 0.7,
+  "peak_db": 3.5,
+  "bands_db": 3.0
+ }
+}

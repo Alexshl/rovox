@@ -55,10 +55,21 @@ struct Biquad
     void reset()    { z1[0] = z1[1] = z2[0] = z2[1] = 0.0; }
 };
 
+/** REAPER's stretcher leaves the top octave alone at these play rates (measured on 20 s of pink noise, E1-08: no high cut at 0.25, 0.4, 0.5, 0.8, 2 and
+    4, a 2 dB cut at 19 kHz at all the other rates tried), so the high shelf is skipped there. */
+bool rateKeepsHighs (double rate)
+{
+    for (const double r : { 0.25, 0.4, 0.5, 0.8, 2.0, 4.0 })
+        if (std::abs (rate - r) < 1.0e-3)
+            return true;
+
+    return false;
+}
+
 struct Region
 {
     double start = 0.0, end = 0.0, inLen = 0.0, outLen = 0.0;
-    bool tone = false;
+    bool tone = false, keepHighs = false;
     fades::FadeCurve inCurve, outCurve;
 };
 
@@ -167,18 +178,22 @@ private:
 
         for (long long i = 0; i < n; ++i)
         {
-            bool inside = false;
+            bool inside = false, highs = false;
 
             for (auto& r : regions)
-                inside = inside || (r.tone && block + i >= (long long) std::llround (r.start * sampleRate_) && block + i < (long long) std::llround (r.end * sampleRate_));
+                if (r.tone && block + i >= (long long) std::llround (r.start * sampleRate_) && block + i < (long long) std::llround (r.end * sampleRate_))
+                {
+                    inside = true;
+                    highs = highs || ! r.keepHighs;
+                }
 
             for (int c = 0; c < channels; ++c)
             {
                 float& x = fc.destBuffer->getWritePointer (c, fc.bufferStartSample)[i];
-                const double y = highShelf_.process (c, lowShelf_.process (c, (double) x));
+                const double low = lowShelf_.process (c, (double) x), y = highShelf_.process (c, low);
 
                 if (inside)
-                    x = (float) y;
+                    x = (float) (highs ? y : low);
             }
         }
     }
@@ -226,6 +241,9 @@ private:
 
                 r.tone = (bool) clip->state.getProperty (stretchToneId, false);
 
+                if (auto* audio = dynamic_cast<te::AudioClipBase*> (clip))
+                    r.keepHighs = rateKeepsHighs (audio->getSpeedRatio());
+
                 if (r.inLen > 0.0 || r.outLen > 0.0 || r.tone)
                     next->push_back (r);
             }
@@ -258,7 +276,7 @@ private:
 
     static bool concerns (const juce::Identifier& id)
     {
-        return id == te::IDs::start || id == te::IDs::length || id == te::IDs::offset || id.toString().startsWith ("rovox:fade") || id == stretchToneId;
+        return id == te::IDs::start || id == te::IDs::length || id == te::IDs::offset || id == te::IDs::speed || id.toString().startsWith ("rovox:fade") || id == stretchToneId;
     }
 
     /** Listens to the track's tree; a change of a clip's position or fade, or a clip added / removed, refreshes the fade list. */

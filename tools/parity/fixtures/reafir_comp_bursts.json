@@ -1,0 +1,16 @@
+{
+ "name": "reafir_comp_bursts",
+ "kind": "comp",
+ "fx": null,
+ "signal": "bursts",
+ "channels": 2,
+ "params": [],
+ "reafir_state": {
+  "f36": -30.0,
+  "f44": -30.0,
+  "i48": 2,
+  "f56": 0.038076152304609215
+ },
+ "description": "ReaFir compressor mode, ratio 4: time response on -40/-6 dB bursts",
+ "known_gap": true
+}

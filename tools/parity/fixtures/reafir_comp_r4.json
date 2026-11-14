@@ -1,0 +1,16 @@
+{
+ "name": "reafir_comp_r4",
+ "kind": "comp",
+ "fx": null,
+ "signal": "sine_steps",
+ "channels": 2,
+ "params": [],
+ "reafir_state": {
+  "f36": -30.0,
+  "f44": -30.0,
+  "i48": 2,
+  "f56": 0.038076152304609215
+ },
+ "description": "ReaFir compressor mode (field 48 = 2), threshold curve -30 dB, ratio 4",
+ "known_gap": true
+}

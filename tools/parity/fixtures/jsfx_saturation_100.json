@@ -1,0 +1,14 @@
+{
+ "name": "jsfx_saturation_100",
+ "kind": "comp",
+ "fx": "JS: loser/Saturation",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Amount (%)",
+   "value": 100
+  }
+ ],
+ "description": "stock Saturation, amount 100 % on a log sweep"
+}

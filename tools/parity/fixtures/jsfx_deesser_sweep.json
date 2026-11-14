@@ -1,0 +1,23 @@
+{
+ "name": "jsfx_deesser_sweep",
+ "kind": "comp",
+ "fx": "JS: Liteon/deesser",
+ "signal": "sweep",
+ "channels": 2,
+ "params": [
+  {
+   "name": "Threshold (dB)",
+   "value": -35
+  },
+  {
+   "name": "Ratio",
+   "value": 6
+  },
+  {
+   "name": "Bandwidth (Oct)",
+   "value": 1.0
+  }
+ ],
+ "description": "de-esser -35 dB, 6:1, 1 octave on a log sweep; the first 50 ms are skipped: REAPER ramps the filter coefficients from zero over the first block, Rovox starts at the target (E6-04 Log)",
+ "skip_s": 0.05
+}

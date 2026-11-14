@@ -7,6 +7,8 @@
 #   run.py --all                       all fixtures in fixtures/*.json
 #   run.py reacomp_fast reaeq         fixtures whose name contains one of the words
 #   run.py --list
+# A fixture with "reafir_state" (fields of the ReaFir state blob, reafir_project.py) or "items" (play rates, item_project.py) renders a generated project; "known_gap": true marks a
+# documented difference (printed GAP, not a failure; FIXED when it starts to pass); "skip_s": S leaves the first S seconds out of the comparison.
 #   run.py project "<file>.RPP" [--start S --end E]    whole-project comparison (REAPER renders the RPP in a new tab, Rovox import.rpp)
 # Options: --out DIR (default ~/.rovox-parity), --reuse-reaper (use the REAPER renders already in DIR), --reuse-rovox.
 # Needs: REAPER running with mcp_bridge_file_v2.lua, a Rovox container (see rovox_driver.py for URL/token/mounts).
@@ -58,6 +60,27 @@ def run_fixture(fx, out, reuse_reaper, reuse_rovox):
     name = fx["name"]
     ref_wav = os.path.join(work, name + ".wav")
     log_path = os.path.join(work, name + ".reaper.json")
+    if fx.get("reafir_state") is not None or fx.get("items"):
+        # generated project (ReaFir in an exact saved state: its modes are not automatable; items with play rates), rendered like a whole project
+        import soundfile
+        if fx.get("items"):
+            import item_project
+            end = item_project.length_s(fx["items"])
+            gen = item_project.write_rpp(os.path.join(work, name + ".gen.RPP"), sig, fx["items"])
+        else:
+            import reafir_project
+            end = soundfile.info(sig).duration
+            gen = reafir_project.write_rpp(os.path.join(work, name + ".gen.RPP"), sig, end, fx["reafir_state"])
+        end += fx.get("tail_ms", 0) / 1000.0
+        if reuse_reaper and os.path.exists(ref_wav) and os.path.exists(log_path):
+            log = json.load(open(log_path, encoding="utf-8", errors="replace"))
+        else:
+            log = reaper_driver.run_project(gen, work, name, 0.0, end)["log"]
+        rovox_wav = os.path.join(work, name + ".rovox.wav")
+        imp = None
+        if not (reuse_rovox and os.path.exists(rovox_wav)):
+            imp = rovox_driver.render(gen, log["fx"], work, name, start=0.0, end=end)["import"]
+        return ref_wav, rovox_wav, sig, log, imp, {"max_lag_s": 0.05}
     if reuse_reaper and os.path.exists(ref_wav) and os.path.exists(log_path):
         log = json.load(open(log_path, encoding="utf-8", errors="replace"))
     else:
@@ -71,7 +94,7 @@ def run_fixture(fx, out, reuse_reaper, reuse_rovox):
     imp = None
     if not (reuse_rovox and os.path.exists(rovox_wav)):
         imp = rovox_driver.render(rpp, log["fx"], work, name, tail_s=fx.get("tail_ms", 0) / 1000.0)["import"]
-    return ref_wav, rovox_wav, sig, log, imp, {"max_lag_s": 0.05, "want_rt60": bool(fx.get("rt60"))}
+    return ref_wav, rovox_wav, sig, log, imp, {"max_lag_s": 0.05, "want_rt60": bool(fx.get("rt60")), "skip_s": fx.get("skip_s", 0.0)}
 
 
 def run_project(rpp, out, start, end, reuse_reaper, reuse_rovox):
@@ -97,7 +120,7 @@ def run_project(rpp, out, start, end, reuse_reaper, reuse_rovox):
 
 
 def evaluate(name, kind, ref_wav, rovox_wav, sig, thresholds, out, opts):
-    rep = compare.compare(ref_wav, rovox_wav, sig, opts.get("max_lag_s", 0.05), opts.get("want_rt60", False))
+    rep = compare.compare(ref_wav, rovox_wav, sig, opts.get("max_lag_s", 0.05), opts.get("want_rt60", False), opts.get("skip_s", 0.0))
     os.makedirs(os.path.join(out, "plots"), exist_ok=True)
     compare.plot(rep, os.path.join(out, "plots", name + ".png"), name)
     checks = compare.check(rep, thresholds)
@@ -136,10 +159,12 @@ def main():
     results = []
     print(HEADER)
 
-    def finish(name, kind, thresholds, ref_wav, rovox_wav, sig, opts, log, imp):
+    def finish(name, kind, thresholds, ref_wav, rovox_wav, sig, opts, log, imp, known_gap=False):
         rep, checks = evaluate(name, kind, ref_wav, rovox_wav, sig, thresholds, a.out, opts)
         ok = all(c[3] for c in checks) and bool(checks)
-        print(row(name, rep, checks, "PASS" if ok else "FAIL"))
+        # a fixture with "known_gap" documents a measured, not yet fixed difference: it is reported (GAP) but does not fail the run;
+        # it is not counted as passed, and if it starts to pass the table says so (FIXED) and the flag should be removed
+        print(row(name, rep, checks, ("FIXED" if ok else "GAP") if known_gap else ("PASS" if ok else "FAIL")))
         doc = compare.clean(rep)
         doc.update({"name": name, "kind": kind, "thresholds": thresholds, "pass": ok,
                     "checks": [{"name": n, "value": v, "limit": lim, "pass": p} for n, v, lim, p in checks],
@@ -147,7 +172,7 @@ def main():
         json.dump(doc, open(os.path.join(a.out, "reports", name + ".json"), "w"), indent=1, default=float)
         results.append({"name": name, "pass": ok, "null_rms": rep["null"]["rms_dbfs"], "lufs_diff": rep["lufs"]["diff"],
                         "tp_diff": rep["true_peak_db"]["diff"], "band_max": rep["bands"]["max_abs_db"], "env_max": rep["envelope"]["max_abs_db"],
-                        "failed": [n for n, v, lim, p in checks if not p]})
+                        "failed": [n for n, v, lim, p in checks if not p], "known_gap": bool(known_gap and not ok)})
 
     if a.names and a.names[0] == "project":
         if len(a.names) < 2:
@@ -168,14 +193,15 @@ def main():
             th.update(fx.get("thresholds", {}))
             try:
                 ref_wav, rovox_wav, sig, log, imp, opts = run_fixture(fx, a.out, a.reuse_reaper, a.reuse_rovox)
-                finish(fx["name"], fx["kind"], th, ref_wav, rovox_wav, sig, opts, log, imp)
+                finish(fx["name"], fx["kind"], th, ref_wav, rovox_wav, sig, opts, log, imp, bool(fx.get("known_gap")))
             except Exception as e:
                 results.append({"name": fx["name"], "pass": False, "error": str(e)})
                 print("%-22s ERROR  %s" % (fx["name"], str(e).replace("\n", " ")[:400]))
     json.dump(results, open(os.path.join(a.out, "summary.json"), "w"), indent=1, default=float)
     npass = sum(1 for r in results if r["pass"])
-    print("\n%d/%d passed. Reports: %s/reports, plots: %s/plots" % (npass, len(results), a.out, a.out))
-    return 0 if npass == len(results) else 1
+    ngap = sum(1 for r in results if r.get("known_gap"))
+    print("\n%d/%d passed%s. Reports: %s/reports, plots: %s/plots" % (npass, len(results), " (+%d known gaps)" % ngap if ngap else "", a.out, a.out))
+    return 0 if npass + ngap == len(results) else 1
 
 
 if __name__ == "__main__":

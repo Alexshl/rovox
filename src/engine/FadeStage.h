@@ -8,7 +8,8 @@
 // product of their fades (crossfades are not modelled).
 // The same stage carries the optional "REAPER stretch tone" of an item ("rovox:stretchTone"): REAPER's stretcher colours preserve-pitch
 // time-stretched audio relative to Rovox's transparent one, so the items the RPP import marks get a fixed pair of minimum-phase shelves
-// (low shelf +0.80 dB at 150 Hz, high shelf -2.05 dB at 15.5 kHz). The numbers are fitted on one song at one rate (1.0583).
+// (low shelf +0.80 dB at 150 Hz, high shelf -2.05 dB at 15.5 kHz). The numbers are fitted on one song at one rate (1.0583); pink-noise renders at 15
+// other rates (E1-08) match that shape, except that REAPER has no high cut at the rates 0.25, 0.4, 0.5, 0.8, 2 and 4, where the stage skips the high shelf.
 #pragma once
 
 #include "Fades.h"

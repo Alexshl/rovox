@@ -77,13 +77,19 @@ def _dc_limit():
     return np.concatenate(parts)
 
 
+def _sine_steps():
+    """1 kHz sine, 1 s per step at -60, -54 ... 0 dBFS (static gain laws of the dynamics processors), then 1 s of silence."""
+    t = np.arange(SR) / SR
+    return np.concatenate([db(l) * np.sin(2 * np.pi * 1000.0 * t) for l in range(-60, 1, 6)] + [np.zeros(SR)])
+
+
 def _impulse():
     x = np.zeros(SR)
     x[SR // 10] = 1.0
     return x
 
 
-NAMES = (["impulse", "sweep", "pink", "bursts", "dc_gate", "dc_limit"]
+NAMES = (["impulse", "sweep", "pink", "pink20", "bursts", "sine_steps", "dc_gate", "dc_limit"]
          + ["sine_%s_%s" % (f, l) for f in ("100", "1k", "10k") for l in ("m20", "m6")])
 
 
@@ -97,6 +103,12 @@ def make(name, channels=1):
         right = None
     elif name == "bursts":
         left = _bursts()
+        right = None
+    elif name == "pink20":
+        left = _pink(1234, seconds=20.0)
+        right = None
+    elif name == "sine_steps":
+        left = _sine_steps()
         right = None
     elif name == "dc_gate":
         left = _dc_gate()

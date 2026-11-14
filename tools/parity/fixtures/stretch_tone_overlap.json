@@ -1,0 +1,29 @@
+{
+ "name": "stretch_tone_overlap",
+ "kind": "project",
+ "fx": null,
+ "signal": "pink20",
+ "channels": 2,
+ "params": [],
+ "items": [
+  {
+   "pos": 0,
+   "len": 8.0,
+   "rate": 1.1,
+   "preserve": 1
+  },
+  {
+   "pos": 5.0,
+   "len": 6.0,
+   "soffs": 5.0,
+   "rate": 1.0,
+   "preserve": 0
+  }
+ ],
+ "description": "preserve-pitch item (1.1) overlapped by an unflagged item (rate 1) from 5 s to 8 s; thresholds are the measured envelope of the stretcher difference (REAPER's stretcher is not Signalsmith), the tone is checked on long-term spectra, see E1-08 Log",
+ "thresholds": {
+  "lufs_db": 0.7,
+  "peak_db": 3.5,
+  "bands_db": 3.0
+ }
+}

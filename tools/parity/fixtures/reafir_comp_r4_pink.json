@@ -1,0 +1,16 @@
+{
+ "name": "reafir_comp_r4_pink",
+ "kind": "comp",
+ "fx": null,
+ "signal": "pink",
+ "channels": 2,
+ "params": [],
+ "reafir_state": {
+  "f36": -40.0,
+  "f44": -40.0,
+  "i48": 2,
+  "f56": 0.038076152304609215
+ },
+ "description": "ReaFir compressor mode, threshold -40 dB, ratio 4, pink noise",
+ "known_gap": true
+}

@@ -1,0 +1,17 @@
+{
+ "name": "stretch_resample_r1100",
+ "kind": "project",
+ "fx": null,
+ "signal": "pink20",
+ "channels": 2,
+ "params": [],
+ "items": [
+  {
+   "pos": 0,
+   "len": 16.0,
+   "rate": 1.1,
+   "preserve": 0
+  }
+ ],
+ "description": "play rate 1.1 without preserve pitch (resampled): no stretch tone"
+}

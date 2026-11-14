@@ -1,0 +1,30 @@
+{
+ "name": "stretch_tone_adjacent",
+ "kind": "project",
+ "fx": null,
+ "signal": "pink20",
+ "channels": 2,
+ "params": [],
+ "items": [
+  {
+   "pos": 0,
+   "len": 6.0,
+   "soffs": 0.0,
+   "rate": 1.1,
+   "preserve": 1
+  },
+  {
+   "pos": 6.0,
+   "len": 6.0,
+   "soffs": 6.6,
+   "rate": 1.1,
+   "preserve": 1
+  }
+ ],
+ "description": "two adjacent preserve-pitch items at rate 1.1: behaviour at the item boundary; thresholds are the measured envelope of the stretcher difference (REAPER's stretcher is not Signalsmith), the tone is checked on long-term spectra, see E1-08 Log",
+ "thresholds": {
+  "lufs_db": 0.7,
+  "peak_db": 3.5,
+  "bands_db": 3.0
+ }
+}
