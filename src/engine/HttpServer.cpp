@@ -6,6 +6,7 @@
 #include "Gateway.h"
 #include "Ids.h"
 #include "JobFiles.h"
+#include "OpenLink.h"
 #include "Peaks.h"
 #include "Quota.h"
 #include "RequestGuard.h"
@@ -106,9 +107,9 @@ std::map<std::string, std::string> parseTusMetadata (const std::string& header)
     return out;
 }
 
-std::string sessionCookie (const std::string& signedValue)
+std::string sessionCookie (const std::string& signedValue, int maxAgeS = 2592000)
 {
-    return "rovox_session=" + signedValue + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000";
+    return "rovox_session=" + signedValue + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + std::to_string (maxAgeS);
 }
 
 void tusHeaders (httplib::Response& res)
@@ -329,8 +330,8 @@ void HttpServer::installRoutes()
         const bool protectedPath = req.path.rfind ("/api/", 0) == 0 || req.path == "/mcp" || req.path.rfind ("/mcp/", 0) == 0;
 
         // a wrong ?token= counts like a wrong header or cookie, also on the page URL
-        if (! resolved.ok() && req.has_param ("token") && ! protectedPath)
-            noteAuthFailure();
+        if (! resolved.ok() && req.has_param ("token") && ! protectedPath && req.path != "/open")
+            noteAuthFailure();         // /open counts its own failures
 
         if (! protectedPath || req.path == "/api/login" || req.path == "/api/session")
             return httplib::Server::HandlerResponse::Unhandled;     // the static shell and the login endpoint are public
@@ -396,6 +397,46 @@ void HttpServer::installRoutes()
             res.set_header ("Set-Cookie", sessionCookie (cookie));
 
         reply (res, 200, { { "ok", true } });
+    });
+
+    // one-time signed link into the web UI (E9-01, see OpenLink.h): the platform mints the token, a valid one starts a session of its tenant and subject
+    auto openLinks = std::make_shared<OpenLinks> (host_.dataDir(), auth_->configFile());
+    svr.Get ("/open", [this, openLinks] (const httplib::Request& req, httplib::Response& res)
+    {
+        res.set_header ("Cache-Control", "no-store");
+        res.set_header ("Referrer-Policy", "no-referrer");     // the token is in the address of this request
+        const auto refuse = [&] (int status, const char* code, const char* message)
+        {
+            reply (res, status, { { "ok", false }, { "error", { { "code", code }, { "message", message } } } });
+        };
+
+        if (tooManyAuthFailures())
+        {
+            res.set_header ("Retry-After", "30");
+            return refuse (429, "RATE_LIMITED", "too many wrong links, try again in a minute");
+        }
+
+        const auto project = req.get_param_value ("project");
+        const auto token = req.get_param_value ("token");
+        const bool plainProject = ! project.empty() && project.size() <= 64
+            && std::all_of (project.begin(), project.end(), [] (char c) { return std::isalnum ((unsigned char) c) != 0 || c == '_' || c == '-'; });
+        const auto now = (std::int64_t) std::chrono::duration_cast<std::chrono::seconds> (std::chrono::system_clock::now().time_since_epoch()).count();
+        auto grant = plainProject && ! token.empty() ? openLinks->redeem (token, project, now) : Result<OpenGrant> (makeError (errc::unauthorized, "bad link"));
+
+        if (! grant.ok())
+        {
+            noteAuthFailure();
+            return refuse (403, "FORBIDDEN", "the link is invalid, expired or already used");
+        }
+
+        Principal p;
+        p.tenant = grant.value().tenant;
+        p.subject = grant.value().subject;
+        p.client = grant.value().client;
+        p.scopes = grant.value().scopes;
+        constexpr int sessionS = 8 * 3600;
+        res.set_header ("Set-Cookie", sessionCookie (auth_->issueOpenSession (p, sessionS), sessionS));
+        res.set_redirect ("/?project=" + project);
     });
 
     svr.Get ("/api/session", [this] (const httplib::Request& req, httplib::Response& res)

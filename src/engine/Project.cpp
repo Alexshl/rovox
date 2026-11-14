@@ -6,6 +6,10 @@
 #include "PanStage.h"
 #include "Transport.h"
 
+#include <algorithm>
+#include <filesystem>
+#include <vector>
+
 #include <unistd.h>
 
 namespace rovox
@@ -184,6 +188,33 @@ Result<void> Project::save (const SaveOptions& opt)
 
         if (onPersisted)
             onPersisted (dir_, false);
+
+        if (onEvent)
+        {
+            // the files of the saved project (relative paths; autosave history, peaks and renders are derived data) for a platform that syncs them
+            std::vector<std::string> names;
+            std::error_code ec;
+
+            for (fs::recursive_directory_iterator it (dir_, fs::directory_options::skip_permission_denied, ec), end; ! ec && it != end; it.increment (ec))
+            {
+                const auto rel = it->path().lexically_relative (dir_);
+                const auto top = rel.empty() ? std::string() : rel.begin()->string();
+
+                if (top == "autosave" || top == "peaks" || top == "renders")
+                {
+                    if (it->is_directory (ec))
+                        it.disable_recursion_pending();
+
+                    continue;
+                }
+
+                if (it->is_regular_file (ec))
+                    names.push_back (rel.generic_string());
+            }
+
+            std::sort (names.begin(), names.end());
+            onEvent ({ { "type", "project.saved" }, { "project_id", id() }, { "revision", manifest_.revision }, { "files", names } });
+        }
     }
 
     return r;

@@ -453,6 +453,7 @@ Result<void> ProjectManager::close (const std::string& id, SaveMode mode)
     }
 
     hub_.publish (tenant, "", { { "type", "projects.changed" }, { "project_id", id }, { "change", "closed" } });
+    hub_.publish (tenant, id, { { "type", "project.closed" }, { "project_id", id } });
     return result;
 }
 

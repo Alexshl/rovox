@@ -39,12 +39,13 @@ target_sources(rovox_engine_tests PRIVATE
     isolation_test.cpp
     recipe_test.cpp
     jobfiles_test.cpp
+    platform_test.cpp
     url_test.cpp)
 
 target_link_libraries(rovox_engine_tests PRIVATE rovox_mcp)
 target_compile_definitions(rovox_engine_tests PRIVATE ROVOX_SOURCE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
-foreach(suite core engine project import render rpp upload cli mcp transport web stock drums instrument jsfx plugins midi routing fx templates projects delivery review storage parity stretch auth quota isolation recipe jobfiles url)
+foreach(suite core engine project import render rpp upload cli mcp transport web stock drums instrument jsfx plugins midi routing fx templates projects delivery review storage parity stretch auth quota isolation recipe jobfiles platform url)
     add_test(NAME ${suite} COMMAND rovox_engine_tests ${suite})
 endforeach()
 
