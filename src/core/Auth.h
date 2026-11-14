@@ -74,6 +74,8 @@ struct Principal
     ScopeSet scopes = ScopeSet::all();
     std::string quotaProfile;       // empty = the tenant's default; `local` is unlimited
     std::string authMode = "local"; // local | open | legacy | token | trusted_proxy | introspection | open_link
+    std::string project;            // non-empty = the principal may touch this one project only (a session minted from an /open link)
+    std::int64_t epoch = 0;         // open_link: the [open_link] epoch the session was minted under (stillValid compares it with the config)
     std::int64_t expiresAt = 0;     // unix seconds; 0 = none. External principals: a long-lived connection is dropped after it (stillValid)
 
     bool has (Scope s) const        { return scopes.has (s); }
@@ -143,7 +145,7 @@ public:
     /** `<key_id>.<exp>.<hex HMAC-SHA256>` for `rovox_session`; empty for the open mode (nothing to log in to). */
     std::string issueSession (const Principal&, std::int64_t ttlSeconds = 30 * 24 * 3600) const;
 
-    /** The `rovox_session` value for a principal that redeemed a one-time /open link (tenant, subject, client and scopes travel in the signed value);
+    /** The `rovox_session` value for a principal that redeemed a one-time /open link (tenant, project, epoch, subject, client and scopes travel in the signed value);
         `fromSession` turns it back into a Principal with `authMode` "open_link". */
     std::string issueOpenSession (const Principal&, std::int64_t ttlSeconds) const;
 

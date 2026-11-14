@@ -5,6 +5,7 @@
 // project.closed) on the hub and through the event webhooks, and the one-time signed /open link.
 #include "Auth.h"
 #include "EventWebhooks.h"
+#include "Hmac.h"
 #include "HttpServer.h"
 #include "Ids.h"
 #include "JobCallback.h"
@@ -13,6 +14,7 @@
 #include "TestFramework.h"
 #include "TestSupport.h"
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -278,6 +280,7 @@ struct OpenEnv
         g.client = "web-agent";
         g.exp = nowS() + lifetime;
         g.jti = "n" + newUlid();
+        g.scopes = ScopeSet::of ({ Scope::projectsRead, Scope::projectsWrite });
         return g;
     }
 
@@ -360,11 +363,12 @@ ROVOX_TEST (platform, open_link_rejects_forged_tampered_wrongly_keyed_and_operat
 ROVOX_TEST (platform, open_session_cookie_resolves_to_the_tenant_subject_and_client_of_the_link)
 {
     OpenEnv e;
-    Authenticator auth (nullptr, "legacy-token");
+    Authenticator auth (nullptr, "legacy-token", e.config);
     auth.setSessionKeyFile (e.dir / "auth" / "session.key");
 
     Principal p;
     p.tenant = "plat_t1";
+    p.project = "p_one";
     p.subject = "user-9";
     p.client = "web-agent";
     p.scopes = ScopeSet::of ({ Scope::projectsRead });
@@ -379,6 +383,7 @@ ROVOX_TEST (platform, open_session_cookie_resolves_to_the_tenant_subject_and_cli
     CHECK (r.value().subject == "user-9");
     CHECK (r.value().client == "web-agent");
     CHECK (r.value().authMode == "open_link");
+    CHECK (r.value().project == "p_one");
     CHECK (r.value().has (Scope::projectsRead));
     CHECK (! r.value().has (Scope::render));
     CHECK (! r.value().has (Scope::admin));
@@ -447,5 +452,216 @@ ROVOX_TEST (platform, http_open_sets_a_session_once_and_answers_403_for_reuse_wr
     REQUIRE (missing != nullptr);
     CHECK (missing->status == 403);
 
+    server.stop();
+}
+
+//==============================================================================
+ROVOX_TEST (platform, open_link_two_threads_redeeming_the_same_token_get_exactly_one_session)
+{
+    OpenEnv e;
+    OpenLinks links (e.dir, e.config);
+
+    for (int round = 0; round < 20; ++round)
+    {
+        const auto token = e.token (e.grant());
+        std::atomic<int> okCount { 0 };
+        std::vector<std::thread> threads;
+
+        for (int t = 0; t < 2; ++t)
+            threads.emplace_back ([&] { if (links.redeem (token, "p_one", nowS()).ok()) ++okCount; });
+
+        for (auto& t : threads)
+            t.join();
+
+        CHECK (okCount.load() == 1);
+    }
+}
+
+ROVOX_TEST (platform, open_link_without_an_explicit_scopes_array_or_for_the_local_tenant_or_with_long_identity_is_refused)
+{
+    OpenEnv e;
+    OpenLinks links (e.dir, e.config);
+
+    // hand-made token with no "scopes" key at all: no default grant
+    auto raw = [&] (const json& claims)
+    {
+        const auto dump = claims.dump();
+        const auto payload = toHex (reinterpret_cast<const std::uint8_t*> (dump.data()), dump.size());
+        return payload + "." + hmacSha256Hex (e.secret, "open|" + payload);
+    };
+
+    const auto g = e.grant();
+    const json noScopes { { "v", 1 }, { "tenant", g.tenant }, { "project", g.project }, { "subject", "u" }, { "client", "c" }, { "exp", g.exp }, { "jti", g.jti } };
+    CHECK (! links.redeem (raw (noScopes), "p_one", nowS()).ok());
+
+    auto noneGranted = e.grant();
+    noneGranted.scopes = ScopeSet();
+    CHECK (! links.redeem (e.token (noneGranted), "p_one", nowS()).ok());
+
+    // the operator's tenant is refused before the nonce is burnt
+    auto local = e.grant();
+    local.tenant = "local";
+    CHECK (! links.redeem (e.token (local), "p_one", nowS()).ok());
+    std::string used;
+    {
+        std::ifstream in (e.dir / "auth" / "open-used.log");
+        used.assign (std::istreambuf_iterator<char> (in), std::istreambuf_iterator<char>());
+    }
+    CHECK (! test::contains (used, local.jti));
+
+    // subject and client are capped at 256 bytes
+    auto longSubject = e.grant();
+    longSubject.subject = std::string (257, 's');
+    CHECK (! links.redeem (e.token (longSubject), "p_one", nowS()).ok());
+    auto longClient = e.grant();
+    longClient.client = std::string (257, 'c');
+    CHECK (! links.redeem (e.token (longClient), "p_one", nowS()).ok());
+    auto edge = e.grant();
+    edge.subject = std::string (256, 's');
+    edge.client = std::string (256, 'c');
+    CHECK (links.redeem (e.token (edge), "p_one", nowS()).ok());
+}
+
+ROVOX_TEST (platform, open_link_log_is_compacted_to_the_unexpired_nonces)
+{
+    OpenEnv e;
+    const auto logFile = e.dir / "auth" / "open-used.log";
+    std::filesystem::create_directories (logFile.parent_path());
+    {
+        std::ofstream out (logFile);
+
+        for (int i = 0; i < 1100; ++i)
+            out << "old" << i << "xxxxxxxx " << (nowS() - 100) << "\n";     // expired entries
+    }
+
+    OpenLinks links (e.dir, e.config);
+    REQUIRE (links.redeem (e.token (e.grant()), "p_one", nowS()).ok());
+
+    int lines = 0;
+    std::ifstream in (logFile);
+    std::string line;
+
+    while (std::getline (in, line))
+        ++lines;
+
+    CHECK (lines == 1);
+}
+
+ROVOX_TEST (platform, open_session_is_revoked_by_an_epoch_bump_or_by_removing_the_secret)
+{
+    OpenEnv e;
+    Authenticator auth (nullptr, "legacy-token", e.config);
+    auth.setSessionKeyFile (e.dir / "auth" / "session.key");
+
+    Principal p;
+    p.tenant = "plat_t1";
+    p.project = "p_one";
+    p.epoch = 0;
+    p.scopes = ScopeSet::of ({ Scope::projectsRead });
+    AuthRequest req;
+    req.cookie = "rovox_session=" + auth.issueOpenSession (p, 600);
+
+    auto before = auth.resolve (req);
+    REQUIRE (before.ok());
+    CHECK (auth.stillValid (before.value()));
+
+    // epoch bump
+    std::ofstream (e.config) << "[open_link]\nsecret = \"" << e.secret << "\"\nepoch = 1\n";
+    CHECK (! auth.stillValid (before.value()));
+    CHECK (! auth.resolve (req).ok());
+
+    // a session minted under the new epoch is fine, and the secret's removal ends it
+    p.epoch = 1;
+    req.cookie = "rovox_session=" + auth.issueOpenSession (p, 600);
+    auto again = auth.resolve (req);
+    REQUIRE (again.ok());
+    std::ofstream (e.config) << "[other]\nx = 1\n";
+    CHECK (! auth.stillValid (again.value()));
+    CHECK (! auth.resolve (req).ok());
+}
+
+ROVOX_TEST (platform, open_session_touches_its_own_project_only_on_the_command_bus_and_rest)
+{
+    OpenEnv e;
+    test::Env env;
+    CreateOptions mine, other;
+    mine.tenant = other.tenant = "plat_t1";
+    mine.name = "mine";
+    other.name = "other";
+    const auto idMine = env.pm.create (mine);
+    const auto idOther = env.pm.create (other);
+    REQUIRE (idMine.ok());
+    REQUIRE (idOther.ok());
+
+    Principal p;
+    p.tenant = "plat_t1";
+    p.project = idMine.value();
+    p.scopes = ScopeSet::of ({ Scope::projectsRead, Scope::projectsWrite, Scope::catalogRead });
+
+    auto ctxFor = [&] (const std::string& project)
+    {
+        CommandContext ctx;
+        ctx.projectId = project;
+        ctx.setPrincipal (p);
+        return ctx;
+    };
+
+    CHECK (env.bus.runNow ("project.info", json::object(), ctxFor (idMine.value())).ok);
+    auto foreign = env.bus.runNow ("project.info", json::object(), ctxFor (idOther.value()));
+    CHECK (! foreign.ok);
+    REQUIRE (foreign.error.has_value());
+    CHECK (foreign.error->code == errc::notFound);
+    CHECK (! env.bus.runNow ("track.create", { { "name", "x" } }, ctxFor (idOther.value())).ok);
+    CHECK (! env.bus.runNow ("project.new", { { "name", "x" } }, ctxFor ("")).ok);
+    CHECK (! env.bus.runNow ("project.close", { { "project_id", idOther.value() } }, ctxFor ("")).ok);
+
+    auto listed = env.bus.runNow ("project.list", json::object(), ctxFor (""));
+    REQUIRE (listed.ok);
+    REQUIRE (listed.data["projects"].size() == 1);
+    CHECK (listed.data["projects"][0]["project_id"] == idMine.value());
+
+    // REST: the cookie of the link reaches its own project and the filtered listing, not another project's routes
+    Authenticator auth (nullptr, "legacy-token", e.config);
+    ServerOptions o;
+    o.port = 0;
+    o.authenticator = &auth;
+    o.sessionKeyFile = e.dir / "auth" / "session.key";
+    HttpServer server (test::host(), env.pm, env.bus, env.hub, o);
+    REQUIRE (server.start().ok());
+    std::atomic<bool> done { false };
+    std::thread client ([&]
+    {
+        try
+        {
+            httplib::Client c ("127.0.0.1", server.port());
+
+            auto grant = e.grant (idMine.value());
+            auto opened = c.Get (("/open?project=" + idMine.value() + "&token=" + e.token (grant)).c_str());
+            REQUIRE (opened != nullptr);
+            REQUIRE (opened->status == 302);
+            const auto setCookie = opened->get_header_value ("Set-Cookie");
+            CHECK (setCookie.find ("Max-Age=3600") != std::string::npos);      // 1 h by default
+            const httplib::Headers cookie { { "Cookie", setCookie.substr (0, setCookie.find (';')) } };
+
+            auto foreignGet = c.Get (("/api/projects/" + idOther.value()).c_str(), cookie);
+            REQUIRE (foreignGet != nullptr);
+            CHECK (foreignGet->status == 404);
+            auto ownGet = c.Get (("/api/projects/" + idMine.value()).c_str(), cookie);
+            REQUIRE (ownGet != nullptr);
+            CHECK (ownGet->status == 200);
+            auto list = c.Get ("/api/projects", cookie);
+            REQUIRE (list != nullptr);
+            CHECK (list->body.find (idOther.value()) == std::string::npos);
+            CHECK (list->body.find (idMine.value()) != std::string::npos);
+        }
+        catch (const test::RequireFailed&) {}
+
+        done = true;
+    });
+
+    while (! done)
+        test::pumpMessages (2);
+
+    client.join();
     server.stop();
 }

@@ -93,10 +93,10 @@ private:
     std::atomic<bool> draining_ { false };
     PeakStore peakStore_;
     std::mutex authMutex_;
-    std::deque<std::chrono::steady_clock::time_point> authFailures_;     // rate limit on wrong tokens (task 350)
+    std::map<std::string, std::deque<std::chrono::steady_clock::time_point>> authFailures_;     // rate limit on wrong tokens, per remote address (task 350)
 
-    void noteAuthFailure();
-    bool tooManyAuthFailures();
+    void noteAuthFailure (const std::string& remoteAddr);
+    bool tooManyAuthFailures (const std::string& remoteAddr);
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
 };
 

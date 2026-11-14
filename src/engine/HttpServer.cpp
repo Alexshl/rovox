@@ -177,25 +177,46 @@ HttpServer::~HttpServer()
     stop();
 }
 
-void HttpServer::noteAuthFailure()
-{
-    std::lock_guard<std::mutex> lock (authMutex_);
-    authFailures_.push_back (std::chrono::steady_clock::now());
-
-    while (authFailures_.size() > 64)
-        authFailures_.pop_front();
-}
-
-/** More than 10 wrong tokens within a minute: further attempts get 429 until the window has cleared. */
-bool HttpServer::tooManyAuthFailures()
+void HttpServer::noteAuthFailure (const std::string& addr)
 {
     std::lock_guard<std::mutex> lock (authMutex_);
     const auto now = std::chrono::steady_clock::now();
 
-    while (! authFailures_.empty() && now - authFailures_.front() > std::chrono::seconds (60))
-        authFailures_.pop_front();
+    if (authFailures_.size() > 4096 && authFailures_.count (addr) == 0)
+    {
+        // bounded: forget the addresses whose failures have all aged out
+        for (auto it = authFailures_.begin(); it != authFailures_.end();)
+            it = now - it->second.back() > std::chrono::seconds (60) ? authFailures_.erase (it) : std::next (it);
+    }
 
-    return authFailures_.size() > 10;
+    auto& q = authFailures_[addr];
+    q.push_back (now);
+
+    while (q.size() > 64)
+        q.pop_front();
+}
+
+/** More than 10 wrong tokens from one remote address within a minute: further attempts from it get 429 until the window has cleared. */
+bool HttpServer::tooManyAuthFailures (const std::string& addr)
+{
+    std::lock_guard<std::mutex> lock (authMutex_);
+    const auto it = authFailures_.find (addr);
+
+    if (it == authFailures_.end())
+        return false;
+
+    const auto now = std::chrono::steady_clock::now();
+    auto& q = it->second;
+
+    while (! q.empty() && now - q.front() > std::chrono::seconds (60))
+        q.pop_front();
+
+    const bool many = q.size() > 10;
+
+    if (q.empty())
+        authFailures_.erase (it);
+
+    return many;
 }
 
 void HttpServer::mount (std::function<void (httplib::Server&)> fn)
@@ -331,13 +352,29 @@ void HttpServer::installRoutes()
 
         // a wrong ?token= counts like a wrong header or cookie, also on the page URL
         if (! resolved.ok() && req.has_param ("token") && ! protectedPath && req.path != "/open")
-            noteAuthFailure();         // /open counts its own failures
+            noteAuthFailure (req.remote_addr);         // /open counts its own failures
 
         if (! protectedPath || req.path == "/api/login" || req.path == "/api/session")
             return httplib::Server::HandlerResponse::Unhandled;     // the static shell and the login endpoint are public
 
         if (resolved.ok())
         {
+            // a session minted from an /open link touches its project only (commands are guarded again in the CommandBus, the tools in the MCP server)
+            if (const auto& bound = resolved.value().project; ! bound.empty() && req.path.rfind ("/api/projects", 0) == 0)
+            {
+                static const std::string prefix = "/api/projects/";
+                const bool forThisProject = req.path.rfind (prefix, 0) == 0
+                    && (req.path.compare (prefix.size(), bound.size(), bound) == 0)
+                    && (req.path.size() == prefix.size() + bound.size() || req.path[prefix.size() + bound.size()] == '/');
+                const bool listing = req.path == "/api/projects" && req.method == "GET";       // filtered to the project by project.list
+
+                if (! forThisProject && ! listing)
+                {
+                    reply (res, 404, { { "ok", false }, { "error", { { "code", errc::notFound }, { "message", "no such project" } } } });
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+            }
+
             // MCP POSTs are rate limited in McpHttp (which answers in JSON-RPC); counting them here too would halve the limit
             // tus PATCH chunks are one logical upload, bounded by the upload limits: not one request each against the rate
             if (! apiPath || (uploadPath && req.method == "PATCH"))
@@ -354,7 +391,7 @@ void HttpServer::installRoutes()
             return httplib::Server::HandlerResponse::Handled;
         }
 
-        if (tooManyAuthFailures())
+        if (tooManyAuthFailures (req.remote_addr))
         {
             res.set_header ("Retry-After", "30");
             reply (res, 429, { { "ok", false }, { "error", { { "code", "RATE_LIMITED" }, { "message", "too many wrong tokens, try again in a minute" } } } });
@@ -362,7 +399,7 @@ void HttpServer::installRoutes()
         }
 
         if (! req.get_header_value ("Authorization").empty() || ! req.get_header_value ("Cookie").empty() || req.has_param ("token"))
-            noteAuthFailure();
+            noteAuthFailure (req.remote_addr);
 
         if (const auto challenge = auth_->challengeHeader(); ! challenge.empty())
             res.set_header ("WWW-Authenticate", challenge);
@@ -383,13 +420,13 @@ void HttpServer::installRoutes()
 
         if (! principal.ok())
         {
-            if (tooManyAuthFailures())
+            if (tooManyAuthFailures (req.remote_addr))
             {
                 res.set_header ("Retry-After", "30");
                 return reply (res, 429, { { "ok", false }, { "error", { { "code", "RATE_LIMITED" }, { "message", "too many wrong tokens, try again in a minute" } } } });
             }
 
-            noteAuthFailure();
+            noteAuthFailure (req.remote_addr);
             return reply (res, 401, { { "ok", false }, { "error", { { "code", "UNAUTHORIZED" }, { "message", "wrong token" } } } });
         }
 
@@ -410,7 +447,7 @@ void HttpServer::installRoutes()
             reply (res, status, { { "ok", false }, { "error", { { "code", code }, { "message", message } } } });
         };
 
-        if (tooManyAuthFailures())
+        if (tooManyAuthFailures (req.remote_addr))
         {
             res.set_header ("Retry-After", "30");
             return refuse (429, "RATE_LIMITED", "too many wrong links, try again in a minute");
@@ -425,16 +462,20 @@ void HttpServer::installRoutes()
 
         if (! grant.ok())
         {
-            noteAuthFailure();
+            noteAuthFailure (req.remote_addr);
             return refuse (403, "FORBIDDEN", "the link is invalid, expired or already used");
         }
 
+        // the session is bound to the project of the link, to the config epoch (a bump revokes it) and lasts [open_link] session_s (1 h by default)
+        const auto cfg = openLinks->config();
         Principal p;
         p.tenant = grant.value().tenant;
+        p.project = grant.value().project;
+        p.epoch = cfg.epoch;
         p.subject = grant.value().subject;
         p.client = grant.value().client;
         p.scopes = grant.value().scopes;
-        constexpr int sessionS = 8 * 3600;
+        const int sessionS = (int) cfg.sessionS;
         res.set_header ("Set-Cookie", sessionCookie (auth_->issueOpenSession (p, sessionS), sessionS));
         res.set_redirect ("/?project=" + project);
     });

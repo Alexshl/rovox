@@ -5,6 +5,7 @@
 
 #include "ExternalAuth.h"
 #include "Hmac.h"
+#include "OpenLink.h"
 #include "Ids.h"
 #include "KeyStore.h"
 #include "Sha256.h"
@@ -454,6 +455,15 @@ Result<Principal> Authenticator::resolve (const AuthRequest& req) const
 
 bool Authenticator::stillValid (const Principal& p) const
 {
+    if (p.authMode == "open_link")
+    {
+        // revocable: dropping the [open_link] secret or bumping its epoch ends every session minted from a link
+        const auto cfg = OpenLinks::readConfig (configFile_);
+
+        if (cfg.secret.empty() || cfg.epoch != p.epoch)
+            return false;
+    }
+
     if (p.authMode != "token")
     {
         // external principals are re-checked on every request; a long-lived connection lives until the credential's expiry
@@ -536,7 +546,7 @@ std::string Authenticator::issueSession (const Principal& p, std::int64_t ttlSec
 
 std::string Authenticator::issueOpenSession (const Principal& p, std::int64_t ttlSeconds) const
 {
-    const json claims { { "tenant", p.tenant }, { "subject", p.subject }, { "client", p.client }, { "scopes", p.scopes.names() } };
+    const json claims { { "tenant", p.tenant }, { "project", p.project }, { "epoch", p.epoch }, { "subject", p.subject }, { "client", p.client }, { "scopes", p.scopes.names() } };
     const auto dump = claims.dump();
     const auto keyId = std::string (openSessionPrefix) + toHex (reinterpret_cast<const std::uint8_t*> (dump.data()), dump.size());
     const std::int64_t now = keys_ != nullptr ? keys_->now() : (std::int64_t) std::time (nullptr);
@@ -574,11 +584,15 @@ Result<Principal> Authenticator::fromSession (std::string_view value) const
         const auto text = hexDecode (std::string_view (keyId).substr (openSessionPrefix.size()));
         const auto claims = text ? json::parse (*text, nullptr, false) : json();
 
-        if (! claims.is_object() || ! claims.contains ("tenant") || ! claims["tenant"].is_string() || ! claims.contains ("scopes") || ! claims["scopes"].is_array())
+        if (! claims.is_object() || ! claims.contains ("tenant") || ! claims["tenant"].is_string() || ! claims.contains ("scopes") || ! claims["scopes"].is_array()
+            || ! claims.contains ("project") || ! claims["project"].is_string() || claims["project"].get<std::string>().empty()
+            || ! claims.contains ("epoch") || ! claims["epoch"].is_number_integer())
             return unauthorized();
 
         Principal p;
         p.tenant = claims["tenant"].get<std::string>();
+        p.project = claims["project"].get<std::string>();
+        p.epoch = claims["epoch"].get<std::int64_t>();
         p.subject = claims.contains ("subject") && claims["subject"].is_string() ? claims["subject"].get<std::string>() : std::string();
         p.client = claims.contains ("client") && claims["client"].is_string() ? claims["client"].get<std::string>() : std::string();
         std::vector<std::string> names;
@@ -595,6 +609,10 @@ Result<Principal> Authenticator::fromSession (std::string_view value) const
         p.scopes = scopes.value();
         p.authMode = "open_link";
         p.expiresAt = exp;
+
+        if (! stillValid (p))
+            return unauthorized();      // the secret was removed or the epoch bumped: the session is revoked
+
         return p;
     }
 

@@ -78,33 +78,46 @@ bool validNonce (const std::string& s)
 OpenLinks::OpenLinks (fs::path dataDir, fs::path configFile)
     : usedFile_ (dataDir / "auth" / "open-used.log"), configFile_ (std::move (configFile)) {}
 
-std::string OpenLinks::secret() const
+OpenLinkConfig OpenLinks::readConfig (const fs::path& configFile)
 {
+    OpenLinkConfig c;
     std::error_code ec;
 
-    if (configFile_.empty() || ! fs::exists (configFile_, ec))
-        return {};
+    if (configFile.empty() || ! fs::exists (configFile, ec))
+        return c;
 
     try
     {
-        const auto doc = toml::parse_file (configFile_.string());
+        const auto doc = toml::parse_file (configFile.string());
         const auto* t = doc["open_link"].as_table();
 
         if (t == nullptr)
-            return {};
+            return c;
 
         if (const auto ref = (*t)["secret_ref"].value_or (std::string()); ! ref.empty())
         {
             const char* v = std::getenv (ref.c_str());
-            return v != nullptr ? std::string (v) : std::string();
+            c.secret = v != nullptr ? std::string (v) : std::string();
+        }
+        else
+        {
+            c.secret = (*t)["secret"].value_or (std::string());
         }
 
-        return (*t)["secret"].value_or (std::string());
+        c.epoch = (*t)["epoch"].value_or ((std::int64_t) 0);
+        c.sessionS = std::clamp<std::int64_t> ((*t)["session_s"].value_or (defaultSessionS), 60, 8 * 3600);
     }
     catch (const toml::parse_error&)
     {
         return {};      // fails closed
     }
+
+    return c;
+}
+
+std::string OpenLinks::secret() const
+{
+    return readConfig (configFile_).secret;
 }
 
 bool OpenLinks::enabled() const
@@ -137,6 +150,8 @@ bool OpenLinks::burn (const std::string& jti, std::int64_t exp, std::int64_t now
             std::istringstream ls (line);
             std::string id;
             std::int64_t e = 0;
+
+            ++lines_;
 
             if ((ls >> id >> e) && e > now)
                 used_[id] = e;
@@ -171,7 +186,36 @@ bool OpenLinks::burn (const std::string& jti, std::int64_t exp, std::int64_t now
         return false;
     }
 
+    ++lines_;
+
+    if (lines_ > 1000 && lines_ > 2 * used_.size())
+        compact();
+
     return true;
+}
+
+/** Rewrites the log with the unexpired nonces only (temporary file + rename, so a crash leaves the old log). The caller holds mutex_. */
+void OpenLinks::compact()
+{
+    const auto tmp = usedFile_.string() + ".tmp";
+    const int fd = ::open (tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+
+    if (fd < 0)
+        return;
+
+    std::string all;
+
+    for (const auto& [id, e] : used_)
+        all += id + " " + std::to_string (e) + "\n";
+
+    const bool ok = ::write (fd, all.data(), all.size()) == (ssize_t) all.size() && ::fsync (fd) == 0;
+    ::close (fd);
+    std::error_code ec;
+
+    if (ok && ::rename (tmp.c_str(), usedFile_.c_str()) == 0)
+        lines_ = used_.size();
+    else
+        fs::remove (tmp, ec);
 }
 
 Result<OpenGrant> OpenLinks::redeem (const std::string& token, const std::string& project, std::int64_t now)
@@ -207,15 +251,16 @@ Result<OpenGrant> OpenLinks::redeem (const std::string& token, const std::string
     g.jti = str ("jti");
     g.exp = claims.contains ("exp") && claims["exp"].is_number_integer() ? claims["exp"].get<std::int64_t>() : 0;
 
-    if (! isValidTenantId (g.tenant) || g.project.empty() || ! validNonce (g.jti) || g.exp <= now || g.exp > now + maxLifetimeS)
+    // "local" is the operator's tenant: a link never opens it (checked before the nonce is burnt)
+    if (! isValidTenantId (g.tenant) || g.tenant == "local" || g.subject.size() > maxIdentityBytes || g.client.size() > maxIdentityBytes || g.project.empty() || ! validNonce (g.jti) || g.exp <= now || g.exp > now + maxLifetimeS)
         return refused();
 
     if (! constantTimeEquals (g.project, project))
-        return refused();       // the link opens the project it was minted for, nothing else
+        return refused();       // the link opens the project it was minted for (the session it starts is bound to it as well)
 
-    if (claims.contains ("scopes"))
     {
-        if (! claims["scopes"].is_array())
+        // the scopes are explicit: a token without them grants nothing (there is no default grant)
+        if (! claims.contains ("scopes") || ! claims["scopes"].is_array() || claims["scopes"].empty())
             return refused();
 
         std::vector<std::string> names;

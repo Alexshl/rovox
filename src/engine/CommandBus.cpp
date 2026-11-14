@@ -8,9 +8,42 @@
 #include "Scopes.h"
 
 #include <chrono>
+#include <map>
 
 namespace rovox
 {
+
+namespace
+{
+/** A session minted from an /open link is bound to one project (Principal::project). Global commands such a session may run, with the param
+    that names the project ("" = none, the command is not about a project; project.list and project.catalog are filtered afterwards). */
+const std::map<std::string, std::string>& boundGlobalCommands()
+{
+    static const std::map<std::string, std::string> m { { "project.list", "" }, { "project.catalog", "" }, { "project.open", "target" }, { "project.close", "project_id" },
+                                                        { "project.set_ttl", "project_id" }, { "project.delete", "project_id" }, { "plugin.catalog", "" },
+                                                        { "plugin.probe", "" }, { "template.list", "" }, { "template.get", "" } };
+    return m;
+}
+
+Error outsideProject()
+{
+    return makeError (errc::notFound, "no such project");
+}
+
+void keepOnly (json& projects, const std::string& project)
+{
+    if (! projects.is_array())
+        return;
+
+    json kept = json::array();
+
+    for (auto& p : projects)
+        if (p.is_object() && p.value ("project_id", "") == project)
+            kept.push_back (p);
+
+    projects = std::move (kept);
+}
+} // namespace
 
 json CommandResult::toJson() const
 {
@@ -163,8 +196,19 @@ CommandResult CommandBus::runNow (const std::string& name, const json& params, c
     if (cmd == nullptr)
         return CommandResult::fail (makeError (errc::notFound, "unknown command " + name));
 
+    const auto& bound = ctx.principal.project;
+
     if (cmd->isGlobal())
     {
+        if (! bound.empty())
+        {
+            const auto allowedGlobal = boundGlobalCommands().find (name);
+
+            if (allowedGlobal == boundGlobalCommands().end()
+                || (! allowedGlobal->second.empty() && (! params.is_object() || params.value (allowedGlobal->second, "") != bound)))
+                return CommandResult::fail (outsideProject());
+        }
+
         if (auto v = validateJson (cmd->paramsSchema(), params); ! v.ok())
             return CommandResult::fail (v.error());
 
@@ -187,6 +231,9 @@ CommandResult CommandBus::runNow (const std::string& name, const json& params, c
             else
                 r.error = out.error();
 
+            if (r.ok && ! bound.empty() && r.data.is_object() && r.data.contains ("projects"))
+                keepOnly (r.data["projects"], bound);
+
             return r;
         }
         catch (const std::exception& e)
@@ -194,6 +241,9 @@ CommandResult CommandBus::runNow (const std::string& name, const json& params, c
             return CommandResult::fail (makeError (errc::internal, e.what()));
         }
     }
+
+    if (! bound.empty() && ctx.projectId != bound)
+        return CommandResult::fail (outsideProject());
 
     auto* project = projects_.find (ctx.projectId, ctx.tenant);
 
@@ -210,6 +260,9 @@ CommandResult CommandBus::runBatchNow (const std::vector<Op>& ops, const Command
         if (registry_.find (op.name) != nullptr)
             if (auto missing = missingScope (ctx.principal, op.name))
                 return CommandResult::fail (forbiddenScopeError (*missing, op.name));
+
+    if (! ctx.principal.project.empty() && ctx.projectId != ctx.principal.project)
+        return CommandResult::fail (outsideProject());
 
     auto* project = projects_.find (ctx.projectId, ctx.tenant);
 

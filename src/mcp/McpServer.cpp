@@ -512,6 +512,9 @@ json McpServer::handleRequest (Session& s, const json& req, RequestContext& rc)
 
             for (auto& pr : projects_.list (s.tenant))
             {
+                if (! s.principal.project.empty() && pr.id != s.principal.project)
+                    continue;
+
                 list.push_back ({ { "uri", "rovox://project/" + pr.id + "/summary" }, { "name", pr.name + " (summary)" }, { "mimeType", "application/json" } });
                 list.push_back ({ { "uri", "rovox://project/" + pr.id + "/transport" }, { "name", pr.name + " (transport)" }, { "mimeType", "application/json" } });
             }
@@ -551,7 +554,15 @@ json McpServer::handleRequest (Session& s, const json& req, RequestContext& rc)
             std::lock_guard<std::mutex> lock (s.stateMutex);
 
             if (method == "resources/subscribe")
-                s.subscribedUris.insert (params["uri"].get<std::string>());
+            {
+                const auto uri = params["uri"].get<std::string>();
+
+                // a link session follows its own project only
+                if (! s.principal.project.empty() && uri.rfind ("rovox://project/" + s.principal.project + "/", 0) != 0)
+                    return rpcError (id, -32602, "no such resource");
+
+                s.subscribedUris.insert (uri);
+            }
             else
                 s.subscribedUris.erase (params["uri"].get<std::string>());
 
@@ -628,6 +639,27 @@ json McpServer::handleToolsCall (Session& s, const json& params, RequestContext&
 
     if (! args.is_object())
         return { { "error", { { "code", -32602 }, { "message", "arguments must be an object" } } } };
+
+    // a session minted from an /open link touches its project only: a tool that takes project_id gets (or must name) that project, the few project-less
+    // tools it may use are listed; everything else is refused (commands are guarded again in the CommandBus)
+    if (const auto& bound = s.principal.project; ! bound.empty())
+    {
+        static const std::set<std::string> projectless { "project.list", "project.catalog", "plugin.catalog", "plugin.probe", "template.list", "template.get",
+                                                         "recipe.list", "recipe.get", "delivery.list_adapters", "time.convert" };
+        const bool takesProject = tool->inputSchema.contains ("properties") && tool->inputSchema["properties"].contains ("project_id");
+
+        if (takesProject)
+        {
+            if (! args.contains ("project_id") || args["project_id"].is_null())
+                args["project_id"] = bound;
+            else if (args["project_id"] != json (bound))
+                return toolResult (ToolOutput::failure (makeError (errc::notFound, "no such project")));
+        }
+        else if (projectless.count (tool->name) == 0 && ! (tool->name == "project.open" && args.value ("target", "") == bound))
+        {
+            return toolResult (ToolOutput::failure (makeError (errc::notFound, "no such project")));
+        }
+    }
 
     // job.cancel needs the scope of the job's kind
     if ((tool->name == "job.cancel" || tool->name == "cancel_render") && args.contains ("job_id") && args["job_id"].is_string())
@@ -960,7 +992,8 @@ json McpServer::readResource (Session& s, const std::string& uri, std::optional<
         json list = json::array();
 
         for (auto& p : projects_.list (s.tenant))
-            list.push_back (p.toJson());
+            if (s.principal.project.empty() || p.id == s.principal.project)
+                list.push_back (p.toJson());
 
         return text ({ { "projects", list } });
     }
@@ -971,7 +1004,7 @@ json McpServer::readResource (Session& s, const std::string& uri, std::optional<
     {
         auto info = jobs_.get (uri.substr (jobs.size()));
 
-        if (! info || info->tenant != s.tenant)
+        if (! info || info->tenant != s.tenant || (! s.principal.project.empty() && info->projectId != s.principal.project))
             return fail (errc::notFound, "no such job");
 
         return text (info->toJson());
@@ -986,6 +1019,10 @@ json McpServer::readResource (Session& s, const std::string& uri, std::optional<
             return fail (errc::invalidParams, "unknown resource");
 
         const auto project = rest.substr (0, slash), what = rest.substr (slash + 1);
+
+        if (! s.principal.project.empty() && project != s.principal.project)
+            return fail (errc::notFound, "no such project");
+
         auto summary = projects_.revisionOf (project);
 
         if (! summary)
