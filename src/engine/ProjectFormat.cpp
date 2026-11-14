@@ -185,6 +185,15 @@ void fsyncDirectory (const fs::path& dir)
     }
 }
 
+void setClipResamplingQuality (juce::ValueTree node, te::ResamplingQuality quality)
+{
+    if (node.hasType (te::IDs::AUDIOCLIP))
+        node.setProperty (te::IDs::resamplingQuality, juce::VariantConverter<te::ResamplingQuality>::toVar (quality), nullptr);
+
+    for (auto child : node)
+        setClipResamplingQuality (child, quality);
+}
+
 namespace
 {
 Result<void> writeTemp (const fs::path& tmp, const std::string& content, bool doFsync)
@@ -227,6 +236,7 @@ std::string readFile (const fs::path& p)
 std::string editXml (const juce::ValueTree& state, std::uint64_t revision)
 {
     auto copy = state.createCopy();
+    setClipResamplingQuality (copy, te::ResamplingQuality::sincBest);       // the live downgrade is never persisted
     copy.setProperty (prop::revision, (juce::int64) revision, nullptr);
     copy.setProperty (prop::schema, currentSchema, nullptr);
     std::unique_ptr<juce::XmlElement> xml (copy.createXml());

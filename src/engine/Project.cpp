@@ -35,6 +35,9 @@ static void defaultClipResampling (juce::ValueTree node)
 std::unique_ptr<te::Edit> createEditForProject (te::Engine& engine, const fs::path& dir, juce::ValueTree state, te::Edit::EditRole role)
 {
     defaultClipResampling (state);
+    // A render (REAPER parity, bit-identical output) always runs on sincBest; the live edit plays on sincMedium. The property is written before
+    // the Edit exists and without an undo manager, so it is neither undoable nor reported as a change; editXml puts sincBest back on save.
+    setClipResamplingQuality (state, role == te::Edit::EditRole::forEditing ? te::ResamplingQuality::sincMedium : te::ResamplingQuality::sincBest);
     te::Edit::Options o { engine };
     o.editState = std::move (state);
     o.editProjectItemID = te::ProjectItemID::createNewID (te::ProjectID {});

@@ -53,13 +53,15 @@ public:
     bool addSystemAudioIODeviceTypes() override     { return config.audio == AudioMode::Device; }
     bool autoInitialiseDeviceManager() override     { return false; }
 
-    // Clips play through the real-time wave node: it resamples (sample-rate conversion, varispeed) with libsamplerate's best sinc converter.
+    // Clips play through the real-time wave node: it resamples (sample-rate conversion, varispeed) with a libsamplerate sinc converter.
+    // Live editing uses the medium one (E1-07: 16 resampled tracks cost 24 % CPU on sincBest, 7.6 % on sincMedium); createEditForProject puts
+    // sincBest on every clip of a render edit and editXml on every saved file, so the downgrade never leaves the live edit.
     // The proxy-file path uses a Lagrange interpolator whatever the clip's resamplingQuality says, and it loses highs (-1 dB at 16 kHz).
     ClipDefaults getClipDefaults() override
     {
         ClipDefaults d;
         d.useProxyFile = false;
-        d.resamplingQuality = te::ResamplingQuality::sincBest;
+        d.resamplingQuality = te::ResamplingQuality::sincMedium;
         return d;
     }
 

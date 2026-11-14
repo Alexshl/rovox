@@ -7,7 +7,7 @@
 //   s3: 32 tracks x 3 fx (EQ + compressor + reverb)
 //   s4: 3 x s1 open; one plays in real time while two render offline concurrently
 //   s5: 16 tracks of 44.1 kHz media in a 48 kHz project, real-time playback; clip resampling quality from ROVOX_BENCH_RESAMPLING
-//       (sincBest | sincMedium | sincFast | lagrange; default sincBest)
+//       (sincBest | sincMedium | sincFast | lagrange; default sincMedium, the live-playback quality)
 
 #include "Bench.h"
 
@@ -459,7 +459,7 @@ int runBench (const Options& o)
     {
         sc.tracks = 16; sc.fx = 0;
         gDeviceRate = 48000.0;
-        sc.quality = te::ResamplingQuality::sincBest;
+        sc.quality = te::ResamplingQuality::sincMedium;
 
         if (const char* q = std::getenv ("ROVOX_BENCH_RESAMPLING"); q != nullptr && *q != 0)
         {

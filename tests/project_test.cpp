@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Rovox contributors
 
 #include "Ids.h"
+#include "Render.h"
 #include "Scopes.h"
 #include "TestFramework.h"
 #include "TestSupport.h"
@@ -1152,4 +1153,44 @@ ROVOX_TEST (project, a_batch_with_one_forbidden_op_is_rejected_as_a_whole)
     reader.scopes.add (Scope::projectsWrite);
     ctx.setPrincipal (reader);
     CHECK (env.bus.runBatchNow ({ Op { "track.list", json::object() }, Op { "track.create", { { "name", "yes" } } } }, ctx).ok);
+}
+
+//==============================================================================
+// E1-11: live playback resamples with sincMedium; the saved file and renders stay on sincBest
+ROVOX_TEST (project, live_sinc_medium_saved_and_render_sinc_best)
+{
+    test::Env env;
+    const auto id = buildRichProject (env);
+    auto& p = env.project (id);
+
+    int clips = 0;
+
+    for (auto* track : te::getAudioTracks (p.edit()))
+        for (auto* clip : track->getClips())
+            if (auto* ac = dynamic_cast<te::AudioClipBase*> (clip))
+            {
+                ++clips;
+                CHECK (ac->getResamplingQuality() == te::ResamplingQuality::sincMedium);
+            }
+
+    CHECK (clips > 0);
+
+    REQUIRE (p.save().ok());
+    const auto xml = readText (p.dir() / "edit.xml");
+    CHECK (xml.find ("resamplingQuality=\"sincBest\"") != std::string::npos);
+    CHECK (xml.find ("sincMedium") == std::string::npos);
+
+    auto snapshot = makeRenderSnapshot (p);
+    REQUIRE (snapshot != nullptr);
+
+    for (auto* track : te::getAudioTracks (*snapshot))
+        for (auto* clip : track->getClips())
+            if (auto* ac = dynamic_cast<te::AudioClipBase*> (clip))
+                CHECK (ac->getResamplingQuality() == te::ResamplingQuality::sincBest);
+
+    // the live edit is untouched by the snapshot
+    for (auto* track : te::getAudioTracks (p.edit()))
+        for (auto* clip : track->getClips())
+            if (auto* ac = dynamic_cast<te::AudioClipBase*> (clip))
+                CHECK (ac->getResamplingQuality() == te::ResamplingQuality::sincMedium);
 }

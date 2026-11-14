@@ -88,6 +88,10 @@ struct LoadedProject
 /** Writes edit.xml + rovox.json atomically (temp files, fsync, rename; manifest last). `editState` gets rovox:revision. */
 Result<void> writeProject (const fs::path& dir, const juce::ValueTree& editState, const Manifest&, const SaveOptions& = {});
 
+/** Sets the resampling quality of every audio clip in the tree, outside the undo history. Live playback runs on sincMedium (16 resampled
+    tracks cost 24 % CPU on sincBest, 7.6 % on sincMedium); the saved project and every render stay on sincBest. */
+void setClipResamplingQuality (juce::ValueTree node, te::ResamplingQuality quality);
+
 /** Reads a project directory, repairing the "edit.xml newer than rovox.json" state. */
 Result<LoadedProject> readProject (const fs::path& dir);
 
