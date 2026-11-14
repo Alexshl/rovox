@@ -87,7 +87,7 @@ ROVOX_TEST (platform, origin_subject_and_client_reach_history_list_and_the_event
 
     Origin from { Origin::Kind::mcp, "mcp_77", "Platform agent", "user-42", "flute-teacher" };
     auto r = env.runAs (from, id, "track.create", { { "name", "Flute" } });
-    REQUIRE (r.ok());
+    REQUIRE (r.ok);
 
     // history.list: the undo step carries the origin of the caller, subject and client included
     const auto history = env.ok (id, "history.list");
@@ -106,7 +106,7 @@ ROVOX_TEST (platform, origin_subject_and_client_reach_history_list_and_the_event
 
     // an origin without them stays as before: the keys are absent, not empty
     auto plain = env.run (id, "track.create", { { "name", "Plain" } });
-    REQUIRE (plain.ok());
+    REQUIRE (plain.ok);
     const auto after = env.ok (id, "history.list")["undo"].back();
     CHECK (! after["origin"].contains ("subject"));
     CHECK (! after["origin"].contains ("client"));
