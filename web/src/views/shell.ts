@@ -96,7 +96,10 @@ export class Shell {
   private readonly arrange: ArrangeView;
   private readonly mixer: MixerView;
   private readonly menubar = h('div', { class: 'menubar' });
-  private readonly tabs = h('div', { class: 'tabs', attrs: { role: 'tablist' } });
+  private readonly tabs = h('div', { class: 'tabs' });
+  // The tablist is an empty element that owns the tabs through aria-owns: the mute switch and close button sit between the tabs in the DOM, and a
+  // tablist may only contain tabs (axe aria-required-children).
+  private readonly tablist = h('div', { class: 'sr-only', attrs: { role: 'tablist' } });
   private readonly transport = h('div', { class: 'transport' });
   private readonly mcp = h('aside', { class: 'mcp-panel' });
   private readonly banner = h('div', { class: 'banner', style: { display: 'none' } });
@@ -149,6 +152,7 @@ export class Shell {
     this.buildMcpPanel();
 
     const main = h('div', { class: 'main' }, this.arrange.el, this.mixer.el);
+    this.tabs.append(this.tablist);
     this.el = h('div', { id: 'app' }, this.menubar, this.tabs, this.transport, this.banner, h('div', { class: 'workspace' }, main, this.mcp), this.toasts);
 
     onLocaleChange(() => this.relabel());
@@ -178,7 +182,7 @@ export class Shell {
 
   /** The labels of elements that live as long as the shell (the rest is rebuilt by buildMenubar / buildTransport / buildMcpPanel). */
   private applyLabels(): void {
-    this.tabs.setAttribute('aria-label', t('a11y.tabs'));
+    this.tablist.setAttribute('aria-label', t('a11y.tabs'));
     this.mcp.setAttribute('aria-label', t('a11y.mcp'));
     this.snapBtn.setAttribute('aria-label', t('a11y.snap'));
     this.gridSel.setAttribute('aria-label', t('a11y.grid'));
@@ -731,6 +735,8 @@ export class Shell {
     if (sig === this.tabsSignature) return;
     this.tabsSignature = sig;
     clear(this.tabs);
+    this.tabs.append(this.tablist);
+    const tabIds: string[] = [];
     // the tab that is in the Tab order: the one last moved to, else the active one, else the first
     const rovingId = [this.tabFocusId, app.activeId, app.order[0]].find((x) => x !== undefined && app.projects.has(x));
     for (const id of app.order) {
@@ -761,7 +767,7 @@ export class Shell {
       );
       const tab = h(
         'div',
-        { class: 'tab', attrs: { role: 'tab', 'aria-selected': String(id === app.activeId), tabindex: id === rovingId ? '0' : '-1', 'data-tab-focus': `tab:${id}` } },
+        { class: 'tab', id: `rx-tab-${id}`, attrs: { role: 'tab', 'aria-selected': String(id === app.activeId), tabindex: id === rovingId ? '0' : '-1', 'data-tab-focus': `tab:${id}` } },
         h('span', { class: 'name', text: p.name || id, title: p.name }),
         h('span', { class: 'state', text: label }),
         p.dirty ? h('span', { class: 'dirty', text: '●', title: t('tabs.dirty') }) : null,
@@ -792,8 +798,10 @@ export class Shell {
         this.tabs.querySelectorAll<HTMLElement>('[role=tab]').forEach((t) => t.setAttribute('tabindex', t.getAttribute('data-tab-focus') === `tab:${to}` ? '0' : '-1'));
         this.tabs.querySelector<HTMLElement>(`[data-tab-focus="tab:${to}"]`)?.focus();
       });
+      tabIds.push(`rx-tab-${id}`);
       this.tabs.append(item);
     }
+    this.tablist.setAttribute('aria-owns', tabIds.join(' '));
     this.tabs.append(h('button', { class: 'add', text: '+', title: t('tabs.new'), attrs: { 'aria-label': t('tabs.new'), 'data-tab-focus': 'add' }, on: { click: () => void this.promptNewProject() } }));
     // the tabs are rebuilt on every change: keep the keyboard focus on the same control
     if (focusKey) this.tabs.querySelector<HTMLElement>(`[data-tab-focus="${focusKey}"]`)?.focus();

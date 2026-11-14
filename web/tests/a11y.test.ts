@@ -274,7 +274,8 @@ describe('project tabs', () => {
 
   it('is a tablist with a roving tabindex: the arrows move the focus, Enter activates', async () => {
     const { app } = await twoTabs();
-    expect(document.querySelector('.tabs')!.getAttribute('role')).toBe('tablist');
+    const tablist = document.querySelector('[role=tablist]')!;
+    expect(tablist.getAttribute('aria-owns')!.split(' ')).toEqual(tabs().map((t) => t.id));
     expect(tabs().map((t) => t.tabIndex)).toEqual([0, -1]);
     tabs()[0]!.focus();
 

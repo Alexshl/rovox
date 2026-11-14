@@ -193,7 +193,7 @@ describe('switching', () => {
 
     const titles = () => [...document.querySelectorAll('.menubar .menu > button')].map((b) => b.textContent);
     expect(titles()[0]).toBe('Файл');
-    expect(document.querySelector('.tabs')!.getAttribute('aria-label')).toBe('Відкриті проєкти');
+    expect(document.querySelector('[role=tablist]')!.getAttribute('aria-label')).toBe('Відкриті проєкти');
 
     const view = document.querySelectorAll<HTMLButtonElement>('.menubar .menu > button')[2]!;
     view.click();
@@ -206,7 +206,7 @@ describe('switching', () => {
     expect(getLocale()).toBe('en');
     expect(localStorage.getItem('rovox.locale')).toBe('en');
     expect(titles()[0]).toBe('File');
-    expect(document.querySelector('.tabs')!.getAttribute('aria-label')).toBe('Open projects');
+    expect(document.querySelector('[role=tablist]')!.getAttribute('aria-label')).toBe('Open projects');
     expect(document.querySelector('.transport')!.textContent).toContain('GRID');
     expect(document.querySelector('.mixer .head')!.textContent).toContain('MIXER');
     setLocale('uk');
