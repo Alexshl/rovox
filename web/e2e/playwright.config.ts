@@ -13,6 +13,8 @@ const secure = (process.env.E2E_SECURE_ORIGINS ?? '').split(',').filter(Boolean)
 const secureArgs = secure.length ? [`--unsafely-treat-insecure-origin-as-secure=${secure.join(',')}`] : [];
 const securePrefs = secure.length ? { 'dom.securecontext.allowlist': secure.map((o) => new URL(o).hostname).join(',') } : {};
 
+// Both Chromium projects use `channel: 'chromium'` (new headless mode): the old chrome-headless-shell ignores --unsafely-treat-insecure-origin-as-secure,
+// so isSecureContext stays false, there is no AudioDecoder and the sound button says "unavailable".
 export default defineConfig({
   testDir: '.',
   testMatch: '*.spec.ts',
@@ -46,6 +48,7 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         ...desktop,
+        channel: 'chromium',
         launchOptions: { args: ['--autoplay-policy=no-user-gesture-required', '--force-color-profile=srgb', '--font-render-hinting=none', '--disable-lcd-text', ...secureArgs] },
       },
     },
@@ -66,6 +69,7 @@ export default defineConfig({
         isMobile: true,
         hasTouch: true,
         deviceScaleFactor: 2,
+        channel: 'chromium',
         launchOptions: { args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--disable-lcd-text', ...secureArgs] },
       },
       testMatch: /visual\.spec\.ts/,

@@ -15,7 +15,7 @@ import { agentEdits, readSeed } from './seed';
 const here = dirname(fileURLToPath(import.meta.url));
 
 function hasBaselines(info: TestInfo): boolean {
-  if (info.config.updateSnapshots !== 'none') return true; // generating them
+  if (info.config.updateSnapshots === 'all') return true; // generating them (the default 'missing' would write them and fail the test, so it is not 'generating')
   return existsSync(join(here, '__screenshots__', `${info.project.name}-${process.platform}`));
 }
 

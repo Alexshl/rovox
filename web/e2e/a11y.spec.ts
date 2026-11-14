@@ -17,8 +17,10 @@ test('keyboard only: menu, tab, transport, fader', async ({ page }) => {
   await page.getByRole('button', { name: 'Файл', exact: true }).focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('menuitem').first()).toBeVisible();
-  await page.keyboard.press('ArrowDown');
+  // Enter on the button moves the focus into the menu (first item); the arrows then walk the items
   await expect(page.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('menuitem').nth(1)).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menuitem')).toHaveCount(0);
 

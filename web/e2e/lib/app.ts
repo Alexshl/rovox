@@ -31,7 +31,7 @@ export async function openApp(page: Page, o: OpenOptions): Promise<void> {
 
 /** Fonts loaded, tabs rendered, nothing animating. */
 export async function settle(page: Page): Promise<void> {
-  await page.waitForSelector('[role=tablist] [role=tab]');
+  await page.waitForSelector('[role=tab]');
   await page.evaluate(() => document.fonts.ready.then(() => undefined));
   await page.addStyleTag({ content: '*, *::before, *::after { animation: none !important; transition: none !important; caret-color: transparent !important; }' });
   await page.waitForTimeout(500);

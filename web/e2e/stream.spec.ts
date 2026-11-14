@@ -96,6 +96,10 @@ test.describe('tabs', () => {
 
     await sw.click();
     await expect.poll(() => toneDb(page, 880), { timeout: 5_000, message: 'the tone is back' }).toBeGreaterThan(-45);
+
+    // the server plays on after the page closes and mixes every playing project into the one output: stop it, or the next test hears it
+    await page.getByRole('tab', { name: new RegExp(seed.second.name) }).click();
+    await stopButton(page).click();
   });
 });
 

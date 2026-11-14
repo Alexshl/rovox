@@ -36,14 +36,15 @@ test('--audio none: Play prepares a preview and an audio element plays it', asyn
     { open: [id], active: id },
   );
   await page.goto(`/?token=${encodeURIComponent(TOKEN)}`);
-  await page.waitForSelector('[role=tablist] [role=tab]');
+  await page.waitForSelector('[role=tab]');
 
   await expect(audioButton(page)).toHaveText('Звук: прослуховування');
   await playButton(page).click();
   await page.waitForFunction(() => (window as any).__plays.length > 0, undefined, { timeout: 60_000 });
   const state = await page.evaluate(async () => {
     const a = (window as any).__plays[0] as HTMLMediaElement;
-    await new Promise((r) => setTimeout(r, 2000));
+    // the first start of an audio output can take a moment (Firefox): wait for the clock to move rather than for a fixed time
+    for (let i = 0; i < 100 && a.currentTime <= 0.5 && !a.error; i++) await new Promise((r) => setTimeout(r, 100));
     return { src: a.currentSrc || a.src, paused: a.paused, currentTime: a.currentTime, error: a.error?.code ?? null };
   });
   expect(state.src).toContain('/api/projects/');
