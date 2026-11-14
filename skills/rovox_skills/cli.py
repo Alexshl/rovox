@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 
+from . import eartraining  # noqa: F401  (registers the ear_training skill)
 from .core import Core, CoreError
 from .skills import describe, run_skill
 

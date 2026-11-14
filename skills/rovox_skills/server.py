@@ -9,6 +9,7 @@ import sys
 from . import __version__
 from . import analysis
 from .accompany.tools import ACCOMPANY_TOOLS, wrap_handler as _accompany_wrap
+from .eartraining import EARTRAINING_TOOLS, wrap_handler as _eartraining_wrap
 from .core import Core, CoreError
 from .skills import describe, run_skill
 from .notation import NOTATION_TOOLS, call_tool as call_notation, tool_specs as notation_specs
@@ -110,6 +111,7 @@ def _handle(message, core_factory):
 
 
 TOOLS, _handle = TOOLS + ACCOMPANY_TOOLS, _accompany_wrap(_handle)      # adds accompany.styles / .generate / .apply
+TOOLS, _handle = TOOLS + EARTRAINING_TOOLS, _eartraining_wrap(_handle)  # adds eartraining.generate
 
 
 def serve(url=None, token=None, stdin=sys.stdin, stdout=sys.stdout):

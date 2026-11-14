@@ -97,7 +97,7 @@ class Core:
         self.session = None
 
     # -- tools ---------------------------------------------------------------------------------------------------
-    def envelope(self, tool, **arguments):
+    def envelope(self, tool, /, **arguments):
         """The full structured result of a tool call (ok, data, error, revision)."""
         self.initialize()
         r = self._request("tools/call", {"name": tool, "arguments": arguments})
@@ -105,7 +105,7 @@ class Core:
             raise RuntimeError("%s: protocol error %s" % (tool, r["error"]))
         return r["result"]["structuredContent"]
 
-    def call(self, tool, **arguments):
+    def call(self, tool, /, **arguments):
         env = self.envelope(tool, **arguments)
         if not env.get("ok"):
             raise CoreError(tool, env.get("error"))
