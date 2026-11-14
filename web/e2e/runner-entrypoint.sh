@@ -5,7 +5,7 @@
 # Entry point of the Playwright runner (docker/compose.e2e.yml): installs the npm dependencies and gives the container an audio device. Firefox
 # never resolves AudioContext.resume() without one (Chromium has a fake device), so the stream tests need a PulseAudio null sink.
 set -eu
-npm install --no-audit --no-fund
+npm ci --no-audit --no-fund       # the lockfile pins the e2e dependencies
 if ! command -v pulseaudio >/dev/null 2>&1; then
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends pulseaudio >/dev/null
