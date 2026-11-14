@@ -170,7 +170,7 @@ class Mcp:
                 return m
         return None
 
-    def tool(self, name, **args):
+    def tool(self, name, /, **args):    # positional-only: tools take a `name` argument of their own
         r = self.rpc("tools/call", {"name": name, "arguments": args})
         return r["result"]["structuredContent"]
 

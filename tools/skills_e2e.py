@@ -76,7 +76,7 @@ class Core:
         self._rpc({"jsonrpc": "2.0", "id": self.n, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "skills_e2e.py", "version": "1"}}})
         self._rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    def ok(self, name, **args):
+    def ok(self, name, /, **args):      # positional-only: tools take a `name` argument of their own
         self.n += 1
         m = self._rpc({"jsonrpc": "2.0", "id": self.n, "method": "tools/call", "params": {"name": name, "arguments": args}})
         if "error" in m:
