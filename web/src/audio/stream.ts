@@ -175,6 +175,14 @@ export class BrowserAudio {
   audiblePosition(): number | null {
     const r = this.report;
     if (!this.ctx || !r || !r.playing || r.pos === null) return null;
+    // The context time the listener hears right now: the (contextTime, performanceTime) pair of getOutputTimestamp already is the audible time and
+    // is extrapolated with the wall clock. ctx.currentTime alone is coarse in Firefox (~20 ms steps) and trails the audio thread's clock the
+    // worklet stamps r.t with, which put the playhead 30-40 ms behind the sound there.
+    const ts = this.ctx.getOutputTimestamp?.();
+    if (ts && ts.contextTime !== undefined && ts.performanceTime !== undefined && ts.performanceTime > 0) {
+      const audible = ts.contextTime + (performance.now() - ts.performanceTime) / 1000;
+      return Math.max(0, r.pos / STREAM_RATE + audible - r.t);
+    }
     const latency = (this.ctx.outputLatency || this.ctx.baseLatency || 0) as number;
     const elapsed = this.ctx.currentTime - r.t;
     return Math.max(0, r.pos / STREAM_RATE + elapsed - latency);
