@@ -29,6 +29,9 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     storageState: AUTH_FILE,
+    // the server's CSP (style-src 'self') stays as shipped; the tests only need it bypassed for their own injected style that
+    // freezes animations before screenshots
+    bypassCSP: true,
     locale: 'uk-UA',
     timezoneId: 'UTC',
     colorScheme: 'dark',
