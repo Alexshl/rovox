@@ -1321,8 +1321,18 @@ private:
         {
             std::lock_guard<std::mutex> lock (listenMutex);
 
+            if (stopListener)
+                return;
+
             if (! listener.joinable())
-                listener = std::thread ([this] { listenLoop(); });
+            {
+                listenerDone = false;
+                listener = std::thread ([this]
+                {
+                    listenLoop();
+                    listenerDone = true;
+                });
+            }
             else if (listenClient != nullptr)
                 listenClient->stop();
         }
@@ -1337,14 +1347,24 @@ private:
         {
             std::lock_guard<std::mutex> lock (listenMutex);
             stopListener = true;
-
-            if (listenClient != nullptr)
-                listenClient->stop();
-
             t = std::move (listener);
         }
 
         listenCv.notify_all();
+
+        // A stop() that lands before the listener has opened its socket is lost (and the GET then waits for the first byte of the stream, i.e. the
+        // keepalive of the server, 15 s or more): repeat it until the thread has ended.
+        while (t.joinable() && ! listenerDone)
+        {
+            {
+                std::lock_guard<std::mutex> lock (listenMutex);
+
+                if (listenClient != nullptr)
+                    listenClient->stop();
+            }
+
+            std::this_thread::sleep_for (std::chrono::milliseconds (10));
+        }
 
         if (t.joinable())
             t.join();
@@ -1424,6 +1444,7 @@ private:
     std::set<std::string> activeIds;                // JSON of the ids of the calls being served
     std::string sessionId, initializeLine;
     std::atomic<bool> stopListener { false };
+    std::atomic<bool> listenerDone { false };
     std::thread listener;
     std::unique_ptr<httplib::Client> listenClient;
 };
