@@ -340,7 +340,7 @@ ROVOX_TEST (core, job_drain_lets_a_short_job_finish_interrupts_a_long_one_and_re
 
     {
         JobManager jobs (dir, JobPools { 1, 1, 1 });
-        std::atomic<bool> longStarted { false };
+        std::atomic<bool> longStarted { false }, shortStarted { false };
 
         JobSpec longSpec;
         longSpec.kind = "render";
@@ -358,8 +358,9 @@ ROVOX_TEST (core, job_drain_lets_a_short_job_finish_interrupts_a_long_one_and_re
         JobSpec shortSpec;
         shortSpec.kind = "analysis";
         shortSpec.pool = "analysis";
-        shortId = jobs.submit (shortSpec, [] (JobContext&) -> Result<json>
+        shortId = jobs.submit (shortSpec, [&shortStarted] (JobContext&) -> Result<json>
         {
+            shortStarted = true;
             std::this_thread::sleep_for (std::chrono::milliseconds (100));
             return json { { "ok", true } };
         }).id;
@@ -367,10 +368,12 @@ ROVOX_TEST (core, job_drain_lets_a_short_job_finish_interrupts_a_long_one_and_re
         JobSpec queuedSpec = longSpec;      // behind the long one in the single render worker: never starts
         queuedId = jobs.submit (queuedSpec, [] (JobContext&) -> Result<json> { return json { { "never", true } }; }).id;
 
-        for (int i = 0; i < 500 && ! longStarted; ++i)
+        // both must be running before the drain: a short job still queued would be interrupted, not let finish
+        for (int i = 0; i < 500 && ! (longStarted && shortStarted); ++i)
             std::this_thread::sleep_for (std::chrono::milliseconds (10));
 
         REQUIRE (longStarted);
+        REQUIRE (shortStarted);
         CHECK (! jobs.draining());
 
         const auto t0 = std::chrono::steady_clock::now();

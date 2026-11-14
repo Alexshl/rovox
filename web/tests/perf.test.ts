@@ -20,7 +20,8 @@ try {
 // jsdom, which is several times slower than Chrome's canvas, so the bound is 3x the target: 60 ms per frame (~16 fps here). A frame that
 // costs more than that is an algorithmic regression (the drawing is virtualised), not a slow rasteriser; the number printed is the
 // figure to compare between versions.
-const FRAME_BUDGET_MS = 20 * 3;
+// ROVOX_PERF_BUDGET_MS: the Docker web stage shares the CPU with the C++ compile, so it only guards against gross regressions there
+const FRAME_BUDGET_MS = Number(process.env.ROVOX_PERF_BUDGET_MS ?? '') || 20 * 3;
 
 describe.skipIf(!hasCanvas)('arrange performance', () => {
   it('draws a frame of a 5000 item, 64 track project quickly and queries the index in microseconds', async () => {

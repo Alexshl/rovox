@@ -22,6 +22,8 @@ RUN npm ci --no-audit --no-fund
 COPY web/ ./
 # the canvas tests must run here: a missing node-canvas fails them instead of skipping
 ENV ROVOX_REQUIRE_CANVAS=1
+# this stage runs next to the C++ compile (BuildKit builds stages in parallel): the paint-time budget is loose here; the strict 60 ms applies to npm test on a developer machine
+ENV ROVOX_PERF_BUDGET_MS=400
 RUN npm test && npm run build
 
 # ---- toolchain: compilers and -dev packages --------------------------------
