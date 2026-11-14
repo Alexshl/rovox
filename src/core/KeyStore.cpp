@@ -25,7 +25,7 @@ namespace rovox
 
 namespace
 {
-constexpr auto checkInterval = std::chrono::seconds (1);
+constexpr auto checkInterval = std::chrono::milliseconds (250);
 constexpr size_t maxLabel = 120;
 
 /** An exclusive flock on `<dir>/keys.lock` for the read-modify-write of keys.json across processes (the server and `rovox keys`). */

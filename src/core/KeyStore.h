@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Rovox contributors
 
 // API keys in <data>/auth/keys.json (mode 0600, atomic writes). Only the SHA-256 of a key's secret is stored; the full key
-// is returned once, by create / rotate. The file is re-read when its mtime or size changes (checked at most once a second),
-// so an edit by the CLI or by hand takes effect in about a second. create / revoke / rotate are also appended to
+// is returned once, by create / rotate. The file is re-read when its mtime or size changes (checked at most four times a second: a stat call),
+// so an edit by the CLI or by hand takes effect in well under a second. create / revoke / rotate are also appended to
 // <data>/auth/audit.jsonl (mode 0600): {ts, action, key_id, tenant, label, scopes, actor}, never a key or a hash.
 #pragma once
 

@@ -248,6 +248,23 @@ class TransposeTests(Base):
         self.assertEqual(back["melody"]["notes"], notes)
         self.assertEqual(xml.count('<tie type="start"/>'), 1)
 
+    def test_round_trip_concert_to_bb_and_back_gives_the_original_pitches(self):
+        base = musicxml.import_musicxml(WALTZ)
+        original = [(n["pitch"], n["start_qn"], n["length_qn"]) for n in base["melody"]["notes"]]
+        for target, back_semis in (("Bb", -2), ("Eb", -9), ("F", -7)):
+            there = call("notation.transpose", {"file": WALTZ, "to": target})["data"]
+            self.assertNotEqual([n["pitch"] for n in there["melody"]["notes"]], [o[0] for o in original])
+            back = call("notation.transpose", {"notes": there["melody"]["notes"], "key": there["key"], "mode": there["mode"], "to": back_semis})["data"]
+            self.assertEqual([(n["pitch"], n["start_qn"], n["length_qn"]) for n in back["melody"]["notes"]], original, target)
+            self.assertEqual((back["key"], back["key_fifths"]), (base["key"], base["key_fifths"]), target)
+
+    def test_round_trip_through_a_written_musicxml_file(self):
+        out = os.path.join(self.dir, "bb.musicxml")
+        call("notation.transpose", {"file": WALTZ, "to": "Bb", "write_musicxml": out})
+        back = call("notation.transpose", {"file": out, "to": -2})["data"]
+        base = musicxml.import_musicxml(WALTZ)
+        self.assertEqual([n["pitch"] for n in back["melody"]["notes"]], [n["pitch"] for n in base["melody"]["notes"]])
+
     def test_pipe_import_into_transpose(self):
         imported = call("notation.import", {"file": WALTZ, "expand_repeats": False})["data"]
         r = call("notation.transpose", {"notes": imported["melody"]["notes"], "key": imported["key"], "mode": imported["mode"], "to": "Bb"})["data"]
@@ -374,6 +391,29 @@ class RealToolTests(Base):
         self.assertTrue(r["ok"], r)
         with open(r["data"]["path"], "rb") as f:
             self.assertEqual(f.read(5), b"%PDF-")
+
+    def _pdf_pages(self, path):
+        import re
+        import shutil
+        import subprocess
+        if shutil.which("pdfinfo"):
+            out = subprocess.run(["pdfinfo", path], capture_output=True, text=True, check=True).stdout
+            return int(re.search(r"^Pages:\s+(\d+)", out, re.M).group(1))
+        with open(path, "rb") as f:
+            return len(re.findall(rb"/Type\s*/Page(?![s\w])", f.read()))
+
+    def test_lilypond_pdf_of_a_short_score_has_one_page(self):
+        out = os.path.join(self.dir, "short.pdf")
+        r = call("notation.engrave", {"file": WALTZ, "engine": "lilypond", "format": "pdf", "output": out})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self._pdf_pages(r["data"]["path"]), 1)
+
+    def test_lilypond_pdf_of_a_long_score_has_several_pages(self):
+        notes = [{"pitch": 60 + i % 12, "start_qn": float(i), "length_qn": 1.0} for i in range(4 * 160)]
+        xml, _ = transpose.write_musicxml(notes, 0, "major", {"beats": 4, "beat_type": 4})
+        r = call("notation.engrave", {"file": self.write("long.musicxml", xml), "engine": "lilypond", "format": "pdf", "output": os.path.join(self.dir, "long.pdf")})
+        self.assertTrue(r["ok"], r)
+        self.assertGreater(self._pdf_pages(r["data"]["path"]), 1)
 
     def test_verovio_makes_an_svg(self):
         r = call("notation.engrave", {"file": WALTZ, "engine": "verovio", "format": "svg", "output": os.path.join(self.dir, "w.svg")})
