@@ -8,6 +8,7 @@
 #include "Tracktion.h"
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 
@@ -78,6 +79,7 @@ private:
     CpuBudget budget_;
     std::unique_ptr<te::Engine> engine_;
     std::unique_ptr<BrowserStream> stream_;
+    std::mutex catalogMutex_;                    // the lazy creation of catalog_ is reached from several threads (the startup scan, request workers, jobs)
     std::unique_ptr<PluginCatalog> catalog_;     // destroyed before the engine
 };
 

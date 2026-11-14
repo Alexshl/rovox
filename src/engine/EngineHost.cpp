@@ -169,6 +169,10 @@ EngineHost::EngineHost (const EngineConfig& c) : config_ (c), budget_ (rovox::cp
 
 PluginCatalog& EngineHost::catalog()
 {
+    // Two threads that both saw nullptr used to build a catalog each; the second assignment destroyed the first one under the thread using it
+    // (glibc: "pthread_mutex_lock ... __owner == 0" abort in PluginCatalog::rescan at server start).
+    std::lock_guard<std::mutex> lock (catalogMutex_);
+
     if (catalog_ == nullptr)
         catalog_ = std::make_unique<PluginCatalog> (*this);
 
