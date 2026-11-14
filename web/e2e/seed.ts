@@ -39,8 +39,11 @@ async function newProject(mcp: Mcp, name: string): Promise<string> {
 /** Uploads WAVs, plans the import (preset auto: one track per file) and applies it. */
 export async function importAudio(mcp: Mcp, projectId: string, files: { relpath: string; data: Buffer }[]): Promise<void> {
   const folder = await uploadFolder(mcp, files);
-  const plan = await mcp.ok('import.plan', { project_id: projectId, paths: [folder], preset: 'auto', takes_mode: 'separate' });
-  await mcp.ok('import.apply', { project_id: projectId, plan_id: plan.data.plan_id });
+  // import.plan is a job over MCP: wait for it and take the plan from its result
+  const job = await mcp.ok('import.plan', { project_id: projectId, paths: [folder], preset: 'auto', takes_mode: 'separate', wait_s: 60 });
+  if (job.data.state !== 'succeeded') throw new Error(`import.plan ended ${String(job.data.state)}`);
+  const result = job.data.result as { plan_id: string };
+  await mcp.ok('import.apply', { project_id: projectId, plan_id: result.plan_id });
 }
 
 const DEMO_TRACKS: [string, Buffer][] = [
