@@ -675,6 +675,7 @@ void registerImportCommands (CommandRegistry& r)
                     if (! fs::exists (p.dir() / c.mediaPath))
                         return makeError (errc::preconditionFailed, "staged media is missing: " + c.mediaPath);
 
+            const auto mediaBefore = p.manifest().media.size();
             auto out = applyImportPlan (p, plan.value(), rename);
             out["warnings"] = plan.value().toJson()["warnings"];
 
@@ -697,6 +698,14 @@ void registerImportCommands (CommandRegistry& r)
                         fs::remove_all (uploads / top, ec);
                 }
             }
+
+            // a platform that mirrors the media learns of every new content-addressed file (the apply succeeded: no rollback follows)
+            if (p.onEvent)
+                for (size_t i = mediaBefore; i < p.manifest().media.size(); ++i)
+                {
+                    const auto& m = p.manifest().media[i];
+                    p.onEvent ({ { "type", "media.added" }, { "project_id", p.id() }, { "sha256", m.sha256 }, { "path", m.path } });
+                }
 
             p.importPlans().erase (it);
             return out;

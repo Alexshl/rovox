@@ -5,6 +5,7 @@
 
 #include "ExternalAuth.h"
 #include "Hmac.h"
+#include "Ids.h"
 #include "KeyStore.h"
 #include "Sha256.h"
 
@@ -126,6 +127,36 @@ bool readSessionKeyFile (const std::filesystem::path& file, std::string& out)
 
     out = k;
     return true;
+}
+
+/** Session-cookie key id of a principal that came in through a one-time /open link: "open~" + hex of {tenant, subject, client, scopes}. */
+constexpr std::string_view openSessionPrefix = "open~";
+
+std::optional<std::string> hexDecode (std::string_view s)
+{
+    if (s.empty() || s.size() % 2 != 0)
+        return std::nullopt;
+
+    auto nib = [] (char c) -> int
+    {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+
+    std::string out;
+
+    for (size_t i = 0; i < s.size(); i += 2)
+    {
+        const int a = nib (s[i]), b = nib (s[i + 1]);
+
+        if (a < 0 || b < 0)
+            return std::nullopt;
+
+        out += (char) (a * 16 + b);
+    }
+
+    return out;
 }
 
 Error unauthorized()
@@ -503,6 +534,16 @@ std::string Authenticator::issueSession (const Principal& p, std::int64_t ttlSec
     return p.keyId + "." + exp + "." + hmacSha256Hex (sessionKey(), macInput (p.keyId, exp, legacyToken_));
 }
 
+std::string Authenticator::issueOpenSession (const Principal& p, std::int64_t ttlSeconds) const
+{
+    const json claims { { "tenant", p.tenant }, { "subject", p.subject }, { "client", p.client }, { "scopes", p.scopes.names() } };
+    const auto dump = claims.dump();
+    const auto keyId = std::string (openSessionPrefix) + toHex (reinterpret_cast<const std::uint8_t*> (dump.data()), dump.size());
+    const std::int64_t now = keys_ != nullptr ? keys_->now() : (std::int64_t) std::time (nullptr);
+    const auto exp = std::to_string (now + ttlSeconds);
+    return keyId + "." + exp + "." + hmacSha256Hex (sessionKey(), macInput (keyId, exp, legacyToken_));
+}
+
 Result<Principal> Authenticator::fromSession (std::string_view value) const
 {
     const auto dot1 = value.find ('.');
@@ -526,6 +567,36 @@ Result<Principal> Authenticator::fromSession (std::string_view value) const
 
     if (now >= exp)
         return unauthorized();
+
+    if (keyId.rfind (openSessionPrefix, 0) == 0)
+    {
+        // a one-time /open link was redeemed (the MAC above proves this server issued the cookie); the claims are those of the link
+        const auto text = hexDecode (std::string_view (keyId).substr (openSessionPrefix.size()));
+        const auto claims = text ? json::parse (*text, nullptr, false) : json();
+
+        if (! claims.is_object() || ! claims.contains ("tenant") || ! claims["tenant"].is_string() || ! claims.contains ("scopes") || ! claims["scopes"].is_array())
+            return unauthorized();
+
+        Principal p;
+        p.tenant = claims["tenant"].get<std::string>();
+        p.subject = claims.contains ("subject") && claims["subject"].is_string() ? claims["subject"].get<std::string>() : std::string();
+        p.client = claims.contains ("client") && claims["client"].is_string() ? claims["client"].get<std::string>() : std::string();
+        std::vector<std::string> names;
+
+        for (const auto& n : claims["scopes"])
+            if (n.is_string())
+                names.push_back (n.get<std::string>());
+
+        const auto scopes = ScopeSet::parse (names);
+
+        if (! isValidTenantId (p.tenant) || p.tenant == "local" || ! scopes.ok() || scopes.value().has (Scope::admin))
+            return unauthorized();
+
+        p.scopes = scopes.value();
+        p.authMode = "open_link";
+        p.expiresAt = exp;
+        return p;
+    }
 
     if (keyId == "legacy")
         return legacyToken_.empty() ? Result<Principal> (unauthorized()) : Result<Principal> (legacyPrincipal());

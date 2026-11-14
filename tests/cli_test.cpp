@@ -1439,3 +1439,120 @@ ROVOX_TEST (cli, readyz_is_public_and_metrics_needs_the_admin_scope)
     CHECK (waitExit (server, 10) == 0);
     CHECK (std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count() < 5.0);      // nothing running: the drain does not wait for the timeout
 }
+
+ROVOX_TEST (cli, sigterm_during_a_render_interrupts_the_job_saves_the_project_and_exits_cleanly)
+{
+    if (! haveCli())
+        return;
+
+    // a render that outlasts the drain window: several long mono files (8 kHz keeps the files small), normalised to a target (two passes)
+    const auto media = test::makeTempDir ("sigterm-media");
+    json paths = json::array();
+
+    for (int i = 0; i < 4; ++i)
+    {
+        const auto f = media / ("t" + std::to_string (i + 1) + ".wav");
+        test::writeWav (f, { test::sine (220.0 * (i + 1), -20.0, 3000.0, 8000.0) }, 8000.0, 16);
+        paths.push_back (f.string());
+    }
+
+    const auto data = test::makeTempDir ("sigterm-render");
+    auto server = spawn ({ "serve", "--port", "0", "--drain-timeout", "1", "--allow-path", media.string() }, data);
+    REQUIRE (pump (server, 20, [&] { return server.out.find ("serving on") != std::string::npos; }));
+    const int port = portOf (server);
+    REQUIRE (port > 0);
+
+    httplib::Client c ("127.0.0.1", port);
+    c.set_read_timeout (180);
+    auto created = c.Post ("/api/projects", R"({"name":"render-then-term"})", "application/json");
+    REQUIRE (created != nullptr);
+    REQUIRE (created->status == 200);
+    const auto projectId = json::parse (created->body)["data"]["project_id"].get<std::string>();
+
+    const json planBody { { "name", "import.plan" }, { "params", { { "paths", paths } } } };
+    auto planned = c.Post ("/api/projects/" + projectId + "/commands", planBody.dump(), "application/json");
+    REQUIRE (planned != nullptr);
+    REQUIRE (planned->status == 200);
+    const auto planId = json::parse (planned->body)["data"]["plan_id"].get<std::string>();
+    const json applyBody { { "name", "import.apply" }, { "params", { { "plan_id", planId } } } };
+    auto applied = c.Post ("/api/projects/" + projectId + "/commands", applyBody.dump(), "application/json");
+    REQUIRE (applied != nullptr);
+    REQUIRE (applied->status == 200);
+
+    // an MCP session over HTTP starts the render job
+    const httplib::Headers base { { "Accept", "application/json, text/event-stream" }, { "MCP-Protocol-Version", "2025-06-18" } };
+    auto init = c.Post ("/mcp", base, R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sigterm-test"}}})", "application/json");
+    REQUIRE (init != nullptr);
+    const auto sid = init->get_header_value ("Mcp-Session-Id");
+    REQUIRE (! sid.empty());
+    httplib::Headers session = base;
+    session.emplace ("Mcp-Session-Id", sid);
+    c.Post ("/mcp", session, R"({"jsonrpc":"2.0","method":"notifications/initialized"})", "application/json");
+
+    auto call = [&] (const std::string& tool, const json& args) -> json
+    {
+        const json body { { "jsonrpc", "2.0" }, { "id", 5 }, { "method", "tools/call" }, { "params", { { "name", tool }, { "arguments", args } } } };
+        auto res = c.Post ("/mcp", session, body.dump(), "application/json");
+
+        if (res == nullptr)
+            return json (nullptr);
+
+        const auto parsed = json::parse (res->body, nullptr, false);
+        return parsed.is_object() && parsed.contains ("result") ? json (parsed["result"]["structuredContent"]) : json (nullptr);
+    };
+
+    const auto started = call ("render.start", { { "project_id", projectId }, { "name", "long" }, { "target_lufs", -16.0 }, { "tail_s", 0 } });
+    REQUIRE (started.is_object());
+    REQUIRE (started.value ("ok", false));
+    const auto jobId = started["data"]["job_id"].get<std::string>();
+
+    // SIGTERM only once the job runs (never a fixed sleep)
+    bool running = false;
+
+    for (int i = 0; i < 600 && ! running; ++i)
+    {
+        const auto job = call ("job.get", { { "job_id", jobId } });
+        running = job.is_object() && job.contains ("data") && job["data"].value ("state", "") == "running";
+
+        if (! running)
+            std::this_thread::sleep_for (std::chrono::milliseconds (50));
+    }
+
+    REQUIRE (running);
+    kill (server.pid, SIGTERM);
+
+    // /readyz drops at once, while the job still has its drain window
+    bool notReady = false;
+
+    for (int i = 0; i < 100 && ! notReady; ++i)
+    {
+        httplib::Client probe ("127.0.0.1", port);
+        probe.set_connection_timeout (1);
+        probe.set_read_timeout (1);
+
+        if (auto ready = probe.Get ("/readyz"); ready != nullptr)
+            notReady = ready->status == 503;
+
+        if (! notReady)
+            std::this_thread::sleep_for (std::chrono::milliseconds (10));
+    }
+
+    CHECK (notReady);
+    CHECK (waitExit (server, 30) == 0);                  // a clean exit, not a crash or a kill
+
+    // the job record says interrupted
+    std::ifstream in (data / "jobs" / (jobId + ".json"));
+    REQUIRE (in.good());
+    const auto record = json::parse (in, nullptr, false);
+    REQUIRE (record.is_object());
+    CHECK (record.value ("state", "") == "interrupted");
+    CHECK (record.contains ("error") && record["error"].value ("code", "") == "INTERRUPTED");
+
+    // the project is kept: the imported (dirty) state is in autosave/
+    bool autosaved = false;
+
+    for (auto& e : fs::directory_iterator (data / "projects" / projectId / "project.rvx" / "autosave"))
+        autosaved = autosaved || e.path().extension() == ".rvx";
+
+    CHECK (autosaved);
+}
