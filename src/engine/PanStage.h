@@ -30,6 +30,11 @@ void setProjectPan (te::Edit&, int reaperPanMode, double lawDb);
 int projectPanMode (te::Edit&);
 double projectPanLawDb (te::Edit&);
 
+/** Track fader level in dB. Tracktion's fader stops at +6 dB, REAPER's at +12: the part above goes into "rovox:extraGainDb" of the fader plugin
+    (applied after it by RovoxVolumeAndPan). Use these instead of setVolumeDb / volumeFaderPositionToDB on track faders. */
+void setFaderDb (te::VolumeAndPanPlugin&, float db);
+float faderDb (te::VolumeAndPanPlugin&);
+
 /** Per-track override; mode < 0 = project default, lawDb > 0 = project default. */
 void setTrackPan (te::AudioTrack&, int reaperPanMode, double lawDb);
 

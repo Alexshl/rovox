@@ -14,6 +14,8 @@ namespace
 {
 const juce::Identifier panModeId ("rovox:panMode"), panLawId ("rovox:panLawDb"), panRightId ("rovox:panRight");
 constexpr const char* panStageType = "rovoxvolume";
+const juce::Identifier extraGainId ("rovox:extraGainDb");
+constexpr float faderMaxDb = 6.0206f;        // the top of Tracktion's fader; REAPER goes to +12 dB
 
 class RovoxVolumeAndPan : public te::VolumeAndPanPlugin
 {
@@ -27,6 +29,7 @@ public:
         panRight.referTo (state, panRightId, um, 1.0f);
         projectMode.referTo (edit.state, panModeId, nullptr, pan::defaultReaperMode);
         projectLawDb.referTo (edit.state, panLawId, nullptr, 0.0f);
+        extraGainDb.referTo (state, extraGainId, um, 0.0f);
     }
 
     static constexpr const char* xmlTypeName = panStageType;
@@ -67,6 +70,9 @@ public:
         }
 
         te::VolumeAndPanPlugin::applyToBuffer (fc);
+
+        if (const float extra = extraGainDb.get(); extra > 0.0f && isEnabled() && fc.destBuffer != nullptr)
+            fc.destBuffer->applyGain (fc.bufferStartSample, fc.bufferNumSamples, juce::Decibels::decibelsToGain (extra));
     }
 
 private:
@@ -92,7 +98,7 @@ private:
     }
 
     juce::CachedValue<int> trackMode, projectMode;
-    juce::CachedValue<float> trackLawDb, panRight, projectLawDb;
+    juce::CachedValue<float> trackLawDb, panRight, projectLawDb, extraGainDb;
     std::atomic<bool> monoSource_ { false };
 };
 } // namespace
@@ -114,6 +120,22 @@ void installPanStage (te::AudioTrack& track)
     const int index = track.pluginList.indexOf (vp);
     vp->deleteFromParent();
     track.pluginList.insertPlugin (state, std::max (0, index));
+}
+
+void setFaderDb (te::VolumeAndPanPlugin& vp, float db)
+{
+    const bool ours = dynamic_cast<RovoxVolumeAndPan*> (&vp) != nullptr;
+    const float extra = ours ? std::max (0.0f, db - faderMaxDb) : 0.0f;
+
+    if (ours)
+        vp.state.setProperty (extraGainId, extra, &vp.edit.getUndoManager());
+
+    vp.setVolumeDb (db - extra);
+}
+
+float faderDb (te::VolumeAndPanPlugin& vp)
+{
+    return te::volumeFaderPositionToDB (vp.volume.get()) + (float) (double) vp.state.getProperty (extraGainId, 0.0);
 }
 
 void installPanStages (te::Edit& edit)

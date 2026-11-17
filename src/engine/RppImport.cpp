@@ -1021,7 +1021,7 @@ struct Importer
                             report.warnings.push_back ({ { "code", "ENVELOPE_IGNORED" }, { "message", "a volume envelope with several points is not imported" }, { "track_id", trackId } });
                     }
 
-                    vp->setVolumeDb ((float) linearToDbSafe (volume));
+                    setFaderDb (*vp, (float) linearToDbSafe (volume));
                     vp->setPan ((float) std::clamp (node.number ("VOLPAN", 1, 0.0), -1.0, 1.0));
 
                     // per-track override of the project's pan mode / law (`PANMODE n` line, VOLPAN's third value = law as a linear gain, -1 = project)

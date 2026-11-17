@@ -10,6 +10,7 @@
 #include "DrumsPlugin.h"
 #include "Sf2Plugin.h"
 #include "FadeStage.h"
+#include "PanStage.h"
 #include "StockPlugins.h"
 #include "TimePos.h"
 
@@ -261,7 +262,7 @@ void registerProjectGet (CommandRegistry& r)
 
                     if (at != nullptr && at->getVolumePlugin() != nullptr)
                     {
-                        tj["volume_db"] = (double) te::volumeFaderPositionToDB (at->getVolumePlugin()->volume.get());
+                        tj["volume_db"] = (double) faderDb (*at->getVolumePlugin());
                         tj["pan"] = (double) at->getVolumePlugin()->pan.get();
                     }
 

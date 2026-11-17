@@ -76,7 +76,7 @@ json trackJson (Project& project, te::Track& t)
     {
         // read the tree-backed values: the plugin's parameter objects follow the tree asynchronously (stale right after an undo)
         auto* vp = at->getVolumePlugin();
-        j["volume_db"] = vp != nullptr ? (double) te::volumeFaderPositionToDB (vp->volume.get()) : 0.0;
+        j["volume_db"] = vp != nullptr ? (double) faderDb (*vp) : 0.0;
         j["pan"] = vp != nullptr ? (double) vp->pan.get() : 0.0;
     }
 
@@ -336,7 +336,7 @@ void registerTrackCommands (CommandRegistry& r)
             installPanStage (*track);
             track->setName (toJuce (params.value ("name", "Track " + std::to_string (te::getAudioTracks (p.edit()).size()))));
 
-            if (params.contains ("volume_db"))  track->getVolumePlugin()->setVolumeDb (params["volume_db"].get<float>());
+            if (params.contains ("volume_db"))  setFaderDb (*track->getVolumePlugin(), params["volume_db"].get<float>());
             if (params.contains ("pan"))        track->getVolumePlugin()->setPan (params["pan"].get<float>());
             if (params.contains ("color"))      track->setColour (*parseColour (params["color"].get<std::string>()));
             if (params.value ("mute", false))   setMuteUndoable (*track, true);
@@ -379,7 +379,7 @@ void registerTrackCommands (CommandRegistry& r)
                 return makeError (errc::invalidParams, "color must be #rrggbb", json { { "path", "/color" } });
 
             if (params.contains ("name"))       track->setName (toJuce (params["name"].get<std::string>()));
-            if (params.contains ("volume_db"))  track->getVolumePlugin()->setVolumeDb (params["volume_db"].get<float>());
+            if (params.contains ("volume_db"))  setFaderDb (*track->getVolumePlugin(), params["volume_db"].get<float>());
             if (params.contains ("pan"))        track->getVolumePlugin()->setPan (params["pan"].get<float>());
             if (params.contains ("color"))      track->setColour (*parseColour (params["color"].get<std::string>()));
             if (params.contains ("mute"))       setMuteUndoable (*track, params["mute"].get<bool>());

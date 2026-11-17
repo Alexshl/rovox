@@ -1115,3 +1115,16 @@ ROVOX_TEST (rpp, folder_fader_applies_to_its_children)
     REQUIRE (out.size() >= 2);
     CHECK_NEAR (20.0 * std::log10 (peakOf (out[0], 4800, 43200)), -6.0 - 6.02, 0.15);
 }
+
+ROVOX_TEST (rpp, track_fader_above_plus_6_db_is_kept)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("fader12");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -20, 1.0, 48000) }, 48000, 24);
+    std::string id;
+    auto out = importAndRender (env, dir, panRpp ("    VOLPAN 2.5 0 -1 -1 1", ""), id);       // +7.96 dB, Tracktion's fader tops out at +6.02 dB
+    REQUIRE (out.size() >= 2);
+    CHECK_NEAR (20.0 * std::log10 (peakOf (out[0], 4800, 43200)), -20.0 + 7.96, 0.15);
+    const auto tracks = env.ok (id, "track.list")["tracks"];
+    CHECK_NEAR (tracks[0]["volume_db"].get<double>(), 7.96, 0.05);
+}
