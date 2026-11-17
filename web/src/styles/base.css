@@ -422,6 +422,8 @@ input, select { font: inherit; color: inherit; }
 .open-path input { flex: 1; min-width: 0; background: var(--rx-panel-900); color: var(--rx-ink); border: 1px solid var(--rx-hairline); border-radius: var(--rx-radius-sm); padding: 4px 8px; }
 .empty-state .card .project-picker { margin-top: 12px; }
 .empty-state .card .tree-row { color: var(--rx-ink); }
+.empty-state .card .tree-toolbar .crumbs { color: var(--rx-panel-700); }
+.empty-state .card .tree-toolbar .crumbs b { color: var(--rx-panel-900); font-weight: 600; }
 
 /* FX popover: expandable plugin rows with parameter sliders */
 .popover { max-height: min(70vh, 560px); overflow-y: auto; width: 360px; max-width: calc(100vw - 16px); }
