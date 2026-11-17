@@ -1052,3 +1052,18 @@ ROVOX_TEST (rpp, nesting_depth_and_file_size_are_limited)
     CHECK (! env.run (id, "import.rpp", { { "path", big.string() } }).ok);
     CHECK (env.run (id, "track.list").ok);                  // the server is alive
 }
+
+ROVOX_TEST (rpp, master_volume_is_imported)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("mastervol");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -6, 1.0, 48000) }, 48000, 24);
+    std::string rppText = panRpp ("    VOLPAN 1 0 -1 -1 1", "");
+    const auto pos = rppText.find ("  <TRACK");
+    rppText.insert (pos, "  MASTER_VOLUME 0.5 0 -1 -1 1\n");
+    std::string id;
+    auto out = importAndRender (env, dir, rppText, id);
+    REQUIRE (out.size() >= 2);
+    CHECK_NEAR (20.0 * std::log10 (peakOf (out[0], 4800, 43200)), -6.0 - 6.02, 0.15);
+    CHECK_NEAR (te::volumeFaderPositionToDB (env.project (id).edit().getMasterVolumePlugin()->volume.get()), -6.02, 0.05);
+}

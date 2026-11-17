@@ -1099,6 +1099,13 @@ struct Importer
 
         importMarkers (root, edit);
 
+        // master fader and pan (`MASTER_VOLUME gain pan ...`; the gain is linear)
+        if (auto* mvp = edit.getMasterVolumePlugin().get())
+        {
+            mvp->setVolumeDb ((float) linearToDbSafe (root.number ("MASTER_VOLUME", 0, 1.0)));
+            mvp->setPan ((float) std::clamp (root.number ("MASTER_VOLUME", 1, 0.0), -1.0, 1.0));
+        }
+
         if (auto* mfx = root.block ("MASTERFXLIST"))
             for (auto& cfx : collectChain (*mfx))
                 if (! mapStockFx (cfx, edit.getMasterPluginList(), "master", -1, {}) && ! mapJsfx (cfx, edit.getMasterPluginList(), "master"))
