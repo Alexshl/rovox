@@ -18,6 +18,7 @@
 #include "StockPlugins.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -234,7 +235,12 @@ struct Importer
         r.found = true;
         r.info = probe.value();
 
-        if (! options.copyMedia)
+        // the engine's audio format lookup is case-sensitive on the extension: a file such as REC01_01.WAV opens but renders as silence, so
+        // such media is staged (a hard link, or a copy) under a lowercase extension even when copy_media is off
+        const auto extOf = found->extension().string();
+        const bool lowerExt = std::none_of (extOf.begin(), extOf.end(), [] (unsigned char c) { return std::isupper (c) != 0; });
+
+        if (! options.copyMedia && lowerExt)
         {
             r.file = *found;
 

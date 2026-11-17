@@ -319,6 +319,22 @@ ROVOX_TEST (rpp, no_copy_media_references_files_in_place_and_broken_files_change
     CHECK (! env.run (id, "import.rpp", { { "path", "/nonexistent.RPP" } }).ok);
 }
 
+ROVOX_TEST (rpp, no_copy_media_stages_uppercase_extension_under_a_lowercase_one)
+{
+    // the engine opens REC01.WAV but renders it as silence (case-sensitive format lookup): it must be staged as <sha>.wav
+    test::Env env;
+    const auto dir = test::makeTempDir ("rppupper");
+    test::writeWav (dir / "REC01.WAV", { test::sine (330, -14, 2.0, 44100) }, 44100, 24);
+    const auto rpp = dir / "song.RPP";
+    std::ofstream (rpp) << "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  TEMPO 120 4 4 0\n  <TRACK {AAAAAAAA-0000-0000-0000-0000000000B2}\n    NAME \"Up\"\n"
+                           "    <ITEM\n      POSITION 0\n      LENGTH 2\n      <SOURCE WAVE\n        FILE \"REC01.WAV\"\n      >\n    >\n  >\n>\n";
+    const auto id = env.newProject ("upper");
+    REQUIRE (env.run (id, "import.rpp", { { "path", rpp.string() }, { "copy_media", false } }).ok);
+    auto& p = env.project (id);
+    REQUIRE (! p.manifest().media.empty());
+    CHECK (fs::path (p.manifest().media[0].path).extension() == ".wav");
+}
+
 ROVOX_TEST (rpp, media_outside_the_allowed_roots_is_reported_and_not_copied)
 {
     test::Env env;
