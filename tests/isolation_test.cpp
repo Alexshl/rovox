@@ -458,3 +458,52 @@ ROVOX_TEST (isolation, licence_policy_comes_from_the_tenant_record_and_fails_clo
 
     quotas().setConfigFile ({});
 }
+
+ROVOX_TEST (isolation, folders_are_per_tenant)
+{
+    removeTenantDirs ({ "iso_fa", "iso_fb" });
+    Harness h;
+    auto a = h.session ("iso_fa");
+    auto b = h.session ("iso_fb");
+    const std::string secret = "iso-secret-folder-name";
+
+    auto project = h.tool (a, "project.new", { { "name", "iso folder project" } });
+    REQUIRE (project["ok"] == true);
+    const auto projectId = project["data"]["project_id"].get<std::string>();
+    auto folder = h.tool (a, "folder.create", { { "name", secret } });
+    REQUIRE (folder["ok"] == true);
+    const auto folderId = folder["data"]["folder"]["folder_id"].get<std::string>();
+    REQUIRE (h.tool (a, "project.move", { { "project_id", projectId }, { "folder_id", folderId } })["ok"] == true);
+
+    // B sees only its own folders (and the system one), and cannot reach A's folder or project by id
+    auto listed = h.tool (b, "folder.list");
+    REQUIRE (listed["ok"] == true);
+    CHECK (listed.dump().find (secret) == std::string::npos);
+    CHECK (listed["data"]["folders"].size() == 1);
+    CHECK (listed["data"]["folders"][0]["folder_id"] == "tests");
+    CHECK (h.tool (b, "project.catalog", { { "include_folders", true } }).dump().find (secret) == std::string::npos);
+
+    CHECK (h.tool (b, "folder.rename", { { "folder_id", folderId }, { "name", "taken" } })["error"]["code"] == errc::notFound);
+    CHECK (h.tool (b, "folder.move", { { "folder_id", folderId }, { "parent_id", "root" } })["error"]["code"] == errc::notFound);
+    CHECK (h.tool (b, "folder.delete", { { "folder_id", folderId } })["error"]["code"] == errc::notFound);
+    CHECK (h.tool (b, "project.catalog", { { "folder_id", folderId } })["error"]["code"] == errc::notFound);
+    CHECK (h.tool (b, "project.move", { { "project_id", projectId }, { "folder_id", "tests" } })["error"]["code"] == errc::notFound);
+
+    auto bFolder = h.tool (b, "folder.create", { { "name", secret } });         // the same name is free in B
+    REQUIRE (bFolder["ok"] == true);
+    CHECK (h.tool (b, "project.move", { { "project_id", projectId }, { "folder_id", bFolder["data"]["folder"]["folder_id"] } })["error"]["code"] == errc::notFound);
+    CHECK (h.tool (a, "project.move", { { "project_id", projectId }, { "folder_id", bFolder["data"]["folder"]["folder_id"] } })["error"]["code"] == errc::notFound);
+
+    // A's folder and assignment are as they were
+    auto mine = h.tool (a, "project.catalog", { { "folder_id", folderId } });
+    REQUIRE (mine["ok"] == true);
+    REQUIRE (mine["data"]["projects"].size() == 1);
+    CHECK (mine["data"]["projects"][0]["project_id"] == projectId);
+    auto aFolders = h.tool (a, "folder.list")["data"]["folders"];
+    CHECK (aFolders.size() == 2);
+    CHECK (aFolders[0]["name"] == secret);
+    CHECK (aFolders[0]["project_count"] == 1);
+
+    h.tool (a, "project.delete", { { "project_id", projectId } });
+    removeTenantDirs ({ "iso_fa", "iso_fb" });
+}

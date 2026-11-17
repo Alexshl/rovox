@@ -13,7 +13,7 @@ namespace rovox
     Strictly increasing within one process, so ids sort by creation time. */
 std::string newUlid();
 
-/** Prefixed entity id, e.g. newId ("trk") -> "trk_01J...". Prefixes: p, trk, itm, fx, snd, mrk, med, ipl, job, up. */
+/** Prefixed entity id, e.g. newId ("trk") -> "trk_01J...". Prefixes: p, trk, itm, fx, snd, mrk, med, ipl, job, up, fld (project folder). */
 std::string newId (std::string_view prefix);
 
 /** True if `id` is `<prefix>_<26 ULID characters>`. */

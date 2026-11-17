@@ -28,7 +28,8 @@ const std::map<std::string, std::vector<Scope>>& table()
 
         add ({ "project.list", "project.catalog", "project.info", "project.get", "project.activity", "project.diff", "history.list", "track.list", "item.list", "item.source",
                "fx.list", "fx.params", "fx.presets", "marker.list", "midi.get", "routing.list", "tempo.get", "transport.get", "mixer.get_meters", "time.convert",
-               "job.get", "job.list", "events.poll", "events.subscribe", "upload.status", "delivery.list", "review.wait", "review.list", "usage.summary" }, { S::projectsRead });
+               "job.get", "job.list", "events.poll", "events.subscribe", "upload.status", "delivery.list", "review.wait", "review.list", "usage.summary",
+               "folder.list" }, { S::projectsRead });
         add ({ "review.resolve" }, { S::projectsWrite });
         add ({ "review.request" }, { S::projectsWrite, S::delivery });
 
@@ -39,7 +40,8 @@ const std::map<std::string, std::vector<Scope>>& table()
                "marker.create", "marker.update", "marker.upsert", "marker.delete",
                "midi.write", "midi.edit", "midi.quantize", "midi.transpose", "midi.import_file", "midi.export_file",
                "routing.send_create", "routing.send_update", "routing.send_delete", "tempo.set", "transport.set", "undo", "redo", "agent.accept",
-               "import.plan", "import.apply", "import.rpp", "upload.from_url", "template.apply", "template.new", "template.save", "template.delete", "recipe.save", "recipe.delete" }, { S::projectsWrite });
+               "import.plan", "import.apply", "import.rpp", "upload.from_url", "template.apply", "template.new", "template.save", "template.delete", "recipe.save", "recipe.delete",
+               "folder.create", "folder.rename", "folder.move", "folder.delete", "project.move" }, { S::projectsWrite });
 
         add ({ "render.preflight", "render.start", "render.batch", "render.preview", "analyze.audio" }, { S::render });
         add ({ "recipe.run" }, { S::render, S::projectsWrite });

@@ -3123,3 +3123,53 @@ ROVOX_TEST (mcp, render_file_url_downloads_the_same_bytes_and_refuses_other_tena
     CHECK (status[3].first == 403);
     CHECK (status[4].first == 403);
 }
+
+ROVOX_TEST (mcp, folder_tools_listed_with_scopes)
+{
+    Harness h;
+    const std::set<std::string> folderTools { "folder.list", "folder.create", "folder.rename", "folder.move", "folder.delete", "project.move" };
+    std::map<std::string, json> byName;
+
+    for (auto* t : h.server.tools())
+        if (folderTools.count (t->name) != 0)
+            byName[t->name] = { { "description", t->description }, { "inputSchema", t->inputSchema }, { "annotations", t->annotations } };
+
+    CHECK (byName.size() == folderTools.size());
+
+    for (auto& [name, t] : byName)
+    {
+        CHECK (! t["description"].get<std::string>().empty());
+        CHECK (t["annotations"]["readOnlyHint"] == (name == "folder.list"));
+        CHECK (! t["inputSchema"]["properties"].contains ("if_revision"));             // not a project edit: no revision, no undo step
+    }
+
+    CHECK (byName["project.move"]["description"].get<std::string>().find ("Not an undo step") != std::string::npos);
+    CHECK (byName["project.move"]["inputSchema"]["properties"].contains ("project_ids"));
+    CHECK (byName["folder.create"]["inputSchema"]["required"] == json::array ({ "name" }));
+
+    // scopes: listing needs projects:read, every change projects:write
+    CHECK (requiredScopes ("folder.list") == std::vector<Scope> { Scope::projectsRead });
+
+    for (auto* n : { "folder.create", "folder.rename", "folder.move", "folder.delete", "project.move" })
+        CHECK (requiredScopes (n) == std::vector<Scope> { Scope::projectsWrite });
+
+    auto reader = scopedSession (h, ScopeSet::of ({ Scope::projectsRead }));
+    auto listed = listedTools (h, *reader);
+    CHECK (listed.count ("folder.list") == 1);
+    CHECK (listed.count ("folder.create") == 0);
+    CHECK (listed.count ("project.move") == 0);
+    CHECK (h.tool ("folder.list", json::object(), reader.get())["ok"] == true);
+    CHECK (h.tool ("folder.create", { { "name", "nope" } }, reader.get())["error"]["code"] == errc::forbiddenScope);
+    CHECK (h.tool ("project.move", { { "project_id", "p_x" }, { "folder_id", "root" } }, reader.get())["error"]["code"] == errc::forbiddenScope);
+
+    // through MCP end to end: create, move a project, see it in the catalog, back to the top level, delete
+    const auto id = h.newProject ("mcp-folders");
+    const auto folderId = h.data ("folder.create", { { "name", "mcp folder" } })["folder"]["folder_id"].get<std::string>();
+    CHECK (h.data ("project.move", { { "project_ids", { id } }, { "folder_id", folderId } })["moved"] == 1);
+    auto catalog = h.data ("project.catalog", { { "folder_id", folderId } })["projects"];
+    REQUIRE (catalog.size() == 1);
+    CHECK (catalog[0]["project_id"] == id);
+    h.data ("project.move", { { "project_id", id }, { "folder_id", "root" } });
+    h.data ("folder.delete", { { "folder_id", folderId } });
+    h.data ("project.delete", { { "project_id", id } });
+}

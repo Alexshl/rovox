@@ -31,7 +31,12 @@ json ProjectSummary::toJson() const
     return j;
 }
 
-ProjectManager::ProjectManager (EngineHost& host, EventHub& hub) : host_ (host), hub_ (hub) {}
+ProjectManager::ProjectManager (EngineHost& host, EventHub& hub) : host_ (host), hub_ (hub)
+{
+    // beside projects/, never inside it: catalog() and the project quota only look at project directories
+    folders_ = std::make_unique<ProjectFolders> ([this] (const std::string& tenant) { return projectsRoot (tenant).parent_path() / "folders.json"; });
+    folders_->setKnownProjects ([this] (const std::string& tenant) { return knownProjects (tenant); });
+}
 
 ProjectManager::~ProjectManager()
 {
@@ -374,6 +379,11 @@ void ProjectManager::setStorage (std::shared_ptr<RemoteStorage> s)
     storage_ = std::move (s);
 
     if (storage_)
+        folders_->setStore (storage_->sharedStore(), storage_->keys(), [raw = storage_.get()] { return raw->conditionalWritesActive(); });
+    else
+        folders_->setStore (nullptr, {}, {});
+
+    if (storage_)
         storage_->setListener ([this] (const std::string& tenant, const std::string& id, const json& status)
                                { hub_.publish (tenant, id, { { "type", "storage.changed" }, { "project_id", id }, { "storage", status } }); });
 }
@@ -492,7 +502,12 @@ Result<void> ProjectManager::remove (const std::string& id, const std::string& t
     std::error_code ec;
     const bool managed = dir.filename() == "project.rvx" && dir.parent_path().filename() == id;
     fs::remove_all (managed ? dir.parent_path() : dir, ec);
-    return ec ? Result<void> (makeError (errc::io, "cannot delete " + dir.string() + ": " + ec.message())) : Result<void>();
+
+    if (ec)
+        return makeError (errc::io, "cannot delete " + dir.string() + ": " + ec.message());
+
+    folders_->forget (tenant, id);
+    return {};
 }
 
 Result<void> ProjectManager::removeClosed (const std::string& id, const std::string& tenant)
@@ -520,7 +535,12 @@ Result<void> ProjectManager::removeClosed (const std::string& id, const std::str
     std::error_code ec;
     fs::remove_all (rvx.parent_path(), ec);
     ::close (lock.value());         // held until the files are gone
-    return ec ? Result<void> (makeError (errc::io, "cannot delete " + rvx.parent_path().string() + ": " + ec.message())) : Result<void>();
+
+    if (ec)
+        return makeError (errc::io, "cannot delete " + rvx.parent_path().string() + ": " + ec.message());
+
+    folders_->forget (tenant, id);
+    return {};
 }
 
 Project* ProjectManager::find (const std::string& id)
@@ -655,6 +675,73 @@ json ProjectManager::catalog (const std::string& tenant, bool includeEphemeral) 
     return items;
 }
 
+bool ProjectManager::projectExists (const std::string& tenant, const std::string& id) const
+{
+    if (! isValidTenantId (tenant) || ! isValidId (id, "p"))
+        return false;
+
+    {
+        std::lock_guard<std::mutex> lock (snapshotMutex_);
+
+        if (auto it = snapshot_.find (id); it != snapshot_.end())
+            return it->second.tenant == tenant;
+    }
+
+    std::ifstream in (projectDir (tenant, id) / manifestFileName);
+    const auto doc = in ? json::parse (in, nullptr, false) : json();
+
+    if (doc.is_object() && doc.value ("project_id", "") == id && doc.value ("tenant_id", "local") == tenant)
+        return true;
+
+    return storage_ != nullptr && storage_->cachedHead (tenant, id).has_value();
+}
+
+KnownProjects ProjectManager::knownProjects (const std::string& tenant) const
+{
+    KnownProjects out;
+    out.complete = storage_ == nullptr || storage_->headsComplete();
+
+    {
+        std::lock_guard<std::mutex> lock (snapshotMutex_);
+
+        for (auto& [id, s] : snapshot_)
+            if (s.tenant == tenant)
+                out.ids.insert (id);
+    }
+
+    std::error_code ec;
+
+    for (auto& entry : fs::directory_iterator (projectsRoot (tenant), ec))
+    {
+        std::ifstream in (entry.path() / "project.rvx" / manifestFileName);
+
+        if (! in)
+            continue;
+
+        const auto doc = json::parse (in, nullptr, false);
+
+        if (doc.is_object() && doc.value ("tenant_id", "local") == tenant && doc.value ("project_id", "") == entry.path().filename().string())
+            out.ids.insert (entry.path().filename().string());
+    }
+
+    if (storage_ != nullptr)
+        for (auto& h : storage_->heads (tenant))
+            out.ids.insert (h.projectId);
+
+    return out;
+}
+
+void ProjectManager::publishFoldersChanged (const std::string& tenant, std::uint64_t version, const std::string& change, const json& extra)
+{
+    json body { { "type", "folders.changed" }, { "version", version }, { "change", change } };
+
+    if (extra.is_object())
+        for (auto& [k, v] : extra.items())
+            body[k] = v;
+
+    hub_.publish (tenant, "", std::move (body));
+}
+
 std::optional<std::uint64_t> ProjectManager::revisionOf (const std::string& id) const
 {
     std::lock_guard<std::mutex> lock (snapshotMutex_);
@@ -765,13 +852,13 @@ std::vector<std::string> ProjectManager::sweepExpired (std::time_t now)
     }
 
     // projects on disk that are not open
-    std::vector<fs::path> roots { projectsRoot ("local") };
+    std::vector<std::pair<std::string, fs::path>> roots { { "local", projectsRoot ("local") } };
     std::error_code ec;
 
     for (auto& t : fs::directory_iterator (host_.dataDir() / "tenants", ec))
-        roots.push_back (t.path() / "projects");
+        roots.push_back ({ t.path().filename().string(), t.path() / "projects" });
 
-    for (auto& root : roots)
+    for (auto& [tenant, root] : roots)
         for (auto& entry : fs::directory_iterator (root, ec))
         {
             const auto rvx = entry.path() / "project.rvx";
@@ -807,6 +894,9 @@ std::vector<std::string> ProjectManager::sweepExpired (std::time_t now)
             ::close (lock.value());
             fs::remove_all (entry.path(), ec);
             logDeletion (entry.path().filename().string());
+
+            if (isValidTenantId (tenant))
+                folders_->forget (tenant, entry.path().filename().string());
         }
 
     return removed;

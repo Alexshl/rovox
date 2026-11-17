@@ -638,7 +638,9 @@ void registerTemplateCommands (CommandRegistry& r)
     // the new-mode of template.apply: a fresh project (optionally ephemeral with a TTL) with the template applied in one undo step
     r.add (makeGlobalCommand ("template.new",
         obj ({ { "template_id", strMin (1) }, { "name", str() }, { "ephemeral", boolean() }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 2592000 } } },
-               { "sample_rate", { { "type", "number" }, { "minimum", 8000 }, { "maximum", 192000 } } }, { "bindings", anyObject() } }, { "template_id" }),
+               { "sample_rate", { { "type", "number" }, { "minimum", 8000 }, { "maximum", 192000 } } }, { "bindings", anyObject() },
+               { "folder_id", { { "type", "string" }, { "minLength", 1 }, { "description", "folder_id from folder.list (\"root\" = top level, \"tests\" = the system folder)" } } } },
+             { "template_id" }),
         anyObject(), true,
         [&r] (ProjectManager& pm, const json& params, const CommandContext& ctx) -> Result<json>
         {
@@ -649,7 +651,7 @@ void registerTemplateCommands (CommandRegistry& r)
 
             json newArgs;
 
-            for (auto key : { "name", "ephemeral", "ttl_s", "sample_rate" })
+            for (auto key : { "name", "ephemeral", "ttl_s", "sample_rate", "folder_id" })
                 if (params.contains (key))
                     newArgs[key] = params[key];
 
@@ -696,6 +698,11 @@ void registerTemplateCommands (CommandRegistry& r)
 
             auto out = std::move (applied.value());
             out["project_id"] = projectId;
+
+            for (auto key : { "folder_id", "warning" })         // the folder assignment made by project.new
+                if (created.value().contains (key))
+                    out[key] = created.value()[key];
+
             return out;
         }));
 }

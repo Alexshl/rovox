@@ -9,6 +9,7 @@
 //   <prefix>tenants/<tenant>/projects/<id>/LEASE                                  {owner,expires}: one writer per project
 //   <prefix>tenants/<tenant>/projects/<id>/renders/<file>
 //   <prefix>tenants/<tenant>/media/sha256/<ab>/<hash>.<ext>                       content-addressed, uploaded once
+//   <prefix>tenants/<tenant>/folders.json                                         project folders of the tenant (ProjectFolders): not a project
 //
 // Nothing here may block the message thread or the audio thread: snapshots are queued and uploaded by one background thread.
 #pragma once
@@ -66,6 +67,8 @@ struct StorageKeys
     /** `ext` with the dot (".wav") or empty. */
     std::string media (const std::string& tenant, const std::string& sha256, const std::string& ext) const
                                                                                             { return tenantsPrefix() + tenant + "/media/sha256/" + sha256.substr (0, 2) + "/" + sha256 + ext; }
+    /** The tenant's folders document (outside projects/, so refreshHeads never takes it for a project). */
+    std::string folders (const std::string& tenant) const                                   { return tenantsPrefix() + tenant + "/folders.json"; }
 };
 
 /** The small JSON object next to a project's snapshots: what project.catalog needs without reading edit.xml. */
@@ -151,6 +154,7 @@ public:
     bool flush (std::chrono::seconds timeout);
 
     ObjectStore& store()                    { return *store_; }
+    std::shared_ptr<ObjectStore> sharedStore() const    { return store_; }
     const StorageKeys& keys() const         { return keys_; }
     const std::string& owner() const        { return owner_; }
     json describe() const;
@@ -189,6 +193,8 @@ public:
     Result<std::uint64_t> pull (const std::string& tenant, const std::string& projectId, const std::filesystem::path& projectDir);
     /** Lists the bucket's tenants and projects into the head cache. */
     Result<void> refreshHeads();
+    /** Whether the last refreshHeads() succeeded (the head cache lists every project of the bucket). */
+    bool headsComplete() const              { return headsComplete_; }
     std::vector<ProjectHead> heads (const std::string& tenant) const;
     std::optional<ProjectHead> cachedHead (const std::string& tenant, const std::string& projectId) const;
     /** Newest project of the tenant with this name. */
@@ -241,6 +247,7 @@ private:
     std::condition_variable leaseCv_;
     std::mutex leaseOpMutex_;               // one lease operation (renew / release) at a time; taken before mutex_
     std::atomic<bool> cancelUploads_ { false };
+    std::atomic<bool> headsComplete_ { false };
     bool stop_ = false, started_ = false, flushing_ = false, closing_ = false;
     std::chrono::milliseconds headRefresh_ { 30000 }, leaseRenew_ { 0 }, retryBase_ { 2000 };
     std::chrono::steady_clock::time_point lastRefresh_ {};

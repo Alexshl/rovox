@@ -13,6 +13,7 @@ target_sources(rovox_engine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandBus.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Commands.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsEdit.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CommandsFolders.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsMidi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsPlugins.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CommandsRouting.cpp

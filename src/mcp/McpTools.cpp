@@ -127,8 +127,8 @@ struct CommandToolSpec
 };
 
 const CommandToolSpec commandTools[] = {
-    { "project.list", "List projects", "Lists the open projects of this server with id, name, revision, dirty flag, track count and storage {backend, synced_revision, pending_uploads, last_error}.", true },
-    { "project.new", "New project", "Creates and opens an empty project. Returns project_id. ephemeral + ttl_s make it self-deleting.", false },
+    { "project.list", "List projects", "Lists the open projects of this server with id, name, revision, dirty flag, track count, folder_id and storage {backend, synced_revision, pending_uploads, last_error}. folder_id (+ recursive) narrows it to a folder.", true },
+    { "project.new", "New project", "Creates and opens an empty project. Returns project_id. ephemeral + ttl_s make it self-deleting; folder_id puts it into a folder (from folder.list).", false },
     { "project.open", "Open project", "Opens a project by .rvx directory, project id or name. Returns project_id.", false },
     { "project.close", "Close project", "Closes a project. save=true (default) saves it first.", false },
     { "project.delete", "Delete project", "Closes and deletes a project from disk. Refused while a job runs on it.", false },
@@ -165,7 +165,14 @@ const CommandToolSpec commandTools[] = {
     { "fx.remove", "Remove plugin", "Removes a plugin by plugin_id.", false },
     { "fx.params", "Plugin parameters", "Lists the parameters of a plugin: ident, name, value in the parameter's own unit, display text, min, max.", true },
     { "fx.update", "Update plugin", "Sets enabled and/or params {ident_or_name: number | \"text such as -6 dB\"} of a plugin in one undo step.", false },
-    { "project.catalog", "Project catalog", "Every project of this server, open, only on disk or (with object storage) only in the bucket: id, name, tracks, modified time, open flag, remote_only. project.open takes the project_id and downloads a bucket-only project into the working cache.", true },
+    { "project.catalog", "Project catalog", "Every project of this server, open, only on disk or (with object storage) only in the bucket: id, name, tracks, modified time, open flag, remote_only, folder_id (null = top level). project.open takes the project_id and downloads a bucket-only project into the working cache. "
+                                            "folder_id narrows it to one folder (\"root\" = top level, recursive=true includes subfolders); without it the projects in the system folder \"tests\" (Тестові треки) are hidden unless include_system=true. include_folders=true adds the folder list (as folder.list).", true },
+    { "folder.list", "List folders", "The tenant's project folders (flat): folder_id, name, parent_id (null = top level), system, project_count, folder_count, sorted by name; the system folder \"tests\" (Тестові треки) is always last. Folders only group projects in the catalog.", true },
+    { "folder.create", "Create folder", "Creates a project folder (name 1-100 characters, unique among its siblings ignoring case) at the top level or under parent_id (folders nest at most 8 deep; \"tests\" takes no subfolders). Returns the folder.", false },
+    { "folder.rename", "Rename folder", "Renames a project folder. The system folder \"tests\" cannot be renamed.", false },
+    { "folder.move", "Move folder", "Moves a project folder under parent_id (\"root\" = top level) with its subfolders and projects. Refused for a move into itself or a subfolder, or deeper than 8 levels.", false },
+    { "folder.delete", "Delete folder", "Deletes an empty project folder; PRECONDITION_FAILED with the number of projects and subfolders when it is not empty. Projects are never deleted by this.", false },
+    { "project.move", "Move projects to folder", "Moves projects into a folder (folder_id from folder.list; \"root\" = top level, \"tests\" = Тестові треки). Not an undo step; the project revision does not change. project_id or project_ids (up to 100, all or nothing).", false },
     { "plugin.catalog", "Plugin catalog", "Installed plugins the agent can load: plugin_uid, name, vendor, kind (instrument|effect), io, status (ok|blacklisted), tags and, with include_presets, factory presets. Each record has license, source_url and server_use_ok (true only for a free licence read from the package; \"unknown\" otherwise). Filter by kind/query/tag/format/server_use_ok. Use the plugin_uid with fx.add.", true },
     { "plugin.rescan", "Rescan plugins", "Scans the plugin directories again (in a child process). Unchanged directories return the cached catalog at once; force=true rescans anyway.", false },
     { "plugin.probe", "Probe plugin", "Loads one plugin in a separate process, pushes audio through it and, for an instrument, plays notes: reports latency, parameter count and whether it makes sound. A plugin that crashes is blacklisted; the server is not affected.", false },

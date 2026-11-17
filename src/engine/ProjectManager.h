@@ -5,6 +5,7 @@
 
 #include "EventHub.h"
 #include "Project.h"
+#include "ProjectFolders.h"
 #include "RemoteStorage.h"
 
 #include <map>
@@ -98,6 +99,15 @@ public:
     /** `storage` block of project.get / project.list. */
     json storageStatus (const std::string& tenant, const std::string& id) const;
 
+    /** Project folders of every tenant (E12): a document per tenant beside the projects (the bucket when storage is set, else the data dir). */
+    ProjectFolders& folders()           { return *folders_; }
+    /** Open (of this tenant), on disk below projectsRoot() with this tenant in its manifest, or in the bucket's head cache. */
+    bool projectExists (const std::string& tenant, const std::string& id) const;
+    /** Every project of the tenant that projectExists() would accept; incomplete while the bucket's heads could not be listed. */
+    KnownProjects knownProjects (const std::string& tenant) const;
+    /** Publishes `folders.changed` {version, change, ...extra (folder_id, project_ids)} to the tenant (WebSocket clients, MCP, webhooks). */
+    void publishFoldersChanged (const std::string& tenant, std::uint64_t version, const std::string& change, const json& extra = json::object());
+
     EngineHost& host()      { return host_; }
     EventHub& hub()         { return hub_; }
 
@@ -119,6 +129,7 @@ private:
     std::map<std::string, ProjectSummary> snapshot_;
     std::vector<json> ttlLog_;
     std::shared_ptr<RemoteStorage> storage_;
+    std::unique_ptr<ProjectFolders> folders_;
 };
 
 } // namespace rovox

@@ -1193,7 +1193,10 @@ Result<void> RemoteStorage::refreshHeads()
     auto tenants = store_->list (keys_.tenantsPrefix(), "/");
 
     if (! tenants.ok())
+    {
+        headsComplete_ = false;
         return tenants.error();
+    }
 
     std::map<std::string, std::map<std::string, ProjectHead>> fresh;
 
@@ -1210,7 +1213,10 @@ Result<void> RemoteStorage::refreshHeads()
         auto projects = store_->list (keys_.projectsPrefix (name), "/");
 
         if (! projects.ok())
+        {
+            headsComplete_ = false;
             return projects.error();
+        }
 
         auto& byId = fresh[name];
 
@@ -1248,6 +1254,7 @@ Result<void> RemoteStorage::refreshHeads()
         }
 
     heads_ = std::move (fresh);
+    headsComplete_ = true;
     return {};
 }
 

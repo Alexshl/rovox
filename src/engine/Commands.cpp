@@ -135,15 +135,33 @@ te::AudioTrack* audioTrack (Project& p, const std::string& id)
 }
 
 //==============================================================================
+} // namespace
+
+// CommandsFolders.cpp
+Result<json> filterProjectsByFolder (ProjectManager&, const CommandContext&, json items, const json& params, bool catalog);
+void addFoldersTo (json& result, ProjectManager&, const CommandContext&);
+void assignNewProject (ProjectManager&, const CommandContext&, const std::string& projectId, const std::string& folderId, json& result);
+Result<void> checkFolderForNewProject (ProjectManager&, const CommandContext&, const std::string& folderId);
+
+namespace
+{
+json folderParam()      { return { { "type", "string" }, { "minLength", 1 }, { "description", "folder_id from folder.list; \"root\" = top level, \"tests\" = the system folder" } }; }
+
 void registerProjectCommands (CommandRegistry& r)
 {
     r.add (makeGlobalCommand ("project.new",
-        obj ({ { "name", str() }, { "ephemeral", boolean() }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 2592000 } } }, { "sample_rate", numRange (8000, 192000) } }),
+        obj ({ { "name", str() }, { "ephemeral", boolean() }, { "ttl_s", { { "type", "integer" }, { "minimum", 1 }, { "maximum", 2592000 } } }, { "sample_rate", numRange (8000, 192000) },
+               { "folder_id", folderParam() } }),
         obj ({ { "project_id", str() } }), false,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {
             if (auto q = checkProjectQuota (pm, ctx); ! q.ok())
                 return q.error();
+
+            const std::string folderId = p.value ("folder_id", "");
+
+            if (auto f = checkFolderForNewProject (pm, ctx, folderId); ! f.ok())
+                return f.error();
 
             CreateOptions o;
             o.name = p.value ("name", "Untitled");
@@ -159,10 +177,15 @@ void registerProjectCommands (CommandRegistry& r)
             if (! id.ok())
                 return id.error();
 
-            return json { { "project_id", id.value() } };
+            json out { { "project_id", id.value() } };
+            assignNewProject (pm, ctx, id.value(), folderId, out);
+            return out;
         }));
 
-    r.add (makeGlobalCommand ("project.list", obj ({ { "include_ephemeral", boolean() } }), obj ({ { "projects", { { "type", "array" } } } }), false,
+    // the folder params only narrow the list down; without them both answer as before, except that project.catalog hides the system folder
+    // `tests` unless include_system is true (project.list, the open projects, shows them)
+    r.add (makeGlobalCommand ("project.list", obj ({ { "include_ephemeral", boolean() }, { "folder_id", folderParam() }, { "recursive", boolean() } }),
+        obj ({ { "projects", { { "type", "array" } } } }), false,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {
             json out = json::array();
@@ -174,13 +197,31 @@ void registerProjectCommands (CommandRegistry& r)
                 out.push_back (std::move (j));
             }
 
-            return json { { "projects", out } };
+            auto filtered = filterProjectsByFolder (pm, ctx, std::move (out), p, false);
+
+            if (! filtered.ok())
+                return filtered.error();
+
+            return json { { "projects", std::move (filtered.value()) } };
         }));
 
-    r.add (makeGlobalCommand ("project.catalog", obj ({ { "include_ephemeral", boolean() } }), obj ({ { "projects", { { "type", "array" } } } }), false,
+    r.add (makeGlobalCommand ("project.catalog",
+        obj ({ { "include_ephemeral", boolean() }, { "folder_id", folderParam() }, { "recursive", boolean() }, { "include_folders", boolean() }, { "include_system", boolean() } }),
+        obj ({ { "projects", { { "type", "array" } } } }), false,
         [] (ProjectManager& pm, const json& p, const CommandContext& ctx) -> Result<json>
         {
-            return json { { "projects", pm.catalog (ctx.tenant, p.value ("include_ephemeral", false)) } };
+            auto filtered = filterProjectsByFolder (pm, ctx, pm.catalog (ctx.tenant, p.value ("include_ephemeral", false)), p, true);
+
+            if (! filtered.ok())
+                return filtered.error();
+
+            json out { { "projects", std::move (filtered.value()) } };
+
+            // a session bound to one project (/open link) sees only that project: not the tenant's folders
+            if (p.value ("include_folders", false) && ctx.principal.project.empty())
+                addFoldersTo (out, pm, ctx);
+
+            return out;
         }));
 
     r.add (makeGlobalCommand ("project.open", obj ({ { "target", strMin (1) } }, { "target" }), obj ({ { "project_id", str() } }), false,
@@ -746,6 +787,7 @@ void registerPluginCommands (CommandRegistry&);
 void registerMidiCommands (CommandRegistry&);
 void registerRoutingCommands (CommandRegistry&);
 void registerTemplateCommands (CommandRegistry&);
+void registerFolderCommands (CommandRegistry&);
 
 void registerBuiltinCommands (CommandRegistry& r)
 {
@@ -761,6 +803,7 @@ void registerBuiltinCommands (CommandRegistry& r)
     registerMidiCommands (r);
     registerRoutingCommands (r);
     registerTemplateCommands (r);
+    registerFolderCommands (r);
 }
 
 } // namespace rovox
