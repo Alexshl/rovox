@@ -70,6 +70,8 @@ function readRemembered(): string[] {
 export class App {
   readonly changed = new Emitter(); // tabs, connection, prefs, toasts
   readonly welcomed = new Emitter(); // the server said `welcome` (first connect or reconnect)
+  /** The server's project catalog or its folders changed (`projects.changed`, `folders.changed`): open pickers refresh. */
+  readonly catalogChanged = new Emitter();
   readonly projects = new Map<string, ProjectStore>();
   order: string[] = [];
   activeId: string | undefined;
@@ -77,6 +79,8 @@ export class App {
   sessionId = '';
   serverInfo: ServerInfo = { version: '', source_url: '', audio: { mode: 'none', available: false } };
   needsLogin = false;
+  /** The tenant of this login (from /api/session); per-tenant browser state such as the expanded folders is keyed by it. */
+  tenant = 'default';
   prefs: UiPrefs = loadPrefs();
   toasts: Toast[] = [];
   readonly socket: RovoxSocket;
@@ -101,8 +105,9 @@ export class App {
   private async queryLogin(): Promise<boolean> {
     const res = await fetch('/api/session', { credentials: 'same-origin' }).catch(() => null);
     if (!res?.ok) return false;
-    const s = (await res.json()) as { token_required: boolean; authenticated: boolean; source_url: string; version: string };
+    const s = (await res.json()) as { token_required: boolean; authenticated: boolean; source_url: string; version: string; tenant?: string };
     this.serverInfo.source_url = s.source_url;
+    if (typeof s.tenant === 'string' && s.tenant) this.tenant = s.tenant;
     this.serverInfo.version = s.version;
     return s.token_required && !s.authenticated;
   }
@@ -530,6 +535,9 @@ export class App {
       p.accept(ev['accepted_revision'] as number);
     } else if (type === 'projects.changed') {
       void this.listProjects();
+      this.catalogChanged.emit();
+    } else if (type === 'folders.changed') {
+      this.catalogChanged.emit();
     }
   }
 

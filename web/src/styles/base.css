@@ -369,18 +369,59 @@ input, select { font: inherit; color: inherit; }
 .project-dialog { width: min(560px, calc(100vw - 32px)); }
 .project-dialog > .body { grid-template-columns: 1fr; }
 .project-picker { display: flex; flex-direction: column; gap: 8px; text-align: left; }
-.project-list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto; }
+.project-list { display: flex; flex-direction: column; gap: 2px; max-height: 340px; overflow: auto; }
 .project-list .none { color: var(--rx-ink-muted); padding: 8px 0; }
-.project-row { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; text-align: left; padding: 6px 8px; background: var(--rx-panel-700); color: var(--rx-ink); border: 1px solid var(--rx-hairline); border-radius: var(--rx-radius-sm); }
-.project-row:hover { border-color: var(--rx-orange); }
-.project-row .pname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-row .pbadge { color: var(--rx-signal-green); font-size: var(--rx-type-value-size); align-self: center; }
-.project-row .pmeta { grid-column: 1 / -1; color: var(--rx-ink-muted); font-size: var(--rx-type-value-size); }
-.project-row.open { border-left: 3px solid var(--rx-signal-green); }
+/* the folder tree of the picker (E12): folders first, projects newest first, «Тестові треки» last; 16 px indent per level (set inline) */
+.tree-toolbar { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.tree-toolbar .btn { flex: none; }
+.tree-toolbar .crumbs { margin-left: auto; min-width: 0; font-family: var(--rx-font-mono); font-size: var(--rx-type-value-size); color: var(--rx-ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-toolbar .crumbs b { color: var(--rx-ink); font-weight: 500; }
+.tree-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; gap: 0 8px; align-items: center; flex: none; text-align: left; padding: 5px 8px; background: var(--rx-panel-700); color: var(--rx-ink); border: 1px solid var(--rx-hairline); border-radius: var(--rx-radius-sm); cursor: pointer; }
+.tree-row:hover, .tree-row[aria-selected='true'] { border-color: var(--rx-orange); }
+.tree-row .tw { width: 14px; color: var(--rx-ink-muted); font-size: 10px; text-align: center; }
+.tree-row .pname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-row .cnt { font-family: var(--rx-font-mono); font-size: var(--rx-type-value-size); color: var(--rx-ink-muted); white-space: nowrap; }
+.tree-row .pbadge { color: var(--rx-signal-green); font-size: var(--rx-type-value-size); align-self: center; }
+.tree-row .pmeta { grid-column: 2 / -1; color: var(--rx-ink-muted); font-size: var(--rx-type-value-size); }
+.tree-row .more { visibility: hidden; background: none; border: 0; padding: 0 4px; color: var(--rx-ink-muted); font-size: 16px; line-height: 1; border-radius: var(--rx-radius-sm); }
+.tree-row:hover .more, .tree-row:focus .more, .tree-row:focus-within .more, .tree-row[aria-selected='true'] .more, .tree-row .more[aria-expanded='true'] { visibility: visible; }
+.tree-row .more:hover, .tree-row .more[aria-expanded='true'] { color: var(--rx-orange); }
+.tree-row.folder-row { background: var(--rx-panel-800); }
+.tree-row.folder-row .pname::before { content: '▣'; color: var(--rx-orange); margin-right: 6px; font-weight: 400; }
+.tree-row.system { opacity: 0.7; }
+.tree-row.system .pname::before { content: '⚑'; color: var(--rx-ink-muted); }
+.tree-row.open { border-left: 3px solid var(--rx-signal-green); }
+.tree-divider { flex: none; height: 1px; background: var(--rx-hairline); margin: 6px 0 4px; }
+.tree-empty { flex: none; padding: 2px 8px; color: var(--rx-ink-muted); font-size: var(--rx-type-value-size); }
+.row-menu { position: fixed; z-index: 90; min-width: 210px; padding: 4px 0; background: var(--rx-panel-700); border: 1px solid var(--rx-hairline); border-radius: var(--rx-radius-md); box-shadow: 0 8px 24px color-mix(in srgb, var(--rx-panel-900) 70%, transparent); }
+.row-menu .item { display: flex; justify-content: space-between; gap: 16px; width: 100%; padding: 5px 12px; background: none; border: 0; text-align: left; color: var(--rx-ink); }
+.row-menu .item:hover:not(:disabled), .row-menu .item:focus-visible { background: var(--rx-panel-800); color: var(--rx-orange); }
+.row-menu .item:disabled { color: var(--rx-ink-muted); cursor: default; }
+.row-menu .item .key { font-family: var(--rx-font-mono); font-size: 11px; color: var(--rx-ink-muted); }
+.row-menu .sep { height: 1px; margin: 4px 0; background: var(--rx-hairline); }
+/* «Перемістити «name»»: a radio tree */
+.move-dialog { width: min(420px, calc(100vw - 32px)); }
+.move-dialog > .body { grid-template-columns: 1fr; }
+.move-dialog > footer .new-folder { margin-right: auto; }
+.move-tree { display: flex; flex-direction: column; max-height: 50vh; overflow: auto; }
+.move-tree .pick { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0 8px; align-items: center; padding: 5px 8px; border: 1px solid transparent; border-radius: var(--rx-radius-sm); cursor: pointer; }
+.move-tree .pick.sel { border-color: var(--rx-orange); background: var(--rx-panel-700); }
+.move-tree .pick input { accent-color: var(--rx-orange); margin: 0; }
+.move-tree .pick .pname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.move-tree .pick.folder .pname::before { content: '▣ '; }
+.move-tree .pick.system .pname { color: var(--rx-ink-muted); }
+.move-tree .pick.system .pname::before { content: '⚑ '; }
+.move-tree .pick .cnt { font-family: var(--rx-font-mono); font-size: 11px; color: var(--rx-ink-muted); white-space: nowrap; }
+.move-tree .divider { height: 1px; background: var(--rx-hairline); margin: 6px 0 4px; }
+@media (hover: none), (max-width: 600px) {
+  .tree-row .more { visibility: visible; min-width: 32px; min-height: 32px; }
+  .row-menu .item { min-height: 44px; align-items: center; }
+  .move-tree .pick { min-height: 44px; }
+}
 .open-path { display: flex; gap: 8px; }
 .open-path input { flex: 1; min-width: 0; background: var(--rx-panel-900); color: var(--rx-ink); border: 1px solid var(--rx-hairline); border-radius: var(--rx-radius-sm); padding: 4px 8px; }
 .empty-state .card .project-picker { margin-top: 12px; }
-.empty-state .card .project-row { color: var(--rx-ink); }
+.empty-state .card .tree-row { color: var(--rx-ink); }
 
 /* FX popover: expandable plugin rows with parameter sliders */
 .popover { max-height: min(70vh, 560px); overflow-y: auto; width: 360px; max-width: calc(100vw - 16px); }

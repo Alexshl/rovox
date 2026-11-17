@@ -12,6 +12,7 @@ import { ArrangeView } from './arrange';
 import { MixerView } from './mixer';
 import { textDialog } from './dialog';
 import { importController } from './importwizard';
+import { openMoveDialog } from './folders';
 import { openProjectDialog } from './projects';
 import { openRenderDialog } from './render';
 import { NARROW_QUERY, PHONE_QUERY, type Sheet, isNarrow, isPhone, openSheet, watchMedia } from './sheet';
@@ -378,6 +379,7 @@ export class Shell {
       menu(t('menu.file'), () => [
         { label: t('menu.file.new'), action: () => void this.promptNewProject() },
         { label: t('menu.file.open'), action: () => openProjectDialog(app) },
+        { label: t('menu.file.moveToFolder'), disabled: !p(), action: () => p() && void openMoveDialog(app, { kind: 'project', id: p()!.id, name: p()!.name || p()!.id }) },
         { label: t('import.menu'), key: 'Ctrl+I', action: () => importController(app).openDialog() },
         { label: t('menu.file.save'), key: 'Ctrl+S', disabled: !p(), action: () => void app.cmd('project.save') },
         { separator: true, label: '' },

@@ -13,6 +13,7 @@ import { lvImport } from './parts/lv.import';
 import type { MessageKey } from './uk';
 import { lvNarrow } from './parts/lv.narrow';
 import { lvLog } from './parts/lv.log';
+import { lvFolders } from './parts/lv.folders';
 
 export const lv: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -282,4 +283,5 @@ export const lv: Record<MessageKey, string> = {
   ...lvImport,
   ...lvNarrow,
   ...lvLog,
+  ...lvFolders,
 };

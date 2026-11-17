@@ -7,6 +7,7 @@
 import { ukImport } from './parts/uk.import';
 import { ukNarrow } from './parts/uk.narrow';
 import { ukLog } from './parts/uk.log';
+import { ukFolders } from './parts/uk.folders';
 
 export const uk = {
   // ---- menus -------------------------------------------------------------
@@ -276,6 +277,7 @@ export const uk = {
   ...ukImport,
   ...ukNarrow,
   ...ukLog,
+  ...ukFolders,
 } as const;
 
 export type MessageKey = keyof typeof uk;

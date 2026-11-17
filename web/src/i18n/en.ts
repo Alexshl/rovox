@@ -7,6 +7,7 @@ import { enImport } from './parts/en.import';
 import type { MessageKey } from './uk';
 import { enNarrow } from './parts/en.narrow';
 import { enLog } from './parts/en.log';
+import { enFolders } from './parts/en.folders';
 
 export const en: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -276,4 +277,5 @@ export const en: Record<MessageKey, string> = {
   ...enImport,
   ...enNarrow,
   ...enLog,
+  ...enFolders,
 };

@@ -14,6 +14,7 @@ import { ltImport } from './parts/lt.import';
 import type { MessageKey } from './uk';
 import { ltNarrow } from './parts/lt.narrow';
 import { ltLog } from './parts/lt.log';
+import { ltFolders } from './parts/lt.folders';
 
 export const lt: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -283,4 +284,5 @@ export const lt: Record<MessageKey, string> = {
   ...ltImport,
   ...ltNarrow,
   ...ltLog,
+  ...ltFolders,
 };

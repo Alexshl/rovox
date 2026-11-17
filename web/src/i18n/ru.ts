@@ -13,6 +13,7 @@ import { ruImport } from './parts/ru.import';
 import type { MessageKey } from './uk';
 import { ruNarrow } from './parts/ru.narrow';
 import { ruLog } from './parts/ru.log';
+import { ruFolders } from './parts/ru.folders';
 
 export const ru: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -282,4 +283,5 @@ export const ru: Record<MessageKey, string> = {
   ...ruImport,
   ...ruNarrow,
   ...ruLog,
+  ...ruFolders,
 };

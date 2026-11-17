@@ -13,6 +13,7 @@ import { svImport } from './parts/sv.import';
 import type { MessageKey } from './uk';
 import { svNarrow } from './parts/sv.narrow';
 import { svLog } from './parts/sv.log';
+import { svFolders } from './parts/sv.folders';
 
 export const sv: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -282,4 +283,5 @@ export const sv: Record<MessageKey, string> = {
   ...svImport,
   ...svNarrow,
   ...svLog,
+  ...svFolders,
 };

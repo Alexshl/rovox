@@ -13,6 +13,7 @@ import { deImport } from './parts/de.import';
 import type { MessageKey } from './uk';
 import { deNarrow } from './parts/de.narrow';
 import { deLog } from './parts/de.log';
+import { deFolders } from './parts/de.folders';
 
 export const de: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -282,4 +283,5 @@ export const de: Record<MessageKey, string> = {
   ...deImport,
   ...deNarrow,
   ...deLog,
+  ...deFolders,
 };

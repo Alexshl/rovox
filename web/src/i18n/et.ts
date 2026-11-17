@@ -13,6 +13,7 @@ import { etImport } from './parts/et.import';
 import type { MessageKey } from './uk';
 import { etNarrow } from './parts/et.narrow';
 import { etLog } from './parts/et.log';
+import { etFolders } from './parts/et.folders';
 
 export const et: Record<MessageKey, string> = {
   // ---- menus -------------------------------------------------------------
@@ -282,4 +283,5 @@ export const et: Record<MessageKey, string> = {
   ...etImport,
   ...etNarrow,
   ...etLog,
+  ...etFolders,
 };
