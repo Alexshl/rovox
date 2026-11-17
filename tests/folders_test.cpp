@@ -577,7 +577,7 @@ ROVOX_TEST (folders, project_move_does_not_change_revision_or_undo)
     const auto id = newIn (env, t, "Steady");
     okIn (env, t, "track.create", { { "name", "Drums" } }, id);
     const auto revision = env.project (id).revision();
-    const auto history = okIn (env, t, "history.list", {}, id);
+    const auto history = okIn (env, t, "history.list", json::object(), id);
     const bool dirty = env.project (id).dirty();
     const auto folderId = okIn (env, t, "folder.create", { { "name", "Somewhere" } })["folder"]["folder_id"];
 
@@ -586,7 +586,7 @@ ROVOX_TEST (folders, project_move_does_not_change_revision_or_undo)
     CHECK (moved["folder_id"] == folderId);
 
     CHECK (env.project (id).revision() == revision);
-    CHECK (okIn (env, t, "history.list", {}, id) == history);
+    CHECK (okIn (env, t, "history.list", json::object(), id) == history);
     CHECK (env.project (id).dirty() == dirty);
     CHECK (okIn (env, t, "project.catalog")["projects"][0]["folder_id"] == folderId);
     CHECK (okIn (env, t, "project.list")["projects"][0]["folder_id"] == folderId);
@@ -612,9 +612,9 @@ ROVOX_TEST (folders, project_move_works_for_closed_and_remote_only_projects)
         env.pm.setStorage (rs);
 
         const auto closed = newIn (env, t, "Closed here");
-        okIn (env, t, "project.save", {}, closed);
+        okIn (env, t, "project.save", json::object(), closed);
         const auto remote = newIn (env, t, "Only in the bucket");
-        okIn (env, t, "project.save", {}, remote);
+        okIn (env, t, "project.save", json::object(), remote);
         const auto remoteDir = env.project (remote).dir();
         REQUIRE (waitFor ([&] { return rs->status (t, remote)["synced_revision"] == env.project (remote).revision(); }));
         REQUIRE (waitFor ([&] { return rs->status (t, closed)["synced_revision"] == env.project (closed).revision(); }));

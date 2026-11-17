@@ -347,7 +347,8 @@ ROVOX_TEST (mcp, tools_list_has_schemas_unique_names_and_pagination)
         static const std::set<std::string> global = { "project.list", "project.new", "project.open", "job.get", "job.cancel", "job.list", "events.poll", "upload.status", "upload.finish", "review.resolve", "review.wait",
                                                       "project.catalog", "plugin.catalog", "plugin.rescan", "plugin.probe", "plugin.tag", "plugin.unblacklist",
                                                       "template.list", "template.get", "template.delete", "template.new", "delivery.list_adapters",
-                                                      "recipe.list", "recipe.get", "recipe.save", "recipe.delete", "usage.report", "usage.summary" };
+                                                      "recipe.list", "recipe.get", "recipe.save", "recipe.delete", "usage.report", "usage.summary",
+                                                      "folder.list", "folder.create", "folder.rename", "folder.move", "folder.delete", "project.move" };
 
         if (! global.count (name))
             CHECK (t["inputSchema"]["properties"].contains ("project_id"));
