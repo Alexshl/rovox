@@ -1084,3 +1084,19 @@ ROVOX_TEST (rpp, single_point_volume_envelope_is_a_constant_gain)
     REQUIRE (env.run (id2, "import.rpp", { { "path", (dir / "u.RPP").string() } }).ok);
     CHECK_NEAR (te::getAudioTracks (env.project (id2).edit())[0]->getVolumePlugin()->getVolumeDb(), -6.02, 0.05);
 }
+
+ROVOX_TEST (rpp, automatic_fade_length_longer_than_the_manual_one_plays)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("autofade");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -6, 1.0, 48000) }, 48000, 24);
+    std::string id;
+    // FADEIN <shape> <length> <automatic length> ...: the 0.5 s automatic fade wins over the 0.01 s manual one
+    auto autoFade = importAndRender (env, dir, panRpp ("    VOLPAN 1 0 -1 -1 1", "      FADEIN 0 0.01 0.5 0 0 0 0"), id);
+    auto manual = importAndRender (env, dir, panRpp ("    VOLPAN 1 0 -1 -1 1", "      FADEIN 0 0.5 0 0 0 0 0"), id);
+    auto none = importAndRender (env, dir, panRpp ("    VOLPAN 1 0 -1 -1 1", "      FADEIN 0 0.01 0 0 0 0 0"), id);
+    REQUIRE (autoFade.size() >= 2);
+    const double a = peakOf (autoFade[0], 11520, 12480), m = peakOf (manual[0], 11520, 12480), n = peakOf (none[0], 11520, 12480);
+    CHECK_NEAR (20.0 * std::log10 (a), 20.0 * std::log10 (m), 0.05);
+    CHECK (a < 0.8 * n);
+}

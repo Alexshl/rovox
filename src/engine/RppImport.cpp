@@ -454,7 +454,8 @@ struct Importer
         {
             const auto* l = item.line (fadeIn ? "FADEIN" : "FADEOUT");
 
-            if (const double len = toDouble (l, 1, 0.0); len > 0.0)
+            // field 1 = fade length, field 2 = the automatic (crossfade) length REAPER keeps in the file: the longer one plays
+            if (const double len = std::max (toDouble (l, 1, 0.0), toDouble (l, 2, 0.0)); len > 0.0)
                 setItemFade (*clip, fadeIn, len, fades::fromProjectFields (toDouble (l, 0, 0.0), toDouble (l, 5, 0.0), toDouble (l, 7, 1.0), toDouble (l, 8, 0.0), toDouble (l, 9, 0.0)));
         }
 
