@@ -1067,3 +1067,20 @@ ROVOX_TEST (rpp, master_volume_is_imported)
     CHECK_NEAR (20.0 * std::log10 (peakOf (out[0], 4800, 43200)), -6.0 - 6.02, 0.15);
     CHECK_NEAR (te::volumeFaderPositionToDB (env.project (id).edit().getMasterVolumePlugin()->volume.get()), -6.02, 0.05);
 }
+
+ROVOX_TEST (rpp, single_point_volume_envelope_is_a_constant_gain)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("volenv");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -12, 1.0, 48000) }, 48000, 24);
+    std::string id;
+    auto out = importAndRender (env, dir, panRpp ("    VOLPAN 0.5 0 -1 -1 1\n    <VOLENV2\n      ACT 1 -1\n      VOLTYPE 1\n      PT 0 1.41426662 0\n    >", ""), id);
+    REQUIRE (out.size() >= 2);
+    CHECK_NEAR (20.0 * std::log10 (peakOf (out[0], 4800, 43200)), -12.0 - 6.02 + 3.01, 0.15);
+
+    // an inactive envelope changes nothing
+    const auto id2 = env.newProject ("volenv2");
+    std::ofstream (dir / "u.RPP") << panRpp ("    VOLPAN 0.5 0 -1 -1 1\n    <VOLENV2\n      ACT 0 -1\n      PT 0 2 0\n    >", "");
+    REQUIRE (env.run (id2, "import.rpp", { { "path", (dir / "u.RPP").string() } }).ok);
+    CHECK_NEAR (te::getAudioTracks (env.project (id2).edit())[0]->getVolumePlugin()->getVolumeDb(), -6.02, 0.05);
+}

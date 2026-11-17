@@ -1003,7 +1003,20 @@ struct Importer
 
                 if (auto* vp = at->getVolumePlugin())
                 {
-                    vp->setVolumeDb ((float) linearToDbSafe (node.number ("VOLPAN", 0, 1.0)));
+                    double volume = node.number ("VOLPAN", 0, 1.0);
+
+                    // active volume envelope (<VOLENV2>, `PT time value shape`, the value is a linear gain): one point = a constant gain on top of the fader
+                    if (auto* env = node.block ("VOLENV2"); env != nullptr && env->number ("ACT", 0, 1.0) != 0.0)
+                    {
+                        const auto points = env->lines ("PT");
+
+                        if (points.size() == 1 && points[0]->size() > 2)
+                            volume *= env->number ("PT", 1, 1.0);
+                        else if (points.size() > 1)
+                            report.warnings.push_back ({ { "code", "ENVELOPE_IGNORED" }, { "message", "a volume envelope with several points is not imported" }, { "track_id", trackId } });
+                    }
+
+                    vp->setVolumeDb ((float) linearToDbSafe (volume));
                     vp->setPan ((float) std::clamp (node.number ("VOLPAN", 1, 0.0), -1.0, 1.0));
 
                     // per-track override of the project's pan mode / law (`PANMODE n` line, VOLPAN's third value = law as a linear gain, -1 = project)
