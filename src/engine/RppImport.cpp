@@ -973,7 +973,11 @@ struct Importer
 
             if (busFlag == 1 && busDepth == 1)
             {
-                created = edit.insertNewFolderTrack (where, nullptr, false);
+                // a folder that has a fader, pan or FX of its own mixes its children through them (Tracktion: a submix folder)
+                const auto* chainNode = node.block ("FXCHAIN");
+                const bool shaped = std::abs (node.number ("VOLPAN", 0, 1.0) - 1.0) > 1e-6 || std::abs (node.number ("VOLPAN", 1, 0.0)) > 1e-6
+                                    || (chainNode != nullptr && ! collectChain (*chainNode).empty());
+                created = edit.insertNewFolderTrack (where, nullptr, shaped);
                 ++report.folders;
             }
             else
@@ -1029,7 +1033,13 @@ struct Importer
                 for (auto* item : node.blocks ("ITEM"))
                     importItem (*item, *at, trackId);
             }
-            else if (! node.blocks ("ITEM").empty())
+            else if (auto* ft = dynamic_cast<te::FolderTrack*> (track); ft != nullptr && ft->isSubmixFolder() && ft->getVolumePlugin() != nullptr)
+            {
+                ft->getVolumePlugin()->setVolumeDb ((float) linearToDbSafe (node.number ("VOLPAN", 0, 1.0)));
+                ft->getVolumePlugin()->setPan ((float) std::clamp (node.number ("VOLPAN", 1, 0.0), -1.0, 1.0));
+            }
+
+            if (dynamic_cast<te::AudioTrack*> (track) == nullptr && ! node.blocks ("ITEM").empty())
             {
                 report.warnings.push_back ({ { "code", "FOLDER_ITEMS_DROPPED" }, { "message", "items on a folder track are not imported" }, { "track_id", trackId } });
             }
@@ -1040,9 +1050,7 @@ struct Importer
 
                 for (auto& cfx : collectChain (*chain))
                 {
-                    auto* at = dynamic_cast<te::AudioTrack*> (track);
-
-                    if (at != nullptr && (mapStockFx (cfx, at->pluginList, trackId, (long) index, trackGuid) || mapJsfx (cfx, at->pluginList, trackId)))
+                    if (mapStockFx (cfx, track->pluginList, trackId, (long) index, trackGuid) || mapJsfx (cfx, track->pluginList, trackId))
                         continue;
 
                     report.unsupported.push_back ({ { "kind", "fx" }, { "name", fxDisplayName (*cfx.node) }, { "format", cfx.node->name }, { "track_id", trackId } });

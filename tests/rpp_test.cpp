@@ -1100,3 +1100,18 @@ ROVOX_TEST (rpp, automatic_fade_length_longer_than_the_manual_one_plays)
     CHECK_NEAR (20.0 * std::log10 (a), 20.0 * std::log10 (m), 0.05);
     CHECK (a < 0.8 * n);
 }
+
+ROVOX_TEST (rpp, folder_fader_applies_to_its_children)
+{
+    test::Env env;
+    const auto dir = test::makeTempDir ("folderfader");
+    test::writeWav (dir / "item.wav", { test::sine (1000, -6, 1.0, 48000) }, 48000, 24);
+    const std::string rppText = "<REAPER_PROJECT 0.1 \"7.0/macOS-arm64\" 1700000000\n  PANLAW 1\n  PANMODE 3\n  TEMPO 120 4 4 0\n"
+                                "  <TRACK {AAAAAAAA-0000-0000-0000-0000000000A1}\n    NAME \"Bus\"\n    VOLPAN 0.5 0 -1 -1 1\n    ISBUS 1 1\n  >\n"
+                                "  <TRACK {AAAAAAAA-0000-0000-0000-0000000000A2}\n    NAME \"Child\"\n    VOLPAN 1 0 -1 -1 1\n    ISBUS 2 -1\n"
+                                "    <ITEM\n      POSITION 0\n      LENGTH 1\n      <SOURCE WAVE\n        FILE \"item.wav\"\n      >\n    >\n  >\n>\n";
+    std::string id;
+    auto out = importAndRender (env, dir, rppText, id);
+    REQUIRE (out.size() >= 2);
+    CHECK_NEAR (20.0 * std::log10 (peakOf (out[0], 4800, 43200)), -6.0 - 6.02, 0.15);
+}
